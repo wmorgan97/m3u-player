@@ -802,7 +802,7 @@ function renderChips() {
   const showGroups = groups.length > 1 || (groups[0] && groups[0].name);
   const pinned = new Set(p.homeGroups || []);
   if (pinned.size) groups.sort((a, b) => pinned.has(b.name) - pinned.has(a.name));   // stable: starred groups first, then your order
-  $('#chips').hidden = !showGroups;
+  $('#chips').hidden = !showGroups || discoverMode();
   $('#chips').innerHTML = chip('All', visibleCount, state.group === null, 'data-all') +
     (showGroups ? groups.map(g => chip(g.name ? prettyGroup(g.name) : UNGROUPED, g.count, state.group === g.name,
       `data-group="${esc(g.name)}" ${locked(g.name) ? 'data-locked="1"' : ''}`, locked(g.name))).join('') : '');
@@ -842,6 +842,9 @@ function renderDiscover() {
   const hero = entry.recent.find(it => it.logo) || entry.recent[0];
   const what = tab === 'movies' ? 'movies' : 'series';
   list.className = 'list discover';
+  $('#chips').hidden = true;
+  view.classList.add('vod');
+  const groupTiles = groups.map(g => `<li class="gtile" data-see="${esc(g.name)}" style="--hue:${hueOf(g.name)}"><b>${esc(prettyGroup(g.name) || UNGROUPED)}</b><span>${g.count.toLocaleString()}</span></li>`).join('');
   list.innerHTML = `
     ${hero ? `<li class="hero" data-shelf="hero" data-k="0" style="--hue:${hueOf(hero.name)}">
       ${hero.logo ? `<img class="hero-bg" src="${esc(hero.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
@@ -855,6 +858,7 @@ function renderDiscover() {
         </div>
       </div></li>` : ''}
     ${shelfHtml('Recently added', 'recent', entry.recent.slice(0, 40))}
+    <li class="shelf"><div class="shelf-head"><h3>Browse by group</h3><span class="muted">${groups.length} groups</span></div><ul class="shelf-row gtiles">${groupTiles}</ul></li>
     ${groups.slice(0, 40).map(g => shelfHtml(prettyGroup(g.name) || UNGROUPED, 'g:' + g.name, (entry.groups.get(g.name) || []).slice(0, 24), { total: g.count, group: g.name, pending: !entry.groups.has(g.name) })).join('')}
     ${groups.length > 40 ? `<li class="muted center shelf-note">${(groups.length - 40).toLocaleString()} more groups: use the chips above.</li>` : ''}`;
   shelfItems.set('hero', [hero].filter(Boolean));
@@ -883,6 +887,7 @@ function applyFilter({ keep = false } = {}) {
     return;
   }
   shelfObserver?.disconnect();
+  view.classList.toggle('vod', state.tab !== 'live' && p.kind === 'xtream');
   const q = state.query;
   const items = currentItems();
   state.filtered = items.filter(c => {
