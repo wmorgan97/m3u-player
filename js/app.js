@@ -1206,7 +1206,8 @@ function downloadMenu(item) {
   menu(`${disk ? 'Save to disk' : 'Download'}: ${item.name}`, [
     pick('720', 'Standard (720p, ~1 GB per 2 hours)'),
     pick('1080', 'High (1080p, ~2.5 GB per 2 hours)'),
-    pick('orig', 'Original quality (biggest)'),
+    pick('orig', disk ? 'Best for playback (H.264 up to 1080p)' : 'Original quality (biggest)'),
+    disk && { label: 'Exact original file (4K stays 4K; plays in VLC/TV apps, maybe not in the browser)', fn: () => saveToDisk(item, 'file') },
     disk && { label: 'Keep inside the app instead (browser storage)', fn: () => menu('Quality', [
       { label: 'Standard (720p)', fn: () => startDownload(item, '720') }, { label: 'High (1080p)', fn: () => startDownload(item, '1080') }, { label: 'Original', fn: () => startDownload(item, 'orig') }]) },
   ]);
@@ -1217,8 +1218,9 @@ async function saveToDisk(item, q) {
   if (!canSync()) return toast('Downloads need your server connection');
   if (dlActive) return toast('One download at a time: wait for the current one to finish');
   const safe = item.name.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const ext = q === 'file' ? ((/\.(mkv|mp4|avi|mov|ts|m4v)(\?|$)/i.exec(item.url) || [])[1] || 'mkv').toLowerCase() : 'mp4';
   let handle;
-  try { handle = await showSaveFilePicker({ suggestedName: `${safe}.mp4`, types: [{ description: 'MP4 video', accept: { 'video/mp4': ['.mp4'] } }] }); } catch { return; }
+  try { handle = await showSaveFilePicker({ suggestedName: `${safe}.${ext}`, types: [{ description: ext === 'mp4' ? 'MP4 video' : `${ext.toUpperCase()} video`, accept: { [ext === 'mp4' ? 'video/mp4' : 'application/octet-stream']: [`.${ext}`] } }] }); } catch { return; }
   const id = `dl-${uid()}`;
   const meta = { id, name: item.name, logo: item.logo || '', group: item.group || '', year: item.year || '', kind: item.kind === 'episode' ? 'episode' : 'movie', q, bytes: 0, parts: 0, done: false, at: Date.now(), orig: item.url, src: item.src, disk: true, file: handle.name };
   state.downloads[id] = meta;
@@ -1277,7 +1279,7 @@ async function showDownloads() {
     ${list.length ? `<ul class="cards">${list.map(m => `<li class="card dl" data-dl="${m.id}">
       <span class="hs-poster">${m.logo ? `<img src="${esc(m.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
       <span class="card-text"><span class="card-title">${esc(m.name)}</span>
-        <span class="muted">${m.done ? `${m.disk ? `On disk: ${esc(m.file)} · ` : ''}${fmtBytes(m.bytes)} · ${m.q === 'orig' ? 'Original' : m.q + 'p'}${m.duration ? ` · ${fmtDur(m.duration)}` : ''}` : m.error ? `Stopped: ${esc(m.error)} · ${fmtBytes(m.bytes)} saved` : `${m.disk ? 'Saving to disk' : 'Downloading'}… ${fmtBytes(m.bytes)}${m.estimate ? ` of about ${fmtBytes(m.estimate)} (${Math.min(99, Math.round((m.bytes / m.estimate) * 100))}%)` : ''}`}</span>
+        <span class="muted">${m.done ? `${m.disk ? `On disk: ${esc(m.file)} · ` : ''}${fmtBytes(m.bytes)} · ${m.q === 'file' ? 'Exact original' : m.q === 'orig' ? 'Original' : m.q + 'p'}${m.duration ? ` · ${fmtDur(m.duration)}` : ''}` : m.error ? `Stopped: ${esc(m.error)} · ${fmtBytes(m.bytes)} saved` : `${m.disk ? 'Saving to disk' : 'Downloading'}… ${fmtBytes(m.bytes)}${m.estimate ? ` of about ${fmtBytes(m.estimate)} (${Math.min(99, Math.round((m.bytes / m.estimate) * 100))}%)` : ''}`}</span>
         ${!m.done && !m.error ? `<span class="bar dl-bar">${m.estimate ? `<i style="width:${Math.min(99, (m.bytes / m.estimate) * 100).toFixed(1)}%"></i>` : '<i class="indeterminate"></i>'}</span>` : ''}</span>
       ${m.done ? `<button class="btn primary small" data-act="play">${icon('play')} Play</button>` : m.error ? '<button class="btn small" data-act="retry">Retry</button>' : '<button class="btn small" data-act="cancel">Cancel</button>'}
       <button class="icon-btn" data-act="delete" aria-label="Delete">${icon('close')}</button>

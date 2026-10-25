@@ -12,6 +12,7 @@ import { join, sep, extname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isIP } from 'node:net';
 import { createHmac } from 'node:crypto';
+import { Readable } from 'node:stream';
 
 const FFMPEG = process.env.FFMPEG || 'C:\\ffmpeg\\ffmpeg.exe';
 const FFPROBE = process.env.FFPROBE || FFMPEG.replace(/ffmpeg(\.exe)?$/i, 'ffprobe$1');
@@ -268,8 +269,21 @@ export async function handleDownload(req, res, url, send, allowed) {
   let t;
   try { t = new URL(url.searchParams.get('url') || ''); } catch { return send(res, 400, 'Bad url'); }
   if (!allowed(t)) return send(res, 403, 'Address not allowed');
-  const q = ['720', '1080', 'orig'].includes(url.searchParams.get('q')) ? url.searchParams.get('q') : '720';
+  const q = ['720', '1080', 'orig', 'file'].includes(url.searchParams.get('q')) ? url.searchParams.get('q') : '720';
   const track = Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0));
+  if (q === 'file') {
+    // The provider's file exactly as it is (4K stays 4K, HEVC stays HEVC): for saving to a computer and playing in VLC etc.
+    await closeOthers(null, t.hostname);
+    const ctrl = new AbortController();
+    res.on('close', () => ctrl.abort());
+    let up;
+    try { up = await fetch(t.href, { headers: { 'user-agent': 'Mozilla/5.0' }, signal: ctrl.signal }); } catch (e) { return send(res, 502, `Upstream error: ${e.message}`); }
+    if (!up.ok || !up.body) return send(res, 502, `The provider replied ${up.status}`);
+    console.log(`[dl] file copy ${t.href.slice(0, 80)} ${up.headers.get('content-length') || '?'} bytes`);
+    res.writeHead(200, { 'content-type': up.headers.get('content-type') || 'application/octet-stream', 'access-control-allow-origin': '*', 'cache-control': 'no-store',
+      'x-mode': 'file', 'x-estimate': up.headers.get('content-length') || '0', 'access-control-expose-headers': 'x-duration, x-mode, x-estimate' });
+    return Readable.fromWeb(up.body).on('error', () => res.destroy()).pipe(res);
+  }
   const probe = await probeFile(t.href);
   if (!probe.duration) return send(res, 502, 'Could not read the file');
   const v = probe.video || {};
