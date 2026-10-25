@@ -212,13 +212,31 @@ function noteStall() {
   }
 }
 let transcodeVod = false;   // set per play: movies, episodes and catch-up get an on-demand (seekable) stream
+// VOD through the server: the stream begins at vodStart (seconds into the film); positions shown to the user
+// are vodStart + video time; the real length comes from the server's probe. Seeking to a point the current
+// stream doesn't have yet restarts the stream from there.
+let vodStart = 0, vodDuration = 0, pendingSeek = null;
+const viaServerVod = () => transcodeVod && String(player.lastUrl || '').startsWith('/hls');
+const vodPos = () => (viaServerVod() ? vodStart : 0) + video.currentTime;
+const vodTotal = () => vodDuration || (Number.isFinite(video.duration) ? (viaServerVod() ? vodStart : 0) + video.duration : 0) || (seekRange()?.end || 0) + (viaServerVod() ? vodStart : 0);
+function seekVod(t) {
+  const c = nowChannel();
+  if (!c) return;
+  t = Math.max(0, Math.min(t, (vodTotal() || Infinity) - 1));
+  const r = seekRange();
+  if (!viaServerVod()) { video.currentTime = t; return; }
+  if (t >= vodStart && r && t - vodStart <= r.end) { video.currentTime = t - vodStart; return; }
+  pendingSeek = t;                      // not remuxed yet (or before the start): restart the stream from there
+  setStatus(`Jumping to ${fmtDur(t)}…`);
+  playChannel(state.playing.list, state.playing.index);
+}
 function transcodeUrl(url) {
   if (isNative) return null;                 // the native app plays raw streams itself
   if (!serverProxy.available) return null;   // only our own server exposes /hls
   const key = state.settings.serverKey || '';
   if (serverProxy.needsKey && !key) return null;
   const b = bufferLevel();
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? '&vod=1' : ''}&url=${encodeURIComponent(url)}`;
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1&start=${Math.floor(vodStart)}` : ''}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -234,7 +252,7 @@ function warm(url) {
 }
 // Tell the server to drop a stream we've switched away from (IPTV accounts have few connections).
 function unwarm(url) {
-  const tc = url && transcodeUrl(url);
+  const tc = url && transcodeUrl(url);   // includes the VOD start offset, so it stops the right session
   if (!tc) return;
   warmed.delete(url);
   fetch(tc.replace('/hls?', '/hls/stop?'), { keepalive: true }).catch(() => {});
@@ -2611,7 +2629,8 @@ function updateControls() {
   if (!c) return;
   const live = isLiveChannel(c) && !Number.isFinite(video.duration);
   const r = seekRange();
-  const total = Number.isFinite(video.duration) ? video.duration : r?.end || 0;
+  const total = live ? 0 : vodTotal();
+  const pos = live ? video.currentTime : vodPos();
   const behind = live && r ? Math.max(0, r.end - video.currentTime) : 0;
   const atLive = !live || behind < 10;
   ctl.querySelector('[data-c="play"]').innerHTML = icon(video.paused ? 'play' : 'pause');
@@ -2622,8 +2641,11 @@ function updateControls() {
   $('#ctl-pct').style.width = now ? `${(((Date.now() - now[0]) / (now[1] - now[0])) * 100).toFixed(1)}%` : '0';
   $('.ctl-pbar').hidden = !now;
   const seek = $('#ctl-seek');
-  if (r && r.end > r.start && !seek.matches(':active')) seek.value = Math.round(((video.currentTime - r.start) / (r.end - r.start)) * 1000);
-  $('#ctl-time').textContent = live ? (atLive ? '' : `-${fmtDur(behind)}`) : `${fmtDur(video.currentTime)} / ${fmtDur(total)}`;
+  if (!seek.matches(':active')) {
+    if (live) { if (r && r.end > r.start) seek.value = Math.round(((video.currentTime - r.start) / (r.end - r.start)) * 1000); }
+    else if (total) seek.value = Math.round((pos / total) * 1000);
+  }
+  $('#ctl-time').textContent = live ? (atLive ? '' : `-${fmtDur(behind)}`) : `${fmtDur(pos)} / ${fmtDur(total)}`;
   const lv = $('#ctl-live');
   lv.hidden = !live;
   lv.classList.toggle('on', atLive);
@@ -2667,7 +2689,7 @@ function bindControls() {
       case 'play': video.paused ? video.play().catch(() => {}) : video.pause(); break;
       case 'prev': step(-1); break;
       case 'next': step(1); break;
-      case 'back30': video.currentTime = Math.max(r?.start ?? 0, video.currentTime - 30); if (video.paused) video.play().catch(() => {}); break;
+      case 'back30': if (isLiveChannel(nowChannel())) video.currentTime = Math.max(r?.start ?? 0, video.currentTime - 30); else seekVod(vodPos() - 30); if (video.paused) video.play().catch(() => {}); break;
       case 'live': if (r) video.currentTime = Math.max(r.start, r.end - 3); video.play().catch(() => {}); break;
       case 'list': channelsOverlay(); break;
       case 'mute': video.muted = !video.muted; break;
@@ -2679,7 +2701,11 @@ function bindControls() {
     showControls();
   });
   const seek = $('#ctl-seek');
-  seek.addEventListener('input', () => { const r = seekRange(); if (r) video.currentTime = r.start + (seek.value / 1000) * (r.end - r.start); showControls(); });
+  seek.addEventListener('input', () => {
+    if (isLiveChannel(nowChannel())) { const r = seekRange(); if (r) video.currentTime = r.start + (seek.value / 1000) * (r.end - r.start); }
+    showControls();
+  });
+  seek.addEventListener('change', () => { if (!isLiveChannel(nowChannel())) { const total = vodTotal(); if (total) seekVod((seek.value / 1000) * total); } });
   video.addEventListener('pause', () => { showControls(); clearTimeout(ctlHide); });
   video.addEventListener('play', showControls);
   setInterval(() => {
@@ -2720,8 +2746,8 @@ function bindKeys() {
       case 'ArrowUp': case 'PageUp': e.preventDefault(); step(-1); break;
       case 'ArrowDown': case 'PageDown': e.preventDefault(); step(1); break;
       case ' ': case 'k': e.preventDefault(); video.paused ? video.play().catch(() => {}) : video.pause(); showControls(); break;
-      case 'ArrowLeft': e.preventDefault(); video.currentTime = Math.max(seekRange()?.start ?? 0, video.currentTime - 30); showControls(); break;
-      case 'ArrowRight': e.preventDefault(); { const r = seekRange(); if (r) video.currentTime = Math.min(r.end - 3, video.currentTime + 30); showControls(); } break;
+      case 'ArrowLeft': e.preventDefault(); if (isLiveChannel(nowChannel())) video.currentTime = Math.max(seekRange()?.start ?? 0, video.currentTime - 30); else seekVod(vodPos() - 30); showControls(); break;
+      case 'ArrowRight': e.preventDefault(); if (isLiveChannel(nowChannel())) { const r = seekRange(); if (r) video.currentTime = Math.min(r.end - 3, video.currentTime + 30); } else seekVod(vodPos() + 30); showControls(); break;
       case 'm': video.muted = !video.muted; showControls(); break;
       case 'f': toggleFullscreen(); break;
       case 'l': channelsOverlay(); break;
@@ -2749,11 +2775,11 @@ let lastProgressSave = 0;
 function trackProgress(force = false) {
   const c = nowChannel();
   if (!c || !c.kind || c.kind === 'live' || c.kind === 'catchup') return;
-  const d = video.duration;
+  const d = viaServerVod() ? vodTotal() : video.duration;
   if (!Number.isFinite(d) || d < 60) return;
   if (!force && Date.now() - lastProgressSave < 5000) return;
   lastProgressSave = Date.now();
-  const t = video.currentTime;
+  const t = vodPos();
   state.progress[c.url] = { t, d, at: Date.now(), done: t / d > 0.93, item: { id: c.id, kind: c.kind, name: c.name, url: c.url, logo: c.logo, group: c.group, src: c.src } };
   const entries = Object.entries(state.progress);
   if (entries.length > MAX_PROGRESS) state.progress = Object.fromEntries(entries.sort((a, b) => b[1].at - a[1].at).slice(0, MAX_PROGRESS));
@@ -2925,16 +2951,26 @@ function nextBackup(c) {
 function tune(c, list, index) {
   if (nowChannel() !== c) return;
   transcodeVod = !isLiveChannel(c);
+  player.vod = transcodeVod;
+  const pr = state.progress[c.url];
+  const resumeAt = pr && !pr.done && pr.t > 30 ? pr.t : 0;
+  if (transcodeVod) {
+    vodStart = pendingSeek ?? resumeAt;   // a seek restart, or resume where you left off, else the beginning
+    vodDuration = pendingSeek !== null ? vodDuration : 0;
+    pendingSeek = null;
+    const tc = transcodeUrl(c.url);
+    if (tc && !vodDuration) fetch(tc.replace('/hls?', '/hls/info?')).then(r => r.json()).then(d => { if (nowChannel() === c && d.duration) { vodDuration = d.duration; updateControls(); } }).catch(() => {});
+  } else { vodStart = 0; vodDuration = 0; pendingSeek = null; }
   if (tuneFrom && tuneFrom.url !== c.url) unwarm(streamOf(tuneFrom));   // free the single provider slot right before connecting
   tuneFrom = null;
   player.play(streamOf(c)).then(ok => {
     if (!ok) return;
     setStatus('');
     setTimeout(() => { if (nowChannel() === c && !video.paused && video.currentTime > 2) retried.delete(c.url); }, 15_000);   // healthy again: allow a future retry
-    const pr = state.progress[c.url];
-    if (pr && !pr.done && pr.t > 30 && Number.isFinite(video.duration)) {
-      video.currentTime = pr.t;
-      toast(`Resumed at ${fmtDur(pr.t)}`, { action: 'Start over', fn: () => { video.currentTime = 0; } });
+    if (viaServerVod()) { if (vodStart === resumeAt && resumeAt) toast(`Resumed at ${fmtDur(resumeAt)}`, { action: 'Start over', fn: () => seekVod(0) }); }
+    else if (resumeAt && Number.isFinite(video.duration)) {
+      video.currentTime = resumeAt;
+      toast(`Resumed at ${fmtDur(resumeAt)}`, { action: 'Start over', fn: () => { video.currentTime = 0; } });
     }
   }).catch(err => {
     if (nowChannel() !== c) return;

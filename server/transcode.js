@@ -6,7 +6,7 @@
 //   GET /hls?url=<stream>&key=<PROXY_KEY>   -> 302 to /hls/<id>/index.m3u8
 //   GET /hls/<id>/<file>                    -> the generated playlist / segments
 
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { promises as fs, createReadStream, rmSync, mkdirSync } from 'node:fs';
 import { join, sep, extname } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -14,6 +14,7 @@ import { isIP } from 'node:net';
 import { createHmac } from 'node:crypto';
 
 const FFMPEG = process.env.FFMPEG || 'C:\\ffmpeg\\ffmpeg.exe';
+const FFPROBE = process.env.FFPROBE || FFMPEG.replace(/ffmpeg(\.exe)?$/i, 'ffprobe$1');
 const PROXY_KEY = process.env.PROXY_KEY || '';
 const ALLOW_PRIVATE = process.env.ALLOW_PRIVATE === '1';
 const ROOT = join(tmpdir(), 'm3u-hls');
@@ -57,7 +58,23 @@ function send(res, status, body, headers = {}) {
   res.end(body);
 }
 
-async function startSession(id, target, vod = false) {
+// VOD: the real length of a film/episode, read from the file header (cached). The app draws its timeline from
+// this, and seeks by asking for a new session that starts at that point (-ss), so every position is reachable
+// at once instead of only what has been remuxed so far.
+const durations = new Map();
+function probeDuration(target) {
+  if (durations.has(target)) return durations.get(target);
+  const job = new Promise(resolve => {
+    execFile(FFPROBE, ['-v', 'error', '-user_agent', 'Mozilla/5.0', '-show_entries', 'format=duration', '-of', 'csv=p=0', target],
+      { timeout: 20_000, windowsHide: true }, (err, out) => resolve(err ? 0 : Number(String(out).trim()) || 0));
+  });
+  durations.set(target, job);
+  job.then(d => { if (!d) durations.delete(target); });
+  setTimeout(() => durations.delete(target), 3600_000).unref();
+  return job;
+}
+
+async function startSession(id, target, vod = false, start = 0) {
   // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
   const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
   await fs.mkdir(dir, { recursive: true });
@@ -66,6 +83,7 @@ async function startSession(id, target, vod = false) {
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '2',
     '-rw_timeout', '15000000',                                   // 15s: a dead upstream fails fast instead of hanging
     '-probesize', '500000', '-analyzeduration', '500000',     // open the input fast (don't over-probe a known TS)
+    ...(vod && start > 0 ? ['-ss', String(start)] : []),   // VOD seek: begin remuxing from this point
     '-fflags', '+genpts+flush_packets', '-i', target,
     '-map', '0:v:0?', '-map', '0:a:0?',
     ...(REENCODE
@@ -79,13 +97,13 @@ async function startSession(id, target, vod = false) {
     '-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_init_time', '1',
     // Live: a rolling window. VOD (movies, episodes, catch-up): keep every segment and close the playlist
     // at the end, so the player gets a seekable timeline with a real duration instead of a "live" stream.
-    ...(vod ? ['-hls_list_size', '0', '-hls_playlist_type', 'event', '-hls_flags', 'append_list+independent_segments']
+    ...(vod ? ['-hls_list_size', '0', '-hls_playlist_type', 'event', '-hls_flags', 'append_list+independent_segments', '-copyts', '-start_at_zero']
             : ['-hls_list_size', '1000', '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments']),
     '-hls_segment_type', 'mpegts',
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
   ];
   const proc = spawn(FFMPEG, args, { windowsHide: true });
-  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod };
+  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start };
   console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
   proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
   proc.on('exit', () => { session.exited = true; });
@@ -151,12 +169,16 @@ export async function handleHls(req, res, url) {
   // start (or reuse) a transcode and serve its playlist. /hls/warm just starts it (pre-warm) and returns.
   const warm = parts.length === 2 && parts[1] === 'warm';
   const stop = parts.length === 2 && parts[1] === 'stop';
+  const info = parts.length === 2 && parts[1] === 'info';
   const target = url.searchParams.get('url');
   const key = url.searchParams.get('key') || '';
   if (!target) return send(res, 400, 'Missing url');
   if (stop) {   // the app switched away: free the provider connection right now instead of after the idle timeout
     if (PROXY_KEY && key !== PROXY_KEY) return send(res, 403, 'Wrong or missing proxy key');
-    try { stopSession(sessionId(new URL(target).href)); } catch {}
+    try {
+      const href = new URL(target).href, st = Math.max(0, Math.floor(Number(url.searchParams.get('start')) || 0));
+      stopSession(sessionId(st ? `${href}#${st}` : href));
+    } catch {}
     return send(res, 204, '');
   }
   if (PROXY_KEY && key !== PROXY_KEY) return send(res, 403, 'Wrong or missing proxy key');
@@ -164,8 +186,11 @@ export async function handleHls(req, res, url) {
   try { t = new URL(target); } catch { return send(res, 400, 'Bad url'); }
   if (!/^https?:$/.test(t.protocol)) return send(res, 400, 'Only http and https links');
   if (!ALLOW_PRIVATE && isPrivateHost(t.hostname)) return send(res, 403, 'Private addresses are blocked');
+  if (info) return send(res, 200, JSON.stringify({ duration: await probeDuration(t.href) }), { 'content-type': 'application/json', 'cache-control': 'no-store' });
 
-  const id = sessionId(t.href);
+  const vod = url.searchParams.get('vod') === '1';
+  const start = vod ? Math.max(0, Math.floor(Number(url.searchParams.get('start')) || 0)) : 0;
+  const id = sessionId(start ? `${t.href}#${start}` : t.href);
   let s = sessions.get(id);
   if (s && !s.exited && !warm) {
     // Stalled: ffmpeg alive but the playlist hasn't been touched for a while -> upstream froze. Restart it.
@@ -179,7 +204,7 @@ export async function handleHls(req, res, url) {
     // The app sends a warm on touch and the play a few ms later: both must wait for ONE start, or the
     // second ffmpeg is orphaned holding the only provider connection.
     if (!starting.has(id)) {
-      starting.set(id, (async () => { await closeOthers(id); return startSession(id, t.href, url.searchParams.get('vod') === '1'); })().finally(() => starting.delete(id)));
+      starting.set(id, (async () => { await closeOthers(id); return startSession(id, t.href, vod, start); })().finally(() => starting.delete(id)));
     }
     s = await starting.get(id);
   }

@@ -87,6 +87,7 @@ export class Player {
       if (left < 2500 && lastError) break;
       try {
         await this.attempt(candidate, mode, Math.max(2500, left));
+        this.lastUrl = candidate;
         return token === this.token;
       } catch (e) {
         if (token !== this.token) return false;
@@ -140,7 +141,7 @@ export class Player {
       v.addEventListener('error', bad);
 
       if (useHlsJs) {
-        const hls = this.hls = new Hls({ enableWorker: true, backBufferLength: 30, maxBufferLength: 60, maxMaxBufferLength: 120,
+        const hls = this.hls = new Hls({ enableWorker: true, backBufferLength: 30, maxBufferLength: 60, maxMaxBufferLength: 120, startPosition: this.vod ? 0 : -1,
           liveSyncDurationCount: this.liveSync || 3, liveMaxLatencyDurationCount: (this.liveSync || 3) + 6, fragLoadingMaxRetry: 6, levelLoadingMaxRetry: 6 });
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (!data.fatal) return;
