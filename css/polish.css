@@ -163,3 +163,28 @@
 
 /* Groups sheet: the drag handle owns the touch, so iOS never turns a drag into a page scroll */
 .ghandle { touch-action: none; -webkit-user-select: none; user-select: none; }
+
+/* ---------- Appearance settings (TiviMate-style customisation) ---------- */
+:root[data-density="compact"] .row { padding-top: 4px; padding-bottom: 4px; gap: 10px; contain-intrinsic-size: auto 50px; }
+:root[data-density="compact"] .row .logo { width: 38px; height: 38px; border-radius: 10px; }
+:root[data-density="compact"] .row-name { font-size: 14.5px; }
+:root[data-density="large"] .row { padding-top: 13px; padding-bottom: 13px; gap: 15px; contain-intrinsic-size: auto 82px; }
+:root[data-density="large"] .row .logo { width: 60px; height: 60px; border-radius: 14px; }
+:root[data-density="large"] .row-name { font-size: 17px; }
+:root.no-logos .row .logo { display: none; }
+.ch-num { flex: none; min-width: 2.4em; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; color: var(--muted); }
+.epg-next { opacity: .7; }
+
+/* ---------- Home: continue watching ---------- */
+.resume {
+  display: flex; align-items: center; gap: 14px; width: 100%; margin: 4px 0 18px; padding: 14px; text-align: left;
+  border: 1px solid var(--line); border-radius: 18px; color: var(--text); font: inherit; cursor: pointer;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--surface)), var(--surface));
+}
+.resume:active { transform: scale(.985); }
+.resume .logo { width: 56px; height: 56px; }
+.resume .row-name { font-size: 17px; }
+.resume .small-caps { font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; }
+.resume .bar { margin-top: 6px; }
+.resume-play { flex: none; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--accent); }
+.resume-play .ico { width: 18px; height: 18px; fill: #fff; stroke: none; margin-left: 2px; }

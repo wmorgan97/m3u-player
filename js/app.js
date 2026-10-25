@@ -19,7 +19,7 @@ const state = {
   favorites: [],
   recents: [],
   progress: {},    // url -> { t, d, at, done, item }  (movies & episodes)
-  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '' },
+  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '', density: 'standard', logos: true, numbers: false, showNext: true, mergeDupes: true, resumeCard: true, accent: '' },
   current: null,   // playlist being viewed (real, or virtual 'fav' / 'recent' / 'all')
   tab: 'live',     // 'live' | 'movies' | 'series' (Xtream playlists)
   group: null,     // null = all groups
@@ -96,6 +96,7 @@ async function init() {
     navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
   }
   if (!isNative) await detectServerProxy();
+  if (resumeChannel) ensureGuide([resumeChannel]);
   syncNow();
   document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
   await Promise.all(state.playlists.map(p => loadGuide(p.id)));
@@ -210,7 +211,13 @@ function unwarm(url) {
   fetch(tc.replace('/hls?', '/hls/stop?'), { keepalive: true }).catch(() => {});
 }
 
+const ACCENTS = { '': '#5b93ff', teal: '#2ec4b6', green: '#3ccf7a', purple: '#9b7bff', orange: '#ff9f43', red: '#ff5a6e' };
 function applySettings() {
+  const s = state.settings, root = document.documentElement;
+  root.dataset.density = s.density || 'standard';
+  root.classList.toggle('no-logos', s.logos === false);
+  root.classList.toggle('numbers', !!s.numbers);
+  root.style.setProperty('--accent', ACCENTS[s.accent] || ACCENTS['']);
   net.proxy = state.settings.proxy || (serverProxy.available && !serverProxy.needsKey ? serverProxyUrl() : '');
   net.streamProxy = state.settings.streamProxy;
   player.tsToHls = state.settings.tsToHls;
@@ -377,6 +384,22 @@ function playlistSub(p) {
   return parts.join(' · ');
 }
 
+// TiviMate-style "pick up where you left off": the last channel, what's on it now, one tap to play.
+let resumeChannel = null;
+function resumeCardHtml(c) {
+  resumeChannel = null;
+  if (!c || state.settings.resumeCard === false || !isLiveChannel(c)) return '';
+  resumeChannel = c;
+  const g = guideFor(c), nn = g && g.nowNext(c);
+  const now = nn?.now;
+  const pct = now ? ((Date.now() - now[0]) / (now[1] - now[0])) * 100 : 0;
+  ensureGuide([c]);
+  return `<button class="resume" data-resume>${logoHtml(c)}
+    <span class="row-text"><span class="muted small-caps">Continue watching</span><span class="row-name">${esc(c.name)}</span>
+      ${now ? `<span class="muted">${esc(now[2])} · ends ${fmtTime(now[1])}</span><span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}</span>
+    <span class="resume-play">${icon('play')}</span></button>`;
+}
+
 function showHome() {
   state.current = null;
   setTopbar({
@@ -412,6 +435,7 @@ function showHome() {
       ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
     ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search all channels" autocomplete="off" autocorrect="off" spellcheck="false"></label>` : ''}
+    ${resumeCardHtml(recentStrip[0])}
     ${state.recents.length ? `<div class="section-title">Jump back in</div>
       <div class="strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
     ${browse.length || pinnedAny ? `<div class="section-title split">Browse${browseEdit}</div>
@@ -450,6 +474,7 @@ function showHome() {
     if (m) return playlistMenu(byId(m.dataset.menu));
     const c = e.target.closest('[data-cw]');
     if (c) { const entry = cw[+c.dataset.cw]; return playChannel([entry.item], 0); }
+    if (e.target.closest('[data-resume]')) return playChannel(recentStrip, 0);
     const r = e.target.closest('[data-recent]');
     if (r) return playChannel(recentStrip, +r.dataset.recent);
     const b = e.target.closest('[data-browse]');
@@ -493,12 +518,27 @@ function channelKind(c) {
   if (/\/movie\//.test(u) || /\.(mp4|mkv|avi|mov|m4v|flv|wmv|mpg|mpeg)$/.test(u)) return 'movies';
   return 'live';   // .ts, .m3u8, /live/, or anything else is a live channel
 }
+// Providers list the same channel several times in a group (backup feeds). Show it once; the copies
+// become automatic fallbacks, tried in order if a stream fails (see tune()).
+function mergeDuplicates(list) {
+  const out = [], seen = new Map();
+  for (const c of list) {
+    const k = `${c.group || ''}\0${(c.tvgId || '').toLowerCase()}\0${normName(c.name)}`;
+    const first = seen.get(k);
+    if (first) { first.alts ||= []; if (c.url !== first.url && !first.alts.includes(c.url)) first.alts.push(c.url); continue; }
+    seen.set(k, c);
+    out.push(c);
+  }
+  return out;
+}
 // Split an M3U playlist's channels into live/movies/series once, caching on the playlist.
 function m3uKinds(p) {
   if (p.kind === 'xtream' || p.virtual) return null;
   if (!p._kinds) {
     const k = { live: [], movies: [], series: [] };
     for (const c of p.channels) { if (!isSeparator(c)) k[channelKind(c)].push(c); }
+    if (state.settings.mergeDupes !== false) k.live = mergeDuplicates(k.live);
+    k.live.forEach((c, i) => { c.num = i + 1; });
     k.series = groupSeries(k.series);            // "Show S01E04" rows become one series with seasons
     for (const s of k.series) if (s.kind === 'series') s.src = p.id;
     p._kinds = k;
@@ -619,6 +659,8 @@ function renderChips() {
   const chip = (label, n, active, attr, lock) =>
     `<button class="chip ${active ? 'active' : ''}" ${attr}>${lock ? icon('lock') : ''}${esc(label)}<span>${lock ? '' : n.toLocaleString()}</span></button>`;
   const showGroups = groups.length > 1 || (groups[0] && groups[0].name);
+  const pinned = new Set(p.homeGroups || []);
+  if (pinned.size) groups.sort((a, b) => pinned.has(b.name) - pinned.has(a.name));   // stable: starred groups first, then your order
   $('#chips').hidden = !showGroups;
   $('#chips').innerHTML = chip('All', visibleCount, state.group === null, 'data-all') +
     (showGroups ? groups.map(g => chip(g.name ? prettyGroup(g.name) : UNGROUPED, g.count, state.group === g.name,
@@ -693,7 +735,8 @@ function nowLine(c) {
   const { now, next } = g.nowNext(c);
   if (!now) return next ? `<span class="muted">Next ${fmtTime(next[0])}: ${esc(next[2])}</span>` : '';
   const pct = ((Date.now() - now[0]) / (now[1] - now[0])) * 100;
-  return `<span class="epg-now"><span class="muted">${esc(now[2])}</span><span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span></span>`;
+  const then = state.settings.showNext !== false && next ? `<span class="epg-next"> · ${fmtTime(next[0])} ${esc(next[2])}</span>` : '';
+  return `<span class="epg-now"><span class="muted">${esc(now[2])}${then}</span><span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span></span>`;
 }
 
 function progressBar(c) {
@@ -708,7 +751,7 @@ function rowHtml(c, i) {
   const sub = epg || (!state.group && c.group ? `<span class="muted">${esc(prettyGroup(c.group))}</span>` : '');
   return `<li class="row${selected ? ' selected' : ''}${playing ? ' playing' : ''}" data-i="${i}">
     ${state.selecting ? `<span class="check">${selected ? icon('check') : ''}</span>` : ''}
-    ${logoHtml(c)}
+    ${state.settings.numbers && c.num ? `<span class="ch-num">${c.num}</span>` : ''}${logoHtml(c)}
     <span class="row-text"><span class="row-name">${esc(c.name)}${archiveDays(c) ? '<span class="tag">Catch-up</span>' : ''}</span>${sub}${progressBar(c)}</span>
     ${state.selecting ? '' : `<button class="icon-btn star${favUrls.has(c.url) ? ' on' : ''}" data-act="fav" aria-label="Favorite">${icon('star')}</button>
     <button class="icon-btn" data-act="more" aria-label="Options">${icon('more')}</button>`}
@@ -1163,6 +1206,8 @@ const persistGuide = debounce(pid => { const g = guides.get(pid); if (g) db.set(
 const refreshAfterGuide = debounce(pid => {
   if (location.hash === `#/guide/${pid}`) return showGuide(byId(pid));
   if (state.current && !$('#guide')) rerenderRows();
+  const card = !state.current && $('.resume');
+  if (card && resumeChannel) card.outerHTML = resumeCardHtml(resumeChannel);   // fill in what's on, in place
 }, 250);
 function mergeGuide(p, d) {
   let g = guides.get(p.id);
@@ -1971,6 +2016,15 @@ async function settingsSheet() {
       <label>Send streams through the proxy<select name="streamProxy">
         ${[['http', 'Only http:// streams (recommended)'], ['all', 'All streams'], ['off', 'Never']].map(([v, l]) => `<option value="${v}" ${s.streamProxy === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>`}
+      <div class="section-title">Appearance</div>
+      <label>Row size<select name="density">${[['compact', 'Compact'], ['standard', 'Standard'], ['large', 'Large']].map(([v, l]) => `<option value="${v}" ${(s.density || 'standard') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Accent colour<select name="accent">${[['', 'Blue'], ['teal', 'Teal'], ['green', 'Green'], ['purple', 'Purple'], ['orange', 'Orange'], ['red', 'Red']].map(([v, l]) => `<option value="${v}" ${(s.accent || '') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="switch"><span><b>Channel logos</b></span><input type="checkbox" name="logos" ${s.logos !== false ? 'checked' : ''}></label>
+      <label class="switch"><span><b>Channel numbers</b></span><input type="checkbox" name="numbers" ${s.numbers ? 'checked' : ''}></label>
+      <label class="switch"><span><b>Show what’s on next</b><span class="muted">After the current programme on each channel row.</span></span><input type="checkbox" name="showNext" ${s.showNext !== false ? 'checked' : ''}></label>
+      <div class="section-title">Channels</div>
+      <label class="switch"><span><b>Merge duplicate channels</b><span class="muted">Show each channel once; the copies become backup streams, used automatically if one fails.</span></span><input type="checkbox" name="mergeDupes" ${s.mergeDupes !== false ? 'checked' : ''}></label>
+      <label class="switch"><span><b>Continue watching on Home</b><span class="muted">Your last channel at the top of Home, one tap to play.</span></span><input type="checkbox" name="resumeCard" ${s.resumeCard !== false ? 'checked' : ''}></label>
       <div class="section-title">Playback</div>
       <label class="switch"><span><b>Try HLS for .ts links</b><span class="muted">Most IPTV providers also serve each .ts channel as .m3u8, which iPhone can play. Tried first, with the original link as backup.</span></span>
         <input type="checkbox" name="tsToHls" ${s.tsToHls ? 'checked' : ''}></label>
@@ -1988,8 +2042,16 @@ async function settingsSheet() {
       el.querySelector('form').onsubmit = async e => {
         e.preventDefault();
         const f = new FormData(e.target);
-        Object.assign(state.settings, { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')), tsToHls: f.get('tsToHls') === 'on' });
+        const mergeWas = state.settings.mergeDupes !== false;
+        Object.assign(state.settings, {
+          ...(f.has('proxy') ? { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')) } : {}),
+          tsToHls: f.get('tsToHls') === 'on',
+          density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
+          showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on', resumeCard: f.get('resumeCard') === 'on',
+        });
+        if (mergeWas !== state.settings.mergeDupes) state.playlists.forEach(invalidate);
         applySettings();
+        rerender();
         await db.set('settings', state.settings);
         closeSheet();
         toast('Settings saved');
@@ -2090,6 +2152,7 @@ function bindPlayer() {
   player.onFatal = msg => {
     const c = nowChannel();
     if (c && !retried.has(c.url)) { retried.add(c.url); setStatus('Reconnecting…'); setTimeout(() => { if (nowChannel() === c) playChannel(state.playing.list, state.playing.index); }, 1200); return; }
+    if (c && nextBackup(c)) { setStatus('Trying a backup stream…'); setTimeout(() => { if (nowChannel() === c) playChannel(state.playing.list, state.playing.index); }, 300); return; }
     setStatus(msg, true);
   };
   // Stall watchdog: live video whose clock hasn't advanced for 12s while it should be playing -> reload the stream.
@@ -2209,11 +2272,21 @@ function playChannel(list, index) {
   tuneTimer = setTimeout(() => tune(c, list, index), settleMs);
 }
 let tuneTimer = 0, lastTune = 0, tuneFrom = null;
+// Backup feeds of a merged channel: which one is in use this session (0 = the main url).
+const backupIdx = new WeakMap();
+const streamOf = c => (backupIdx.get(c) ? c.alts[backupIdx.get(c) - 1] : c.url);
+function nextBackup(c) {
+  const i = backupIdx.get(c) || 0;
+  if (!c.alts || i >= c.alts.length) { backupIdx.delete(c); return false; }
+  backupIdx.set(c, i + 1);
+  retried.delete(c.url);
+  return true;
+}
 function tune(c, list, index) {
   if (nowChannel() !== c) return;
-  if (tuneFrom && tuneFrom.url !== c.url) unwarm(tuneFrom.url);   // free the single provider slot right before connecting
+  if (tuneFrom && tuneFrom.url !== c.url) unwarm(streamOf(tuneFrom));   // free the single provider slot right before connecting
   tuneFrom = null;
-  player.play(c.url).then(ok => {
+  player.play(streamOf(c)).then(ok => {
     if (!ok) return;
     setStatus('');
     setTimeout(() => { if (nowChannel() === c && !video.paused && video.currentTime > 2) retried.delete(c.url); }, 15_000);   // healthy again: allow a future retry
@@ -2225,6 +2298,7 @@ function tune(c, list, index) {
   }).catch(err => {
     if (nowChannel() !== c) return;
     if (!retried.has(c.url)) { retried.add(c.url); setStatus('Retrying…'); setTimeout(() => { if (nowChannel() === c) playChannel(list, index); }, 1500); return; }
+    if (nextBackup(c)) { setStatus('Trying a backup stream…'); setTimeout(() => { if (nowChannel() === c) playChannel(list, index); }, 300); return; }
     showPlayerError(c, err);
     // The iPhone's own player handles streams the web view can't (http://, custom headers).
     if (isNative) { toast('Opening in the iPhone player'); openNativePlayer(c); }
