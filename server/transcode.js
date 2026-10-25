@@ -69,7 +69,7 @@ function probeFile(target) {
   if (probes.has(target)) return probes.get(target);
   const job = new Promise(resolve => {
     execFile(FFPROBE, ['-v', 'error', '-user_agent', 'Mozilla/5.0', '-show_entries',
-      'format=duration:stream=index,codec_type,codec_name,width,height,color_transfer,profile,channels:stream_tags=language,title', '-of', 'json', target],
+      'format=duration:stream=index,codec_type,codec_name,width,height,color_transfer,profile,pix_fmt,channels:stream_tags=language,title', '-of', 'json', target],
       { timeout: 25_000, windowsHide: true, maxBuffer: 4 << 20 }, (err, out) => {
         if (err) return resolve({ duration: 0, audio: [], subs: [] });
         let j; try { j = JSON.parse(out); } catch { return resolve({ duration: 0, audio: [], subs: [] }); }
@@ -81,7 +81,7 @@ function probeFile(target) {
         const TEXT = new Set(['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text']);
         const subs = streams.filter(x => x.codec_type === 'subtitle').map(x => ({ i: si++, label: name(x) || `Subtitles ${si}`, lang: x.tags?.language || '', codec: x.codec_name, text: TEXT.has(x.codec_name) }));
         resolve({ duration: Number(j.format?.duration) || 0, audio, subs,
-          video: v ? { codec: v.codec_name, width: v.width, height: v.height, hdr: /smpte2084|arib-std-b67/.test(v.color_transfer || '') } : null });
+          video: v ? { codec: v.codec_name, width: v.width, height: v.height, profile: v.profile || '', bit10: /p10|p12|10le|12le/.test(v.pix_fmt || '') || /10/.test(v.profile || ''), hdr: /smpte2084|arib-std-b67/.test(v.color_transfer || '') } : null });
       });
   });
   probes.set(target, job);
@@ -119,7 +119,7 @@ async function mergedVtt(s, idx) {
 // ahead or back just restarts the run there while already-made segments stay on disk. The playlist the
 // player gets is synthesised from the file's duration (see vodManifest), so it is a plain VOD to every
 // player: real length, instant seeking, no live behaviour.
-function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0, subs = [] } = {}) {
+function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0, subs = [], enc = false, height = 0 } = {}) {
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '2',
@@ -130,7 +130,13 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
     ...(vod && fromIdx > 0 ? ['-ss', String(fromIdx * VOD_SEG_S)] : []),
     '-fflags', '+genpts+flush_packets', '-i', target,
     '-map', '0:v:0?', '-map', `0:a:${track}?`,
-    ...(REENCODE
+    ...(enc
+      // The device can't decode this video (HEVC / 10-bit / AV1): convert to H.264, at most 1080p, with a
+      // keyframe at every segment boundary so every segment starts clean.
+      ? ['-c:v', 'libx264', '-preset', height > 1100 ? 'superfast' : 'veryfast', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
+         ...(height > 1080 ? ['-vf', 'scale=-2:1080'] : []), '-crf', '23', '-maxrate', '6M', '-bufsize', '12M', '-threads', '4',
+         '-force_key_frames', `expr:gte(t,n_forced*${VOD_SEG_S})`, '-sc_threshold', '0']
+      : REENCODE
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
          '-g', '25', '-keyint_min', '25', '-sc_threshold', '0', '-crf', '22', '-maxrate', '5M', '-bufsize', '10M', '-threads', '4']
       : ['-c:v', 'copy']),
@@ -152,14 +158,16 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
   ];
 }
 
-async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0) {
+async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0, enc = false) {
   // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
   const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
   await fs.mkdir(dir, { recursive: true });
   const probe = vod ? await probeFile(target) : null;
   const subs = (probe?.subs || []).filter(s => s.text).map(s => s.i);
-  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio, track, subs }), { windowsHide: true });
-  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: probe?.duration || 0, audio, track, subs };
+  const height = probe?.video?.height || 0;
+  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio, track, subs, enc, height }), { windowsHide: true });
+  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: probe?.duration || 0, audio, track, subs, enc, height };
+  if (enc) console.log(`[hls] encoding ${id} (${probe?.video?.codec}${probe?.video?.bit10 ? ' 10-bit' : ''} ${height}p -> h264)`);
   console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
   proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
   proc.on('exit', () => { session.exited = true; });
@@ -171,7 +179,7 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
 // VOD: restart the run at segment index n (seek). Existing segments stay; the new run writes seg n, n+1, …
 function restartRun(s, n) {
   try { s.proc.kill(); } catch {}
-  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio, track: s.track, subs: s.subs || [] }), { windowsHide: true });
+  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio, track: s.track, subs: s.subs || [], enc: s.enc, height: s.height }), { windowsHide: true });
   Object.assign(s, { proc, exited: false, errTail: '', startedAt: Date.now(), runStart: n });
   proc.stderr.on('data', d => { s.errTail = (s.errTail + d).slice(-1500); });
   proc.on('exit', () => { if (s.proc === proc) s.exited = true; });
@@ -291,7 +299,8 @@ export async function handleHls(req, res, url) {
       const href = new URL(target).href, st = Math.max(0, Math.floor(Number(url.searchParams.get('start')) || 0));
       const au = ['none', 'copy'].includes(url.searchParams.get('audio')) ? url.searchParams.get('audio') : 'aac';
       const tr = Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0));
-      stopSession(sessionId((st ? `${href}#${st}` : href) + (au !== 'aac' ? `#${au}` : '') + (tr ? `#a${tr}` : '')));
+      const en = url.searchParams.get('enc') === '1';
+      stopSession(sessionId((st ? `${href}#${st}` : href) + (au !== 'aac' ? `#${au}` : '') + (tr ? `#a${tr}` : '') + (en ? '#enc' : '')));
     } catch {}
     return send(res, 204, '');
   }
@@ -304,7 +313,7 @@ export async function handleHls(req, res, url) {
   if (subs) {
     const idx = Math.max(0, Number(url.searchParams.get('s')) || 0);
     const tr = Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0));
-    const s = sessions.get(sessionId(t.href + (tr ? `#a${tr}` : '')));
+    const s = sessions.get(sessionId(t.href + (tr ? `#a${tr}` : '') + (url.searchParams.get('enc') === '1' ? '#enc' : '')));
     if (!s || !s.vod) return send(res, 404, 'Stream not running');
     s.lastAccess = Date.now();
     return send(res, 200, await mergedVtt(s, idx), { 'content-type': 'text/vtt; charset=utf-8', 'cache-control': 'no-store' });
@@ -314,7 +323,8 @@ export async function handleHls(req, res, url) {
   const start = vod ? Math.max(0, Math.floor(Number(url.searchParams.get('start')) || 0)) : 0;
   const audio = ['none', 'copy'].includes(url.searchParams.get('audio')) ? url.searchParams.get('audio') : 'aac';   // diagnostics
   const track = vod ? Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0)) : 0;   // which audio track of the file
-  const id = sessionId((start ? `${t.href}#${start}` : t.href) + (audio !== 'aac' ? `#${audio}` : '') + (track ? `#a${track}` : ''));
+  const enc = vod && url.searchParams.get('enc') === '1';   // the device can't decode the file's video codec
+  const id = sessionId((start ? `${t.href}#${start}` : t.href) + (audio !== 'aac' ? `#${audio}` : '') + (track ? `#a${track}` : '') + (enc ? '#enc' : ''));
   let s = sessions.get(id);
   if (s && !s.exited && !warm) {
     // Stalled: ffmpeg alive but the playlist hasn't been touched for a while -> upstream froze. Restart it.
@@ -328,7 +338,7 @@ export async function handleHls(req, res, url) {
     // The app sends a warm on touch and the play a few ms later: both must wait for ONE start, or the
     // second ffmpeg is orphaned holding the only provider connection.
     if (!starting.has(id)) {
-      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio, track); })().finally(() => starting.delete(id)));
+      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio, track, enc); })().finally(() => starting.delete(id)));
     }
     s = await starting.get(id);
   }

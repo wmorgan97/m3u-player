@@ -215,7 +215,17 @@ function noteStall() {
 let transcodeVod = false;   // set per play: movies, episodes and catch-up get an on-demand (seekable) stream
 // The server hands VOD over as a complete playlist with the real length, so the video element's own
 // time and duration are the truth; seeking anywhere is a plain seek (the server makes segments on demand).
-let vodTrack = 0, vodInfo = null, subTrackEl = null;   // audio track in use, the file's probe, the attached <track>
+let vodTrack = 0, vodInfo = null, subTrackEl = null, vodEnc = false;   // audio track in use, the file's probe, subtitles, "convert video for this device"
+// Can this device decode the file's video as-is? Chrome has no HEVC/10-bit; Safari on Apple silicon has HEVC.
+function canDecode(v) {
+  if (!v) return true;
+  if (v.codec === 'h264') return !v.bit10;
+  const type = v.codec === 'hevc' ? `video/mp4; codecs="${v.bit10 ? 'hvc1.2.4.L153.B0' : 'hvc1.1.6.L123.B0'}"`
+    : v.codec === 'av1' ? `video/mp4; codecs="av01.0.08M.${v.bit10 ? '10' : '08'}"` : v.codec === 'vp9' ? `video/mp4; codecs="vp09.00.10.${v.bit10 ? '10' : '08'}"` : '';
+  if (!type) return false;
+  const native = !!video.canPlayType('application/vnd.apple.mpegurl');
+  return native ? !!video.canPlayType(type) : !!(window.MediaSource?.isTypeSupported?.(type));
+}
 const vodPos = () => video.currentTime;
 const vodTotal = () => (Number.isFinite(video.duration) ? video.duration : 0) || seekRange()?.end || 0;
 // "1080p · HEVC · HDR" from the server's probe of the file.
@@ -348,7 +358,7 @@ function transcodeUrl(url) {
   const key = state.settings.serverKey || '';
   if (serverProxy.needsKey && !key) return null;
   const b = bufferLevel();
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}` : ''}&url=${encodeURIComponent(url)}`;
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}${vodEnc ? '&enc=1' : ''}` : ''}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -3280,15 +3290,28 @@ function nextBackup(c) {
   retried.delete(c.url);
   return true;
 }
+// VOD: ask the server what the file is first (cached, well under a second), so a codec the device can't
+// decode is converted from the first segment instead of playing as a black screen.
+async function tuneVod(c, list, index) {
+  const tc = transcodeUrl(c.url);
+  try {
+    const r = await Promise.race([fetch(tc.replace('/hls?', '/hls/info?')), new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), 6000))]);
+    const d = await r.json();
+    if (nowChannel() !== c) return;
+    vodInfo = d;
+    vodEnc = !canDecode(d.video);
+    if (vodEnc) setStatus('Converting for this device…');
+  } catch { vodInfo = vodInfo || { duration: 0, audio: [], subs: [] }; }
+  if (nowChannel() !== c) return;
+  updateControls(); renderVodPanel(c);
+  tune(c, list, index);
+}
 function tune(c, list, index) {
   if (nowChannel() !== c) return;
   transcodeVod = !isLiveChannel(c);
   player.vod = transcodeVod;
-  if (tuneFrom !== c) { vodTrack = 0; vodInfo = null; clearSubtitles(); }   // a different title: back to its default track
-  if (transcodeVod) {
-    const tc = transcodeUrl(c.url);
-    if (tc) fetch(tc.replace('/hls?', '/hls/info?')).then(r => r.json()).then(d => { if (nowChannel() === c) { vodInfo = d; updateControls(); renderVodPanel(c); } }).catch(() => {});
-  }
+  if (tuneFrom !== c) { vodTrack = 0; vodInfo = null; vodEnc = false; clearSubtitles(); }   // a different title: back to its default track
+  if (transcodeVod && !vodInfo && transcodeUrl(c.url)) return tuneVod(c, list, index);
   const pr = state.progress[c.url];
   const resumeAt = pr && pr.v === 3 && !pr.done && pr.t > 30 && pr.t < (pr.d || Infinity) - 60 ? pr.t : 0;   // only positions saved by the current VOD logic
   if (tuneFrom && tuneFrom.url !== c.url) unwarm(streamOf(tuneFrom));   // free the single provider slot right before connecting
