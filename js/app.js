@@ -687,26 +687,24 @@ function showHome() {
       ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
     ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search channels, movies and series" autocomplete="off" autocorrect="off" spellcheck="false"></label><div id="home-results" class="home-results" hidden></div>` : ''}
-    ${resumeCardHtml(recentStrip[0])}
-    ${state.recents.length ? `<div class="section-title">Jump back in</div>
-      <div class="strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
-    ${browse.length || pinnedAny ? `<div class="section-title split">Browse${browseEdit}</div>
-      <div class="browse${browse.length > 8 ? ' scrolls' : ''}" style="--rows:${browseRows(browse.length)}">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
-        <span class="bt-name">${esc(prettyGroup(b.name))}</span><span class="muted">${b.count.toLocaleString()}</span></button>`).join('')}</div>` : ''}
-    ${cw.length ? `<div class="section-title">Continue watching</div>
-      <div class="strip">${cw.map((e, i) => `<button class="cw" data-cw="${i}">
-        <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}</span>
-        <span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span>
+    ${resumeCardHtml(recentStrip[0]) || cw.length ? `<div class="section-title">Continue watching</div>
+      <div class="cont-row">${resumeCardHtml(recentStrip[0])}${cw.map((e, i) => `<button class="cw" data-cw="${i}">
+        <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
         <span class="cw-name">${esc(e.item.name)}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></button>`).join('')}</div>` : ''}
-    ${watchlist.length ? `<div class="section-title">Watchlist</div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul>` : ''}
-    ${fresh.length ? `<div class="section-title">New this week</div><ul class="shelf-row home-shelf">${fresh.map((it, k) => cardHtml(it, 'home-new', k)).join('')}</ul>` : ''}
+    ${browse.length || pinnedAny || state.recents.length ? `<div class="section-title split">Live TV${browseEdit}</div>` : ''}
+    ${browse.length || pinnedAny ? `<div class="browse${browse.length > 8 ? ' scrolls' : ''}" style="--rows:${browseRows(browse.length)}">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
+        <span class="bt-name">${esc(prettyGroup(b.name))}</span><span class="muted">${b.count.toLocaleString()}</span></button>`).join('')}</div>` : ''}
+    ${state.recents.length ? `<div class="strip recent-strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
+    ${fresh.length || watchlist.length ? '<div class="section-title">Movies &amp; Series</div>' : ''}
+    ${fresh.length ? `<div class="sub-title">New this week</div><ul class="shelf-row home-shelf">${fresh.map((it, k) => cardHtml(it, 'home-new', k)).join('')}</ul>` : ''}
+    ${watchlist.length ? `<div class="sub-title">Watchlist</div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul>` : ''}
     <div class="section-title">Library</div>
-    <ul class="cards tiles">
-      ${card('#/fav', 'star', 'Favorites', plural(state.favorites.length, 'item'))}
-      ${card('#/recent', 'clock', 'Recently watched', plural(state.recents.length, 'item'))}
-      ${pl.length ? card('#/all', 'search', 'All channels', 'Every playlist in one list') : ''}
-      ${pl.length ? card('#/multi', 'grid', 'Multi-view', 'Watch up to 4 channels at once') : ''}
-      ${Object.keys(state.downloads || {}).length ? card('#/downloads', 'film', 'Downloads', plural(Object.keys(state.downloads).length, 'title') + (dlActive ? ' · downloading' : '')) : ''}
+    <ul class="lib-row">
+      <li class="lib" data-go="#/fav">${icon('star')}<span>Favorites</span><b>${state.favorites.length}</b></li>
+      <li class="lib" data-go="#/recent">${icon('clock')}<span>Recently watched</span><b>${state.recents.length}</b></li>
+      ${pl.length ? `<li class="lib" data-go="#/all">${icon('search')}<span>All channels</span></li>` : ''}
+      ${pl.length ? `<li class="lib" data-go="#/multi">${icon('grid')}<span>Multi-view</span></li>` : ''}
+      ${Object.keys(state.downloads || {}).length ? `<li class="lib" data-go="#/downloads">${icon('film')}<span>Downloads</span><b>${Object.keys(state.downloads).length}</b>${dlActive ? '<i class="lib-dot"></i>' : ''}</li>` : ''}
     </ul>
     <div class="section-title">Playlists</div>
     ${pl.length
