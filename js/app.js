@@ -1866,6 +1866,9 @@ function bindPlayer() {
   $('#close').innerHTML = icon('close');
   $('#prev').onclick = () => step(-1);
   $('#next').onclick = () => step(1);
+  // warm the neighbour on touch-down so the ffmpeg start overlaps the tap
+  $('#prev').onpointerdown = () => { const p = state.playing; if (p) warm(p.list[p.index - 1]?.url); };
+  $('#next').onpointerdown = () => { const p = state.playing; if (p) warm(p.list[p.index + 1]?.url); };
   $('#close').onclick = stopPlaying;
   $('#now-more').onclick = playerMenu;
   setInterval(() => { if (state.playing && !statusError) setStatus(''); }, 30000);

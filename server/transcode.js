@@ -19,8 +19,8 @@ const ROOT = join(tmpdir(), 'm3u-hls');
 const IDLE_MS = 20_000;        // kill ffmpeg this long after the last segment fetch
 const MAX_SESSIONS = 3;        // concurrent transcodes: IPTV accounts allow few provider connections
 const START_TIMEOUT_MS = 25_000;
-const READY_SEGMENTS = 2;      // two complete segments before serving: enough for the player to start without stalling
-const START_BEHIND_LIVE_S = 6; // start playback this far behind the live edge so there's always buffer in hand
+const READY_SEGMENTS = 1;      // one complete segment: segments are keyframe-aligned (2-4s), which is buffer enough to start
+const START_BEHIND_LIVE_S = 4; // start playback this far behind the live edge so there's always buffer in hand
 
 const TYPES = {
   '.m3u8': 'application/vnd.apple.mpegurl',
