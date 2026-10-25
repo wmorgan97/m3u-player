@@ -3297,8 +3297,7 @@ function bindControls() {
     updateControls();
     // While paused or behind live, keep the server's stream alive so the buffer is there when you resume.
     const c = nowChannel();
-    if (video.paused && !pausedAt) pausedAt = Date.now(); else if (!video.paused) pausedAt = 0;
-    if (c && !c.offline && (video.paused ? Date.now() - pausedAt < 10 * MINUTE : (seekRange() && seekRange().end - video.currentTime > 10)) && Date.now() - keepAlive > 8000) {
+    if (c && !c.offline && isLiveChannel(c) && !video.paused && seekRange() && seekRange().end - video.currentTime > 10 && Date.now() - keepAlive > 8000) {
       keepAlive = Date.now();
       const tc = transcodeUrl(streamOf(c));
       if (tc) fetch(tc.replace('/hls?', '/hls/warm?'), { keepalive: true }).catch(() => {});
@@ -3385,7 +3384,7 @@ function bindPlayer() {
   }, { passive: true });
   video.addEventListener('waiting', () => { if (state.playing) { setStatus(vodEnc && video.currentTime < 1 ? 'Converting for this device…' : 'Buffering…'); noteStall(); } });
   video.addEventListener('playing', () => { setStatus(''); hideTuning(); showControls(); });
-  video.addEventListener('timeupdate', () => { trackProgress(); warmNextEpisode(); });
+  video.addEventListener('timeupdate', () => trackProgress());
   video.addEventListener('pause', () => trackProgress(true));
   video.addEventListener('ended', () => {
     trackProgress(true);

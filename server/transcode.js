@@ -433,6 +433,7 @@ export async function handleHls(req, res, url) {
     return send(res, 204, '');
   }
   if (s && s.paused && warm) { s.lastAccess = Date.now(); return send(res, 204, ''); }   // keep a paused film's session, not its connection
+  if (warm && vod) { if (s) s.lastAccess = Date.now(); return send(res, 204, ''); }        // a warm ping never opens a provider connection for a film
   if (s && !s.exited && !warm) {
     // Stalled: ffmpeg alive but the playlist hasn't been touched for a while -> upstream froze. Restart it.
     try {
