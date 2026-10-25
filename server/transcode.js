@@ -57,7 +57,7 @@ function send(res, status, body, headers = {}) {
   res.end(body);
 }
 
-async function startSession(id, target) {
+async function startSession(id, target, vod = false) {
   // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
   const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
   await fs.mkdir(dir, { recursive: true });
@@ -76,12 +76,16 @@ async function startSession(id, target) {
     '-flush_packets', '1', '-muxdelay', '0',
     // ~45 minutes of segments stay on disk (delete_segments trims older ones): pause, rewind and
     // jump-back work in the app; the player still starts near the live edge (EXT-X-START).
-    '-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_init_time', '1', '-hls_list_size', '1000',
-    '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments', '-hls_segment_type', 'mpegts',
+    '-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_init_time', '1',
+    // Live: a rolling window. VOD (movies, episodes, catch-up): keep every segment and close the playlist
+    // at the end, so the player gets a seekable timeline with a real duration instead of a "live" stream.
+    ...(vod ? ['-hls_list_size', '0', '-hls_playlist_type', 'event', '-hls_flags', 'append_list+independent_segments']
+            : ['-hls_list_size', '1000', '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments']),
+    '-hls_segment_type', 'mpegts',
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
   ];
   const proc = spawn(FFMPEG, args, { windowsHide: true });
-  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now() };
+  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod };
   console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
   proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
   proc.on('exit', () => { session.exited = true; });
@@ -167,7 +171,7 @@ export async function handleHls(req, res, url) {
     // Stalled: ffmpeg alive but the playlist hasn't been touched for a while -> upstream froze. Restart it.
     try {
       const m = await fs.stat(join(s.dir, 'index.m3u8'));
-      if (Date.now() - m.mtimeMs > 12_000 && Date.now() - s.startedAt > 20_000) { console.log(`[hls] stalled ${id}, restarting`); s.exited = true; }
+      if (!s.vod && Date.now() - m.mtimeMs > 12_000 && Date.now() - s.startedAt > 20_000) { console.log(`[hls] stalled ${id}, restarting`); s.exited = true; }
     } catch {}
   }
   if (s && s.exited) { stopSession(id); s = null; }
@@ -175,7 +179,7 @@ export async function handleHls(req, res, url) {
     // The app sends a warm on touch and the play a few ms later: both must wait for ONE start, or the
     // second ffmpeg is orphaned holding the only provider connection.
     if (!starting.has(id)) {
-      starting.set(id, (async () => { await closeOthers(id); return startSession(id, t.href); })().finally(() => starting.delete(id)));
+      starting.set(id, (async () => { await closeOthers(id); return startSession(id, t.href, url.searchParams.get('vod') === '1'); })().finally(() => starting.delete(id)));
     }
     s = await starting.get(id);
   }
@@ -205,7 +209,7 @@ export async function handleHls(req, res, url) {
     return (!t || t.startsWith('#')) ? line : `/hls/${id}/${t}`;
   }).join('\n');
   // Start a few seconds behind the live edge so the player always has segments in hand (no edge-chasing rebuffers).
-  if (!/#EXT-X-START/.test(body)) body = body.replace('#EXTM3U', `#EXTM3U\n#EXT-X-START:TIME-OFFSET=-${behind},PRECISE=NO`);
+  if (!s.vod && !/#EXT-X-START/.test(body)) body = body.replace('#EXTM3U', `#EXTM3U\n#EXT-X-START:TIME-OFFSET=-${behind},PRECISE=NO`);
   res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
   res.end(req.method === 'HEAD' ? undefined : body);
 }

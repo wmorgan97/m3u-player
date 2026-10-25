@@ -210,13 +210,14 @@ function noteStall() {
     toast(`Kept stalling: using a ${autoLevel} buffer from now on`, { action: 'Reload now', fn: () => playChannel(state.playing.list, state.playing.index) });
   }
 }
+let transcodeVod = false;   // set per play: movies, episodes and catch-up get an on-demand (seekable) stream
 function transcodeUrl(url) {
   if (isNative) return null;                 // the native app plays raw streams itself
   if (!serverProxy.available) return null;   // only our own server exposes /hls
   const key = state.settings.serverKey || '';
   if (serverProxy.needsKey && !key) return null;
   const b = bufferLevel();
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}&url=${encodeURIComponent(url)}`;
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? '&vod=1' : ''}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -2559,8 +2560,9 @@ function updateControls() {
   if (!ctl || ctl.hidden) return;
   const c = nowChannel();
   if (!c) return;
-  const live = !Number.isFinite(video.duration);
+  const live = isLiveChannel(c) && !Number.isFinite(video.duration);
   const r = seekRange();
+  const total = Number.isFinite(video.duration) ? video.duration : r?.end || 0;
   const behind = live && r ? Math.max(0, r.end - video.currentTime) : 0;
   const atLive = !live || behind < 10;
   ctl.querySelector('[data-c="play"]').innerHTML = icon(video.paused ? 'play' : 'pause');
@@ -2572,7 +2574,7 @@ function updateControls() {
   $('.ctl-pbar').hidden = !now;
   const seek = $('#ctl-seek');
   if (r && r.end > r.start && !seek.matches(':active')) seek.value = Math.round(((video.currentTime - r.start) / (r.end - r.start)) * 1000);
-  $('#ctl-time').textContent = live ? (atLive ? '' : `-${fmtDur(behind)}`) : `${fmtDur(video.currentTime)} / ${fmtDur(video.duration || 0)}`;
+  $('#ctl-time').textContent = live ? (atLive ? '' : `-${fmtDur(behind)}`) : `${fmtDur(video.currentTime)} / ${fmtDur(total)}`;
   const lv = $('#ctl-live');
   lv.hidden = !live;
   lv.classList.toggle('on', atLive);
@@ -2747,7 +2749,7 @@ function bindPlayer() {
   let hiddenAt = 0;
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { hiddenAt = Date.now(); return; }
-    if (state.playing && hiddenAt && Date.now() - hiddenAt > 45_000 && player.isLive) playChannel(state.playing.list, state.playing.index);
+    if (state.playing && hiddenAt && Date.now() - hiddenAt > 45_000 && player.isLive && isLiveChannel(nowChannel())) playChannel(state.playing.list, state.playing.index);
   });
   $('#prev').innerHTML = icon('prev');
   $('#next').innerHTML = icon('next');
@@ -2873,6 +2875,7 @@ function nextBackup(c) {
 }
 function tune(c, list, index) {
   if (nowChannel() !== c) return;
+  transcodeVod = !isLiveChannel(c);
   if (tuneFrom && tuneFrom.url !== c.url) unwarm(streamOf(tuneFrom));   // free the single provider slot right before connecting
   tuneFrom = null;
   player.play(streamOf(c)).then(ok => {
