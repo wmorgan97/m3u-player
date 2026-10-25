@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens offline. Streams, logos and
 // playlist downloads (other origins) always go straight to the network.
 
-const CACHE = 'm3u-player-v23';
+const CACHE = 'm3u-player-v24';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/native.js', 'vendor/hls.min.js',

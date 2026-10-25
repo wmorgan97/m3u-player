@@ -152,7 +152,13 @@ function warm(url) {
   warmed.set(url, Date.now());
   fetch(tc.replace('/hls?', '/hls/warm?'), { keepalive: true }).catch(() => {});
 }
-const warmNeighbours = (list, index) => { warm(list[index + 1]?.url); warm(list[index - 1]?.url); };
+// Tell the server to drop a stream we've switched away from (IPTV accounts have few connections).
+function unwarm(url) {
+  const tc = url && transcodeUrl(url);
+  if (!tc) return;
+  warmed.delete(url);
+  fetch(tc.replace('/hls?', '/hls/stop?'), { keepalive: true }).catch(() => {});
+}
 
 function applySettings() {
   net.proxy = state.settings.proxy || (serverProxy.available && !serverProxy.needsKey ? serverProxyUrl() : '');
@@ -1934,7 +1940,8 @@ function playChannel(list, index) {
   setStatus('Connecting…');
   highlightPlaying();
   addRecent(c);
-  warmNeighbours(list, index);   // prev/next are ready before you press them
+  const prev = nowChannel();
+  if (prev && prev.url !== c.url) unwarm(prev.url);   // free the provider slot immediately
   try {
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({ title: c.name, artist: c.group || 'M3U Player', artwork: c.logo ? [{ src: c.logo }] : [] });
