@@ -3186,7 +3186,17 @@ function channelsOverlay() {
 // ---------- the app's own player controls ----------
 // Tap the video: channel + what's on, play/pause (pause live), back 30s, a scrub bar over the server's
 // 45-minute buffer, LIVE to jump back to the edge, channel list, mute, AirPlay, PiP, full screen.
-let ctlHide = 0, keepAlive = 0, pausedAt = 0;
+let ctlHide = 0, keepAlive = 0, pausedAt = 0, pauseTimer = 0;
+// A paused film gives the provider connection back after a couple of seconds (scrubbing doesn't count).
+function releaseOnPause() {
+  clearTimeout(pauseTimer);
+  pauseTimer = setTimeout(() => {
+    const c = nowChannel();
+    if (!c || !video.paused || !transcodeVod || c.offline) return;
+    const tc = transcodeUrl(streamOf(c));
+    if (tc) fetch(tc.replace('/hls?', '/hls/pause?'), { keepalive: true }).catch(() => {});
+  }, 2500);
+}
 const seekRange = () => { try { const s = video.seekable; return s.length ? { start: s.start(0), end: s.end(s.length - 1) } : null; } catch { return null; } };
 function showControls() {
   const ctl = $('#ctl');
@@ -3281,8 +3291,8 @@ function bindControls() {
     showControls();
   });
   seek.addEventListener('change', () => { if (!isLiveChannel(nowChannel())) { const total = vodTotal(); if (total) seekVod((seek.value / 1000) * total); } });
-  video.addEventListener('pause', () => { showControls(); clearTimeout(ctlHide); });
-  video.addEventListener('play', showControls);
+  video.addEventListener('pause', () => { showControls(); clearTimeout(ctlHide); releaseOnPause(); });
+  video.addEventListener('play', () => { clearTimeout(pauseTimer); showControls(); });
   setInterval(() => {
     updateControls();
     // While paused or behind live, keep the server's stream alive so the buffer is there when you resume.

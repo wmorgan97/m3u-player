@@ -265,7 +265,7 @@ async function closeOthers(keepId, host) {
 
 setInterval(() => {
   const now = Date.now();
-  for (const [id, s] of sessions) if (now - s.lastAccess > (s.vod ? 90_000 : IDLE_MS)) stopSession(id);   // a paused film keeps its segments for a while
+  for (const [id, s] of sessions) if (now - s.lastAccess > (s.paused ? 2 * 3600_000 : s.vod ? 90_000 : IDLE_MS)) stopSession(id);   // a paused film keeps its pieces for 2h
 }, 10_000).unref();
 
 async function waitForPlaylist(dir, timeout, alive = () => true, ready = READY_SEGMENTS) {
@@ -362,7 +362,7 @@ export async function handleHls(req, res, url) {
       const done = await producedUpTo(s);
       // Players ask for two or three segments at once: one restart covers them all.
       const fresh = Date.now() - (s.restartAt || 0) < 4000 && n >= s.runStart && n <= s.runStart + 8;
-      if (!fresh && (s.exited || n < s.runStart || n > done + 6)) { s.restartAt = Date.now(); restartRun(s, n); }
+      if (!fresh && (s.exited || n < s.runStart || n > done + 6)) { s.restartAt = Date.now(); s.paused = false; restartRun(s, n); }
       const deadline = Date.now() + (s.enc ? 90_000 : 30_000), waitFrom = Date.now();   // converting the first seconds of a 1080p file can take a while
       while (Date.now() < deadline && sessions.get(id) === s) {
         try { st = await fs.stat(f); break; } catch {}
@@ -384,6 +384,7 @@ export async function handleHls(req, res, url) {
   const stop = parts.length === 2 && parts[1] === 'stop';
   const info = parts.length === 2 && parts[1] === 'info';
   const subs = parts.length === 2 && parts[1] === 'subs';
+  const pause = parts.length === 2 && parts[1] === 'pause';
   const target = url.searchParams.get('url');
   const key = url.searchParams.get('key') || '';
   if (!target) return send(res, 400, 'Missing url');
@@ -420,6 +421,12 @@ export async function handleHls(req, res, url) {
   const enc = url.searchParams.get('enc') === '1';   // the device can't decode this video codec: convert to H.264
   const id = sessionId((start ? `${t.href}#${start}` : t.href) + (audio !== 'aac' ? `#${audio}` : '') + (track ? `#a${track}` : '') + (enc ? '#enc' : ''));
   let s = sessions.get(id);
+  // Paused film: drop the provider connection now but keep the pieces already made; play resumes from the next one.
+  if (pause) {
+    if (s && s.vod && !s.exited) { s.paused = true; s.pausedAt = Date.now(); try { s.proc?.kill(); } catch {} console.log(`[hls] paused ${id}: provider connection released`); }
+    return send(res, 204, '');
+  }
+  if (s && s.paused && warm) { s.lastAccess = Date.now(); return send(res, 204, ''); }   // keep a paused film's session, not its connection
   if (s && !s.exited && !warm) {
     // Stalled: ffmpeg alive but the playlist hasn't been touched for a while -> upstream froze. Restart it.
     try {
@@ -427,7 +434,7 @@ export async function handleHls(req, res, url) {
       if (!s.vod && Date.now() - m.mtimeMs > 12_000 && Date.now() - s.startedAt > 20_000) { console.log(`[hls] stalled ${id}, restarting`); s.exited = true; }
     } catch {}
   }
-  if (s && s.exited) { stopSession(id); s = null; }
+  if (s && s.exited && !s.paused) { stopSession(id); s = null; }
   if (!s) {
     // The app sends a warm on touch and the play a few ms later: both must wait for ONE start, or the
     // second ffmpeg is orphaned holding the only provider connection.
