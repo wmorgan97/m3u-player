@@ -1,3 +1,11 @@
 node_modules/
 .DS_Store
 www/
+
+# VPS deployment artifacts (never commit)
+proxy-key.txt
+run.cmd
+run.log
+pm2.config.cjs
+err.txt
+out.txt
