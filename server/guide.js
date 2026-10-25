@@ -10,7 +10,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { XmltvParser } from '../js/epg.js';
+import { XmltvParser, normName } from '../js/epg.js';
 import { readBody } from './sync.js';
 
 const PROXY_KEY = process.env.PROXY_KEY || '';
@@ -53,7 +53,7 @@ async function build(urls) {
   const chans = new Map();
   for (const [id, list] of Object.entries(data.programmes)) chans.set(id, JSON.stringify(list.map(p => p[4] ? [p[0], p[1], p[2], p[3].slice(0, 600), p[4]] : [p[0], p[1], p[2], p[3].slice(0, 600)])));
   console.log(`[guide] indexed ${chans.size} channels in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  return { at: Date.now(), chans, names: data.names };
+  return { at: Date.now(), chans, names: data.names, display: data.display || {} };
 }
 
 function indexFor(urls) {
@@ -96,6 +96,17 @@ export async function handleGuide(req, res, url, send, allow) {
   const ix = indexFor(urls);
   if (!ix.chans) {
     try { await ix.job; } catch (e) { return send(res, 502, `TV guide: ${e.message}`); }
+  }
+  // "Fix guide match": search the guide's channels by name or id; only those with programmes.
+  if (typeof q.search === 'string') {
+    const t = normName(q.search), raw = q.search.trim().toLowerCase(), out = [];
+    for (const [id, name] of Object.entries(ix.display || {})) {
+      if (!ix.chans.has(id)) continue;
+      if ((t && normName(name).includes(t)) || (raw && id.includes(raw))) out.push({ id, name });
+      if (out.length >= 60) break;
+    }
+    out.sort((a, b) => a.name.length - b.name.length);
+    return send(res, 200, JSON.stringify({ matches: out }), { 'content-type': 'application/json', 'cache-control': 'no-store' });
   }
   const names = {}, ids = new Set();
   for (const id of q.ids || []) if (ix.chans.has(id)) ids.add(id);

@@ -28,6 +28,7 @@ export function externalPlayers(url) {
   return [
     { name: 'VLC', href: `vlc-x-callback://x-callback-url/stream?url=${u}` },
     { name: 'Infuse', href: `infuse://x-callback-url/play?url=${u}` },
+    { name: 'IINA', href: `iina://weblink?url=${u}` },
   ];
 }
 

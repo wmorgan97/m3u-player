@@ -144,6 +144,27 @@ async function handleStatic(req, res, url) {
   }
 }
 
+// Errors the app hits on your devices (script errors, streams that won't play) land in run.log, so problems
+// can be diagnosed without describing them. Key-gated, size-capped, rate-limited.
+let logCount = 0, logWindow = 0;
+function handleClientLog(req, res, url) {
+  if (proxyKey && url.searchParams.get('key') !== proxyKey) return send(res, 403, 'Wrong or missing key');
+  if (Date.now() - logWindow > 60_000) { logWindow = Date.now(); logCount = 0; }
+  let body = '';
+  req.on('data', d => { if (body.length < 4000) body += d; });
+  req.on('end', () => {
+    if (++logCount <= 30) {
+      try {
+        const j = JSON.parse(body);
+        const ua = req.headers['user-agent'] || '';
+        const dev = /iPhone|iPad/.test(ua) ? 'iPhone' : /Macintosh/.test(ua) ? (/Chrome/.test(ua) ? 'Mac Chrome' : 'Mac Safari') : 'other';
+        console.log(`[client ${dev}] ${String(j.kind || 'error').slice(0, 20)}: ${String(j.message || '').slice(0, 300).replace(/\s+/g, ' ')}${j.where ? ` @ ${String(j.where).slice(0, 120)}` : ''}`);
+      } catch {}
+    }
+    send(res, 204, '');
+  });
+}
+
 export function createAppServer() {
   return createServer((req, res) => {
     let url;
@@ -151,6 +172,7 @@ export function createAppServer() {
     if (req.method === 'OPTIONS') return send(res, 204, '');
     if (url.pathname === '/sync' && req.method === 'POST') console.log(`[sync] ${(req.headers['user-agent'] || '').replace(/^.*?\(([^;)]+).*$/, '$1')}`);
     if (url.pathname === '/sync') return handleSync(req, res, url, send).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
+    if (url.pathname === '/log' && req.method === 'POST') return handleClientLog(req, res, url);
     if (url.pathname === '/download') return handleDownload(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
       .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/vod') return handleCatalog(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))

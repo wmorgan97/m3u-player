@@ -59,6 +59,7 @@ export class XmltvParser {
     this.wanted = wanted;
     this.accept = new Set(wanted?.ids || []);
     this.names = {};
+    this.display = {};   // guide id -> its first display name (for the "fix guide match" search)
     this.programmes = {};
     this.buf = '';
   }
@@ -89,6 +90,7 @@ export class XmltvParser {
       const n = normName(decode(m[1]));
       if (!n) continue;
       this.names[n] ??= id;
+      this.display[id] ??= decode(m[1]).trim();
       if (this.wanted?.names.has(n)) this.accept.add(id);
     }
   }
@@ -115,7 +117,7 @@ export class XmltvParser {
 
   finish() {
     for (const list of Object.values(this.programmes)) list.sort((a, b) => a[0] - b[0]);
-    return { programmes: this.programmes, names: this.names };
+    return { programmes: this.programmes, names: this.names, display: this.display };
   }
 }
 

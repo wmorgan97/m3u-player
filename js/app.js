@@ -19,7 +19,7 @@ const state = {
   favorites: [],
   recents: [],
   progress: {},    // url -> { t, d, at, done, item }  (movies & episodes)
-  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '', nativeControls: false, buffer: 'auto', density: 'standard', logos: true, numbers: false, showNext: true, mergeDupes: true, resumeCard: true, accent: '' },
+  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '', nativeControls: false, buffer: 'auto', vodPlayer: 'app', density: 'standard', logos: true, numbers: false, showNext: true, mergeDupes: true, resumeCard: true, accent: '' },
   current: null,   // playlist being viewed (real, or virtual 'fav' / 'recent' / 'all')
   tab: 'live',     // 'live' | 'movies' | 'series' (Xtream playlists)
   group: null,     // null = all groups
@@ -1793,6 +1793,7 @@ function channelMenu(c) {
     canReorder() && !state.reordering && { label: 'Reorder channels (drag)…', fn: () => { toggleReordering(); const li = $(`#list .row[data-i="${state.filtered.indexOf(c)}"]`); li?.scrollIntoView({ block: 'center' }); } },
     editable && isLiveChannel(c) && { label: 'Move to top of group', fn: () => moveInGroup(c, true) },
     editable && isLiveChannel(c) && { label: 'Move to bottom of group', fn: () => moveInGroup(c, false) },
+    editable && isLiveChannel(c) && canSync() && epgUrls(p).length && { label: 'Fix TV guide match…', fn: () => guideMatchSheet(c, p) },
     editable && { label: 'Edit…', fn: () => editChannel(c, p) },
     ...externalItems(c),
     !c.kind && { label: 'Copy to playlist…', fn: () => copyToMenu([c]) },
@@ -1815,6 +1816,44 @@ function favListMenu(c) {
     ...lists.map(n => ({ label: prettyGroup(n), fn: () => moveTo(n) })),
     { label: 'New list…', fn: async () => { const v = await formSheet({ title: 'New list', fields: [{ name: 'name', label: 'List name', required: true, placeholder: 'e.g. Sports' }], submit: 'Create' }); if (v?.name) moveTo(v.name); } },
   ]);
+}
+
+// Pick which guide channel a channel uses: search the provider's guide by name, tap the right one.
+function guideMatchSheet(c, p) {
+  const g = guideFor(c), current = g?.key(c);
+  sheet(`<div class="sheet-title">TV guide for ${esc(c.name)}</div>
+    <p class="muted">${current ? `Now using <b>${esc(current)}</b>.` : 'No guide match yet.'} Search the guide and tap the right channel.</p>
+    <label class="search">${icon('search')}<input id="gm-q" type="search" value="${esc(c.tvgName || c.name)}" autocomplete="off" autocorrect="off" spellcheck="false"></label>
+    <ul class="list gm-list" id="gm-list"><li class="empty small">Searching…</li></ul>`, {
+    onMount: el => {
+      let seq = 0;
+      const search = async q => {
+        const my = ++seq, list = el.querySelector('#gm-list');
+        if (q.trim().length < 2) { list.innerHTML = ''; return; }
+        try {
+          const r = await fetch(serverApi('guide'), { method: 'POST', body: JSON.stringify({ urls: epgUrls(p), search: q }) });
+          const d = await r.json();
+          if (my !== seq) return;
+          list.innerHTML = (d.matches || []).map(m => `<li class="row" data-gid="${esc(m.id)}"><span class="row-text"><span class="row-name">${esc(m.name)}${m.id === current ? '<span class="tag">current</span>' : ''}</span><span class="muted">${esc(m.id)}</span></span></li>`).join('') || '<li class="empty small">Nothing in the guide matches that.</li>';
+        } catch { list.innerHTML = '<li class="empty small">Couldn’t search the guide.</li>'; }
+      };
+      el.querySelector('#gm-q').oninput = debounce(e => search(e.target.value), 250);
+      search(el.querySelector('#gm-q').value);
+      el.querySelector('#gm-list').onclick = async e => {
+        const li = e.target.closest('[data-gid]');
+        if (!li) return;
+        const id = li.dataset.gid;
+        for (const x of [c, ...copiesOf(p, c)]) Object.assign(x, { tvgId: id, edited: true });
+        await save(p);
+        guideAsked.get(p.id)?.clear();
+        const gg = guides.get(p.id); if (gg) gg.keys = new WeakMap();
+        closeSheet();
+        ensureGuide([c]);
+        toast(`Guide set to ${li.querySelector('.row-name').firstChild.textContent}`);
+        rerender();
+      };
+    },
+  });
 }
 
 function highlightStars() {
@@ -3079,6 +3118,9 @@ async function settingsSheet() {
       <label class="switch"><span><b>Merge duplicate channels</b><span class="muted">Show each channel once; the copies become backup streams, used automatically if one fails.</span></span><input type="checkbox" name="mergeDupes" ${s.mergeDupes !== false ? 'checked' : ''}></label>
       <label class="switch"><span><b>Continue watching on Home</b><span class="muted">Your last channel at the top of Home, one tap to play.</span></span><input type="checkbox" name="resumeCard" ${s.resumeCard !== false ? 'checked' : ''}></label>
       <div class="section-title">Playback</div>
+      ${isNative ? '' : `<label>Play films &amp; series in<select name="vodPlayer">
+        ${[['app', 'This app'], ['vlc', 'VLC (free; plays every format)'], ['infuse', 'Infuse'], ...(/Macintosh/.test(navigator.userAgent) ? [['iina', 'IINA (Mac, free)']] : [])].map(([v, l]) => `<option value="${v}" ${(s.vodPlayer || 'app') === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select></label>`}
       <label>Buffering<select name="buffer">
         ${[['auto', 'Auto (fast, steps up if a channel keeps stalling)'], ['fast', 'Fast switching (~4s buffer)'], ['balanced', 'Balanced (~8s buffer)'], ['stable', 'Stable (~14s buffer, slower switching)']].map(([v, l]) => `<option value="${v}" ${(s.buffer || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
@@ -3103,7 +3145,7 @@ async function settingsSheet() {
         const mergeWas = state.settings.mergeDupes !== false;
         Object.assign(state.settings, {
           ...(f.has('proxy') ? { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')) } : {}),
-          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'),
+          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'),
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
           showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on', resumeCard: f.get('resumeCard') === 'on',
         });
@@ -3525,6 +3567,17 @@ function showTuning(c) {
   el.hidden = false; el.classList.remove('out');
 }
 function hideTuning() { const el = $('#tuning'); if (el && !el.hidden) { el.classList.add('out'); setTimeout(() => { el.hidden = true; }, 320); } }
+// ---------- errors reported to your server's log ----------
+const reported = new Set();
+function report(kind, message, where = '') {
+  const key = `${kind}|${message}`;
+  if (!canSync() || reported.has(key) || reported.size > 40) return;
+  reported.add(key);
+  fetch(serverApi('log'), { method: 'POST', keepalive: true, body: JSON.stringify({ kind, message: String(message).slice(0, 300), where }) }).catch(() => {});
+}
+addEventListener('error', e => report('script', e.message, `${(e.filename || '').split('/').pop()}:${e.lineno}`));
+addEventListener('unhandledrejection', e => report('promise', e.reason?.message || String(e.reason)));
+
 // ---------- native iPhone app: the VLC player ----------
 // In the native app nothing goes through the server's converter: the VLC engine plays the provider's
 // .ts / .mkv / HEVC directly. The web app keeps the list; the player reports progress and channel steps.
@@ -3551,12 +3604,18 @@ window.__nativePlayer = ev => {
   if ((ev.type === 'progress' || ev.type === 'closed') && !isLiveChannel(c) && c.kind !== 'catchup' && ev.d >= 60) writeProgress(c, ev.t, ev.d);
   if (ev.type === 'ended' && c.kind === 'episode' && pl.index < pl.list.length - 1) playChannel(pl.list, pl.index + 1);
   if (ev.type === 'closed') { state.playing = null; highlightPlaying(); if (!state.current) rerender(); }
+  if (ev.type === 'error') report('native-play', `${ev.message}: ${c.name}`, isLiveChannel(c) ? 'live' : c.kind);
 };
 
 function playChannel(list, index) {
   const c = list[index];
   if (!c) return;
   if (isNative && !c.offline) return playNative(list, index, c);
+  // "Play films & series in VLC / Infuse / IINA": hand the provider's link straight to that app.
+  if (!isLiveChannel(c) && !c.offline && state.settings.vodPlayer && state.settings.vodPlayer !== 'app') {
+    const ext = externalPlayers(c.url).find(x => x.name.toLowerCase() === state.settings.vodPlayer);
+    if (ext) { toast(`Opening in ${ext.name}…`); location.href = ext.href; return; }
+  }
   trackProgress(true);
   const prev = nowChannel();
   state.playing = { list, index };
@@ -3651,6 +3710,7 @@ function openNativePlayer(c) {
 }
 
 function showPlayerError(c, err) {
+  report('play', `${err.message}: ${c.name}`, `${isLiveChannel(c) ? 'live' : c.kind}${transcodeVod ? ` vod enc=${vodEnc}` : ''}`);
   const box = $('#player-error');
   const extra = isMixed(c.url) && !net.proxy ? ' This is an http:// stream; set up the free proxy in Settings to play it here.' : '';
   box.innerHTML = `<p>${esc(err.message + extra)}</p>
