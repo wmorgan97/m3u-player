@@ -588,9 +588,10 @@ function showPlaylist(p) {
   state.query = pendingQuery ? pendingQuery.toLowerCase() : memo?.query || '';
   if (memo && !pendingQuery) pendingQuery = memo.query || '';
   const k = m3uKinds(p);
-  const showTabs = p.kind === 'xtream' || p._hasVod;
+  const vodOn = p.content !== 'live';
+  const showTabs = vodOn && (p.kind === 'xtream' || p._hasVod);
   // A VOD-only playlist (movies/series from one provider, live from another) opens on Movies, not an empty Live tab.
-  const liveEmpty = k && !k.live.length;
+  const liveEmpty = p.content === 'vod' || (k && !k.live.length);
   const firstTab = memo?.tab || (liveEmpty ? (k.movies.length ? 'movies' : 'series') : 'live');
   const tabBtn = (t, label) => `<button data-tab="${t}"${t === firstTab ? ' class="active"' : ''}>${label}</button>`;
   view.innerHTML = `
@@ -1848,6 +1849,14 @@ function playlistMenu(p) {
     real && (p.sourceUrl || p.kind === 'xtream') && { label: 'Refresh channels now', fn: () => refreshSource(p) },
     real && p.sourceUrl && p.kind !== 'xtream' && { label: p.autoRefresh ? '✓ Auto-refresh daily' : 'Auto-refresh daily', fn: async () => { p.autoRefresh = !p.autoRefresh; await save(p); toast(p.autoRefresh ? 'Will refresh once a day (your edits are replaced)' : 'Auto-refresh off'); } },
     viewing && !live && { label: `Reload ${state.tab} from provider`, fn: () => { vodCache.delete(vodKey(p, state.tab)); applyFilter(); loadVod(p, state.tab, { force: true }); } },
+    real && { label: `Keep: ${{ live: 'Live TV only', vod: 'VOD only' }[p.content] || 'Live TV and VOD'}…`, fn: () => menu('Keep in this playlist', [
+      ['both', 'Live TV and VOD'], ['live', 'Live TV only'], ['vod', 'VOD only (movies & series)'],
+    ].map(([v, label]) => ({ label: `${(p.content || 'both') === v ? '✓ ' : ''}${label}`, fn: async () => {
+      p.content = v;
+      await save(p);
+      // Widening needs the provider's full list again; narrowing just drops rows.
+      if (p.sourceUrl || p.kind === 'xtream') refreshSource(p); else { p.channels = applyContent(v, p.channels); await save(p); rerender(); }
+    } }))) },
     real && live && { label: 'Add channel…', fn: () => addChannel(p) },
     live && p.channels.length && { label: 'Export / share M3U…', fn: () => exportMenu(p.name, p.channels, p.header) },
     narrowed && live && state.filtered.length && { label: `Export this view (${state.filtered.length.toLocaleString()})…`, fn: () => exportMenu(`${p.name} - ${state.group || 'search'}`, state.filtered, p.header) },
@@ -2161,6 +2170,11 @@ function addPlaylistSheet() {
     </div>
     <form class="form" id="addform">
       <label>Name<input name="name" placeholder="Optional" autocorrect="off"></label>
+      <label>Keep<select name="content">
+        <option value="both">Live TV and VOD (movies &amp; series)</option>
+        <option value="live">Live TV only</option>
+        <option value="vod">VOD only (movies &amp; series)</option>
+      </select></label>
       <div class="pane" data-pane="xtream">
         <label>Server<input name="server" inputmode="url" placeholder="http://provider.example:8080" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
         <label>Username<input name="user" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
@@ -2229,10 +2243,11 @@ function addPlaylistSheet() {
             ({ channels, header } = parseSource(String(f.get('text'))));
             name ||= 'Pasted playlist';
           }
-          const p = await createPlaylist(name, channels, { header, ...extra });
+          const content = String(f.get('content') || 'both');
+          const p = await createPlaylist(name, applyContent(content, channels), { header, content, ...extra });
           closeSheet();
           location.hash = `#/p/${p.id}`;
-          toast(`Added ${plural(p.channels.length, 'channel')}`);
+          toast(content === 'vod' ? `Added ${plural(p.channels.length, 'item')}` : `Added ${plural(p.channels.length, 'channel')}`);
         } catch (err) {
           hint.className = 'error';
           hint.textContent = err.message;
@@ -2242,6 +2257,13 @@ function addPlaylistSheet() {
       };
     },
   });
+}
+
+// "Keep" choice for a playlist: both | live | vod. For an M3U the rows are filtered by what their link
+// is; for Xtream the live list is all live, and the VOD tabs are simply shown or hidden.
+function applyContent(content, channels) {
+  if (!content || content === 'both') return channels;
+  return channels.filter(c => isSeparator(c) ? false : (channelKind(c) === 'live') === (content === 'live'));
 }
 
 // A refresh takes the provider's new list but keeps what you changed: your order, renamed or moved
@@ -2271,12 +2293,12 @@ async function refreshSource(p, { silent = false } = {}) {
       const x = xtOf(p);
       const info = await x.login();
       const [cats, streams] = await Promise.all([x.categories('live'), x.liveStreams()]);
-      p.channels = mergeRefresh(p, liveChannels(x, cats, streams));
+      p.channels = mergeRefresh(p, applyContent(p.content, liveChannels(x, cats, streams)));
       p.userInfo = info.user_info;
       p.serverInfo = info.server_info;
     } else {
       const { header, channels } = parseSource(await fetchText(p.sourceUrl, { timeout: 60000 }), p.sourceUrl);
-      p.channels = mergeRefresh(p, channels);
+      p.channels = mergeRefresh(p, applyContent(p.content, channels));
       p.header = header;
     }
     p.refreshedAt = Date.now();
