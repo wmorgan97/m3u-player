@@ -334,7 +334,7 @@ export async function handleHls(req, res, url) {
       // Players ask for two or three segments at once: one restart covers them all.
       const fresh = Date.now() - (s.restartAt || 0) < 4000 && n >= s.runStart && n <= s.runStart + 8;
       if (!fresh && (s.exited || n < s.runStart || n > done + 6)) { s.restartAt = Date.now(); restartRun(s, n); }
-      const deadline = Date.now() + 30_000, waitFrom = Date.now();
+      const deadline = Date.now() + (s.enc ? 90_000 : 30_000), waitFrom = Date.now();   // converting the first seconds of a 1080p file can take a while
       while (Date.now() < deadline && sessions.get(id) === s) {
         try { st = await fs.stat(f); break; } catch {}
         if (s.exited && (await producedUpTo(s)) < n) return send(res, 404, 'Segment unavailable');   // run ended before reaching it (past the end of the file)
@@ -414,6 +414,14 @@ export async function handleHls(req, res, url) {
   // behind the live edge to start. More = fewer stalls, slower channel change.
   const ready = Math.min(4, Math.max(1, Number(url.searchParams.get('ready')) || READY_SEGMENTS));
   const behind = Math.min(30, Math.max(2, Number(url.searchParams.get('behind')) || START_BEHIND_LIVE_S));
+  if (s.vod && url.searchParams.get('raw') !== '1') {
+    if (!s.duration) s.duration = await probeDuration(t.href);
+    if (s.duration > 0) {   // the playlist doesn't depend on any segment existing yet (they're made on request)
+      console.log(`[hls] vod playlist ${id}`);
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
+      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration));
+    }
+  }
   const ok = await waitForPlaylist(s.dir, START_TIMEOUT_MS, () => sessions.get(id) === s, ready);
   if (sessions.get(id) !== s) return send(res, 409, 'Superseded by another channel');
   if (!ok) {

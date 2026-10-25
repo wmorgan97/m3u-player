@@ -3340,7 +3340,7 @@ function bindPlayer() {
     if (e.touches.length || Date.now() - st > 600 || Math.abs(dy) < 70 || Math.abs(dx) > Math.abs(dy) / 2) return;
     if (state.playing?.list.length > 1 && player.isLive) step(dy < 0 ? 1 : -1);
   }, { passive: true });
-  video.addEventListener('waiting', () => { if (state.playing) { setStatus('Buffering…'); noteStall(); } });
+  video.addEventListener('waiting', () => { if (state.playing) { setStatus(vodEnc && video.currentTime < 1 ? 'Converting for this device…' : 'Buffering…'); noteStall(); } });
   video.addEventListener('playing', () => { setStatus(''); hideTuning(); showControls(); });
   video.addEventListener('timeupdate', () => { trackProgress(); warmNextEpisode(); });
   video.addEventListener('pause', () => trackProgress(true));
@@ -3525,7 +3525,7 @@ async function tuneVod(c, list, index) {
     if (nowChannel() !== c) return;
     vodInfo = d;
     vodEnc = !canDecode(d.video);
-    if (vodEnc) setStatus('Converting for this device…');
+    if (vodEnc) { setStatus('Converting for this device… (first picture can take 10–20 s)'); showTuning(c); }
   } catch { vodInfo = vodInfo || { duration: 0, audio: [], subs: [] }; }
   if (!vodInfo) vodInfo = { duration: 0, audio: [], subs: [] };
   if (nowChannel() !== c) return;

@@ -82,7 +82,8 @@ export class Player {
     }
     if (!raw && tc) for (const mode of this.modes(tc)) tries.push([tc, mode]);
     // A dead channel fails fast: every way of playing it shares one ~18s budget instead of 25s each.
-    const deadline = Date.now() + 18000;
+    // A film being converted on the server needs much longer for its first picture.
+    const deadline = Date.now() + (this.vod ? 120000 : 18000);
     for (const [candidate, mode] of tries) {
       const left = deadline - Date.now();
       if (left < 2500 && lastError) break;
@@ -145,7 +146,8 @@ export class Player {
         // VOD arrives as a growing playlist: start at 0 and never "catch up to live" (no latency chasing, no speed-up).
         // VOD comes as a complete playlist (server/transcode.js), so plain VOD handling; live gets the live tuning.
         const hls = this.hls = this.vod
-          ? new Hls({ enableWorker: true, backBufferLength: 60, maxBufferLength: 60, maxMaxBufferLength: 180, fragLoadingMaxRetry: 8, fragLoadingTimeOut: 40000, levelLoadingMaxRetry: 6 })
+          ? new Hls({ enableWorker: true, backBufferLength: 60, maxBufferLength: 60, maxMaxBufferLength: 180, fragLoadingMaxRetry: 8, fragLoadingTimeOut: 100000, fragLoadingRetryDelay: 2000,
+              manifestLoadingTimeOut: 60000, manifestLoadingMaxRetry: 3, levelLoadingTimeOut: 60000, levelLoadingMaxRetry: 6 })
           : new Hls({ enableWorker: true, backBufferLength: 30, maxBufferLength: 60, maxMaxBufferLength: 120,
               liveSyncDurationCount: this.liveSync || 3, liveMaxLatencyDurationCount: (this.liveSync || 3) + 6, fragLoadingMaxRetry: 6, levelLoadingMaxRetry: 6 });
         hls.on(Hls.Events.ERROR, (_, data) => {
