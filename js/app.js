@@ -27,6 +27,7 @@ const state = {
   filtered: [],
   rendered: 0,
   selecting: false,
+  reordering: false,   // drag-to-reorder mode inside a group
   selected: new Set(),
   playing: null,   // { list, index }
   unlocked: false, // parental PIN entered this session
@@ -86,6 +87,7 @@ async function init() {
   applySettings();
   syncFavs();
   bindPlayer();
+  new ResizeObserver(([e]) => document.documentElement.style.setProperty('--chrome-h', `${e.target.offsetHeight}px`)).observe($('.chrome'));
   window.addEventListener('hashchange', route);
   window.addEventListener('resize', debounce(sizeGuide, 100));
   route();
@@ -152,7 +154,8 @@ async function syncNow() {
       if (d.progress) { state.progress = d.progress; db.set('progress', d.progress).catch(() => {}); }
       Object.assign(syncMeta, { favAt: d.favAt || syncMeta.favAt, recReset: d.recReset || syncMeta.recReset });
       db.set('syncMeta', syncMeta).catch(() => {});
-      if (changed && !state.current && !state.playing) showHome();   // never redraw Home under a playing channel
+      // Never redraw Home under a playing channel or while you're typing; keep the scroll position.
+      if (changed && !state.current && !state.playing && !document.activeElement?.matches('input, textarea')) rerender();
     } catch {} finally {
       syncing = null;
       if (syncAgain) { syncAgain = false; syncNow(); }
@@ -310,9 +313,21 @@ async function setPin() {
 
 // ---------- routing ----------
 let multiActive = false;
+// Where you were on each screen, so Back lands on the same group, search and row.
+const viewMemo = new Map();
+let memoKey = null;
+function rememberView() {
+  if (!memoKey) return;
+  viewMemo.set(memoKey, state.current && !location.hash.startsWith('#/guide')
+    ? { y: scrollY, tab: state.tab, group: state.group, query: state.query, rendered: state.rendered }
+    : { y: scrollY });
+}
 function route() {
+  rememberView();
+  memoKey = location.hash || '#/';
   const [, kind, id] = (location.hash || '#/').slice(1).split('/');
   state.selecting = false;
+  state.reordering = false;
   state.selected.clear();
   observer.disconnect();
   if (multiActive && kind !== 'multi') stopMulti();
@@ -327,14 +342,16 @@ function route() {
   if (kind === 'fav' || kind === 'recent' || kind === 'all') return showPlaylist(virtualPlaylist(kind));
   if (kind === 'multi') return showMulti();
   showHome();
+  const y = viewMemo.get(memoKey)?.y;
+  if (y) requestAnimationFrame(() => scrollTo(0, y));
 }
 
 function rerender() {
   const [, kind] = (location.hash || '#/').slice(1).split('/');
   if (kind === 'guide') return state.current && showGuide(state.current);
   if (kind === 'multi') return;
-  if (state.current) refreshPlaylistView();
-  else showHome();
+  if (state.current) refreshPlaylistView({ keep: true });   // an edit: stay on the same row
+  else { const y = scrollY; showHome(); scrollTo(0, y); }
 }
 
 function setTopbar({ title, back = false, actions = [] }) {
@@ -524,10 +541,11 @@ function channelKind(c) {
 }
 // Providers list the same channel several times in a group (backup feeds). Show it once; the copies
 // become automatic fallbacks, tried in order if a stream fails (see tune()).
+const dupKey = c => `${c.group || ''}\0${(c.tvgId || '').toLowerCase()}\0${normName(c.name)}`;
 function mergeDuplicates(list) {
   const out = [], seen = new Map();
   for (const c of list) {
-    const k = `${c.group || ''}\0${(c.tvgId || '').toLowerCase()}\0${normName(c.name)}`;
+    const k = dupKey(c);
     const first = seen.get(k);
     if (first) { first.alts ||= []; if (c.url !== first.url && !first.alts.includes(c.url)) first.alts.push(c.url); continue; }
     seen.set(k, c);
@@ -554,8 +572,10 @@ function m3uKinds(p) {
 function showPlaylist(p) {
   state.current = p;
   state.tab = 'live';
-  state.group = pendingGroup; pendingGroup = null;
-  state.query = pendingQuery.toLowerCase();
+  const memo = !pendingGroup && !pendingQuery ? viewMemo.get(location.hash) : null;
+  state.group = pendingGroup ?? memo?.group ?? null; pendingGroup = null;
+  state.query = pendingQuery ? pendingQuery.toLowerCase() : memo?.query || '';
+  if (memo && !pendingQuery) pendingQuery = memo.query || '';
   const k = m3uKinds(p);
   const showTabs = p.kind === 'xtream' || p._hasVod;
   const tabBtn = (t, label) => `<button data-tab="${t}"${t === 'live' ? ' class="active"' : ''}>${label}</button>`;
@@ -570,14 +590,17 @@ function showPlaylist(p) {
     <div id="sentinel" class="sentinel"></div>
     <div class="selbar" id="selbar" hidden></div>`;
   pendingQuery = '';
-  $('#q').oninput = debounce(e => { state.query = e.target.value.trim().toLowerCase(); requestAnimationFrame(applyFilter); }, 120);
+  $('#q').oninput = debounce(e => { state.query = e.target.value.trim().toLowerCase(); requestAnimationFrame(() => { applyFilter(); toListTop(); }); }, 120);
   $('#chips').onclick = async e => {
     const b = e.target.closest('.chip');
     if (!b) return;
     if (b.dataset.locked && !await unlock()) return;
     state.group = b.hasAttribute('data-all') ? null : b.dataset.group;
+    if (state.group === null) state.reordering = false;
+    updateTopbar();
     renderChips();
     applyFilter();
+    toListTop();
   };
   $('#seg')?.addEventListener('click', e => {
     const b = e.target.closest('[data-tab]');
@@ -590,19 +613,28 @@ function showPlaylist(p) {
     if (state.tab !== 'live' && p.kind === 'xtream') loadVod(p, state.tab);
   });
   $('#list').onclick = onListClick;
+  bindRowDrag();
   // start the transcoder on the confirmed tap (pointerup lands just before click), without killing the
   // current stream on a mere scroll-touch
   $('#list').onpointerup = e => { const el = e.target.closest('.row'); if (el && !state.selecting) warm(state.filtered[+el.dataset.i]?.url); };
   observer.observe($('#sentinel'));
-  refreshPlaylistView();
-  window.scrollTo(0, 0);
+  if (memo?.tab && memo.tab !== 'live' && $(`#seg [data-tab="${memo.tab}"]`)) $(`#seg [data-tab="${memo.tab}"]`).click();
+  else refreshPlaylistView();
+  if (memo) { while (state.rendered < Math.min(memo.rendered || 0, state.filtered.length)) renderMore(); requestAnimationFrame(() => scrollTo(0, memo.y)); }
+  else window.scrollTo(0, 0);
   if (!p.virtual) maybeUpdateGuide(p);
 }
 
-function refreshPlaylistView() {
+// New results (another group, a search) start at their first row, not wherever the old list was scrolled.
+function toListTop() {
+  const list = $('#list');
+  if (list && scrollY > list.offsetTop - 160) scrollTo(0, Math.max(0, list.offsetTop - 160));
+}
+
+function refreshPlaylistView({ keep = false } = {}) {
   updateTopbar();
   renderChips();
-  applyFilter();
+  applyFilter({ keep });
 }
 
 function updateTopbar() {
@@ -613,7 +645,8 @@ function updateTopbar() {
     back: '#/',
     actions: [
       live && !p.virtual && { icon: 'guide', label: 'TV guide', fn: () => { location.hash = `#/guide/${p.id}`; } },
-      live && !p.readOnly && p.channels.length && { icon: 'select', label: state.selecting ? 'Done selecting' : 'Select', active: state.selecting, fn: toggleSelecting },
+      canReorder() && { icon: 'grip', label: state.reordering ? 'Done reordering' : 'Reorder channels', active: state.reordering, fn: toggleReordering },
+      live && !p.readOnly && p.channels.length && !state.reordering && { icon: 'select', label: state.selecting ? 'Done selecting' : 'Select', active: state.selecting, fn: toggleSelecting },
       { icon: 'more', label: 'Playlist options', fn: () => playlistMenu(p) },
     ].filter(Boolean),
   });
@@ -672,8 +705,9 @@ function renderChips() {
   $('#chips .chip.active')?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
 }
 
-function applyFilter() {
+function applyFilter({ keep = false } = {}) {
   const p = state.current;
+  const keepRows = keep ? state.rendered : 0, keepY = scrollY;
   const q = state.query;
   const items = currentItems();
   state.filtered = items.filter(c => {
@@ -687,8 +721,11 @@ function applyFilter() {
   list.classList.toggle('grid', state.tab !== 'live' && state.current.kind === 'xtream');
   list.innerHTML = '';
   state.rendered = 0;
-  if (state.filtered.length) renderMore();
-  else {
+  if (state.filtered.length) {
+    renderMore();
+    while (state.rendered < Math.min(keepRows, state.filtered.length)) renderMore();
+    if (keep) scrollTo(0, keepY);
+  } else {
     const loading = state.tab !== 'live' && !vodCache.has(vodKey(p, state.tab));
     const msg = loading ? `Loading ${state.tab}…`
       : items.length ? 'No matches.'
@@ -710,6 +747,17 @@ function renderMore() {
   list.insertAdjacentHTML('beforeend', shown.map((c, k) => html(c, state.rendered + k)).join(''));
   state.rendered = end;
   if (state.tab === 'live') ensureGuide(shown);
+}
+
+// Fill in what's on for rows already on screen, touching only that line (no rebuild, no flicker, taps keep working).
+function updateRowsInPlace() {
+  document.querySelectorAll('#list .row').forEach(r => {
+    const c = state.filtered[+r.dataset.i];
+    const sub = r.querySelector('.row-sub');
+    if (!c || !sub) return;
+    const html = nowLine(c);
+    if (html && sub.dataset.epg !== html) { sub.innerHTML = html; sub.dataset.epg = html; }
+  });
 }
 
 function rerenderRows() {
@@ -756,8 +804,8 @@ function rowHtml(c, i) {
   return `<li class="row${selected ? ' selected' : ''}${playing ? ' playing' : ''}" data-i="${i}">
     ${state.selecting ? `<span class="check">${selected ? icon('check') : ''}</span>` : ''}
     ${state.settings.numbers && c.num ? `<span class="ch-num">${c.num}</span>` : ''}${logoHtml(c)}
-    <span class="row-text"><span class="row-name">${esc(c.name)}${archiveDays(c) ? '<span class="tag">Catch-up</span>' : ''}</span>${sub}${progressBar(c)}</span>
-    ${state.selecting ? '' : `<button class="icon-btn star${favUrls.has(c.url) ? ' on' : ''}" data-act="fav" aria-label="Favorite">${icon('star')}</button>
+    <span class="row-text"><span class="row-name">${esc(c.name)}${archiveDays(c) ? '<span class="tag">Catch-up</span>' : ''}</span><span class="row-sub">${sub}</span>${progressBar(c)}</span>
+    ${state.reordering ? `<span class="rhandle" aria-label="Drag to reorder">${icon('grip')}</span>` : state.selecting ? '' : `<button class="icon-btn star${favUrls.has(c.url) ? ' on' : ''}" data-act="fav" aria-label="Favorite">${icon('star')}</button>
     <button class="icon-btn" data-act="more" aria-label="Options">${icon('more')}</button>`}
   </li>`;
 }
@@ -780,6 +828,7 @@ function onListClick(e) {
   const c = state.filtered[i];
   if (!c) return;
   if (el.classList.contains('poster')) return c.kind === 'series' ? seriesSheet(c) : movieSheet(c);
+  if (state.reordering) return;
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (state.selecting) {
     if (state.selected.has(c.id)) state.selected.delete(c.id); else state.selected.add(c.id);
@@ -806,8 +855,8 @@ async function toggleFavorite(c, button) {
   await db.set('favorites', state.favorites);
   favoritesChanged();
   button?.classList.toggle('on', adding);
-  if (state.current?.id === 'fav') { state.current.channels = state.favorites; refreshPlaylistView(); }
-  toast(adding ? 'Added to Favorites' : 'Removed from Favorites');
+  if (state.current?.id === 'fav') { state.current.channels = state.favorites; refreshPlaylistView({ keep: true }); }
+  toast(adding ? 'Added to Favorites' : 'Removed from Favorites', { action: 'Undo', fn: () => toggleFavorite(c, button) });
 }
 
 async function addFavorites(channels) {
@@ -820,6 +869,77 @@ async function addFavorites(channels) {
 }
 
 // ---------- selection ----------
+// ---------- reorder channels in a group (TiviMate-style) ----------
+const canReorder = () => { const p = state.current; return p && !p.virtual && !p.readOnly && state.tab === 'live' && state.group !== null && !state.query; };
+function toggleReordering() {
+  state.reordering = !state.reordering;
+  state.selecting = false;
+  updateTopbar();
+  applyFilter({ keep: true });
+  if (state.reordering) toast('Drag ⠿ to move channels. Tap Done when finished.');
+}
+// Puts the group's channels in `ordered` order, keeping the group's slots in the playlist; backup copies
+// of a merged channel travel with it.
+async function reorderGroup(p, group, ordered) {
+  const rank = new Map();
+  ordered.forEach((c, i) => { if (!rank.has(dupKey(c))) rank.set(dupKey(c), i); });
+  const slots = [], members = [];
+  p.channels.forEach((c, i) => { if ((c.group || '') === group) { slots.push(i); members.push(c); } });
+  members.sort((a, b) => (rank.get(dupKey(a)) ?? 1e9) - (rank.get(dupKey(b)) ?? 1e9));
+  const next = [...p.channels];
+  slots.forEach((slot, k) => { next[slot] = members[k]; });
+  const before = p.channels;
+  p.channels = next;
+  await save(p);
+  return before;
+}
+async function moveInGroup(c, toTop) {
+  const p = state.current, group = c.group || '';
+  const list = (m3uKinds(p)?.live || p.channels).filter(x => (x.group || '') === group && x !== c);
+  const before = await reorderGroup(p, group, toTop ? [c, ...list] : [...list, c]);
+  rerender();
+  toast(toTop ? 'Moved to top of group' : 'Moved to bottom of group', { action: 'Undo', fn: async () => { p.channels = before; await save(p); rerender(); } });
+}
+// Drag rows by their handle; holding near the top/bottom edge scrolls the page.
+function bindRowDrag() {
+  const list = $('#list');
+  let drag = null;
+  const placeAt = (x, y) => {
+    const over = document.elementFromPoint(x, y)?.closest('#list .row');
+    if (!over || over === drag.li) return;
+    const r = over.getBoundingClientRect();
+    list.insertBefore(drag.li, y < r.top + r.height / 2 ? over : over.nextSibling);
+  };
+  const autoScroll = () => {
+    if (!drag) return;
+    const top = $('.chrome').offsetHeight + ($('.filters')?.offsetHeight || 0), EDGE = 90;
+    const v = drag.y < top + EDGE ? -(top + EDGE - drag.y) : drag.y > innerHeight - EDGE ? drag.y - (innerHeight - EDGE) : 0;
+    if (v) { scrollBy(0, Math.max(-26, Math.min(26, v / 3))); if (v > 0) renderMore(); placeAt(drag.x, drag.y); }
+    requestAnimationFrame(autoScroll);
+  };
+  list.addEventListener('pointerdown', e => {
+    const h = state.reordering && e.target.closest('.rhandle');
+    if (!h) return;
+    drag = { li: h.closest('.row'), x: e.clientX, y: e.clientY };
+    drag.li.classList.add('dragging');
+    h.setPointerCapture(e.pointerId);
+    e.preventDefault();
+    requestAnimationFrame(autoScroll);
+  });
+  list.addEventListener('pointermove', e => { if (drag) { drag.x = e.clientX; drag.y = e.clientY; placeAt(e.clientX, e.clientY); } });
+  const drop = async () => {
+    if (!drag) return;
+    drag.li.classList.remove('dragging');
+    drag = null;
+    const p = state.current;
+    const ordered = [...list.querySelectorAll('.row')].map(r => state.filtered[+r.dataset.i]).concat(state.filtered.slice(state.rendered));
+    await reorderGroup(p, state.group, ordered);
+    applyFilter({ keep: true });
+  };
+  list.addEventListener('pointerup', drop);
+  list.addEventListener('pointercancel', drop);
+}
+
 function toggleSelecting() {
   state.selecting = !state.selecting;
   state.selected.clear();
@@ -923,6 +1043,8 @@ function channelMenu(c) {
     hasGuide && { label: archiveDays(c) ? 'TV guide & catch-up' : 'TV guide', fn: () => scheduleSheet(c) },
     { label: favUrls.has(c.url) ? 'Remove from Favorites' : 'Add to Favorites', fn: () => toggleFavorite(c, null).then(highlightStars) },
     isLiveChannel(c) && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
+    editable && isLiveChannel(c) && { label: 'Move to top of group', fn: () => moveInGroup(c, true) },
+    editable && isLiveChannel(c) && { label: 'Move to bottom of group', fn: () => moveInGroup(c, false) },
     editable && { label: 'Edit…', fn: () => editChannel(c, p) },
     ...externalItems(c),
     !c.kind && { label: 'Copy to playlist…', fn: () => copyToMenu([c]) },
@@ -1021,11 +1143,12 @@ function detailHtml(m, info = {}) {
 
 async function movieSheet(m) {
   let info = {};
-  const open = () => sheet(detailHtml(m, info), {
+  const open = (keepScroll = false) => sheet(detailHtml(m, info), {
+    keepScroll,
     onMount: el => {
       el.querySelector('[data-play]').onclick = () => { closeSheet(); playChannel([m], 0); };
       el.querySelector('[data-restart]')?.addEventListener('click', () => { delete state.progress[m.url]; closeSheet(); playChannel([m], 0); });
-      el.querySelector('[data-fav]').onclick = async () => { await toggleFavorite(m, null); open(); };
+      el.querySelector('[data-fav]').onclick = async () => { await toggleFavorite(m, null); open(true); };
       el.querySelector('[data-more]').onclick = () => menu(m.name, [
         info.info?.youtube_trailer && { label: 'Watch trailer', fn: () => window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(info.info.youtube_trailer)}`, '_blank') },
         ...externalItems(m),
@@ -1069,7 +1192,7 @@ async function seriesSheet(s) {
   let season = last ? urls.get(last.item.url) : seasons[0];
   const i = info.info || {};
 
-  const render = () => {
+  const render = (keepScroll = false) => {
     const list = episodesOf(season);
     sheet(`<div class="detail" data-id="${esc(s.id)}">
       <div class="detail-top">
@@ -1091,10 +1214,11 @@ async function seriesSheet(s) {
         </li>`;
       }).join('')}</ul>` : '<p class="muted">No episodes listed.</p>'}
     </div>`, {
+      keepScroll,
       onMount: el => {
         el.onclick = e => {
           const sc = e.target.closest('[data-season]');
-          if (sc) { season = sc.dataset.season; return render(); }
+          if (sc) { season = sc.dataset.season; return render(true); }
           const ep = e.target.closest('[data-e]');
           if (ep) { closeSheet(); playChannel(list, +ep.dataset.e); }
         };
@@ -1208,8 +1332,13 @@ async function flushGuide() {
 
 const persistGuide = debounce(pid => { const g = guides.get(pid); if (g) db.set(`epg:${pid}`, { programmes: g.programmes, names: g.names, at: g.at }).catch(() => {}); }, 2000);
 const refreshAfterGuide = debounce(pid => {
-  if (location.hash === `#/guide/${pid}`) return showGuide(byId(pid));
-  if (state.current && !$('#guide')) rerenderRows();
+  if (location.hash === `#/guide/${pid}`) {
+    // Only rebuild the grid while it's still loading, or before you've started using it.
+    const el = $('#guide');
+    if (!el || (el.scrollTop < 5 && !guideState?.group)) { const left = el?.scrollLeft; showGuide(byId(pid)); if (left && $('#guide')) $('#guide').scrollLeft = left; }
+    return;
+  }
+  if (state.current && !$('#guide')) updateRowsInPlace();
   const card = !state.current && $('.resume');
   if (card && resumeChannel) card.outerHTML = resumeCardHtml(resumeChannel);   // fill in what's on, in place
 }, 250);
@@ -1576,7 +1705,11 @@ function playlistMenu(p) {
   const viewing = state.current === p;
   const live = !viewing || state.tab === 'live';
   const narrowed = viewing && (state.group !== null || state.query);
-  const resort = async compare => { p.channels = [...p.channels].sort(compare); await save(p); rerender(); toast('Sorted'); };
+  const resort = async compare => {
+    const before = p.channels;
+    p.channels = [...p.channels].sort(compare); await save(p); rerender();
+    toast('Sorted', { action: 'Undo', fn: async () => { p.channels = before; await save(p); rerender(); } });
+  };
   menu(p.name, [
     p.kind === 'xtream' && { label: 'Account info', fn: () => accountSheet(p) },
     real && live && { label: 'TV guide', fn: () => { location.hash = `#/guide/${p.id}`; } },
@@ -1591,11 +1724,11 @@ function playlistMenu(p) {
     !p.readOnly && live && p.channels.length > 1 && { label: 'Sort A–Z', fn: () => resort((a, b) => collator.compare(a.name, b.name)) },
     !p.readOnly && live && p.channels.length > 1 && { label: 'Sort by group', fn: () => resort((a, b) => collator.compare(a.group || '￿', b.group || '￿')) },
     real && live && p.channels.length > 1 && { label: 'Remove duplicates', fn: async () => {
-      const before = p.channels.length;
+      const before = p.channels;
       p.channels = dedupe(p.channels);
       await save(p);
       rerender();
-      toast(`Removed ${plural(before - p.channels.length, 'duplicate')}`);
+      toast(`Removed ${plural(before.length - p.channels.length, 'duplicate')}`, { action: 'Undo', fn: async () => { p.channels = before; await save(p); rerender(); } });
     } },
     real && { label: 'Manage groups (hide, lock, reorder)…', fn: () => groupsSheet(p, viewing ? state.tab : 'live') },
     real && { label: 'Rename…', fn: async () => {
@@ -1616,9 +1749,11 @@ function playlistMenu(p) {
       toast('Playlist deleted');
     } },
     p.id === 'recent' && p.channels.length && { label: 'Clear history', danger: true, fn: async () => {
+      const before = p.channels;
       p.channels = [];
       await save(p);
       rerender();
+      toast('History cleared', { action: 'Undo', fn: async () => { p.channels = before; await save(p); rerender(); } });
     } },
   ]);
 }
@@ -1642,7 +1777,7 @@ function accountSheet(p) {
   });
 }
 
-function groupsSheet(p, tab, { scroll = 0 } = {}) {
+function groupsSheet(p, tab, { scroll = 0, q = '' } = {}) {
   const items = tab === 'live' ? p.channels : vodCache.get(vodKey(p, tab)) || [];
   const groups = groupsOf(items);
   const hidden = new Set(p.hiddenGroups || []);
@@ -1683,20 +1818,24 @@ function groupsSheet(p, tab, { scroll = 0 } = {}) {
       ${tab === 'live' ? `<span class="ghandle" data-act="drag" aria-label="Drag to reorder">${icon('grip')}</span>` : ''}
     </li>`).join('')}</ul>`, {
     onMount: el => {
-      if (scroll) el.scrollTop = scroll;   // re-rendered after a change: stay where you were
       const rows = [...el.querySelectorAll('.glist > li')];
       const visibleRows = () => rows.filter(li => !li.hidden);
-      el.querySelector('#g-q').oninput = e => {
-        const q = e.target.value.trim().toLowerCase();
-        rows.forEach(li => { li.hidden = !!q && !li.dataset.gname.includes(q); });
-      };
+      const qEl = el.querySelector('#g-q');
+      const filterRows = () => { const t = qEl.value.trim().toLowerCase(); rows.forEach(li => { li.hidden = !!t && !li.dataset.gname.includes(t); }); };
+      qEl.oninput = filterRows;
+      // After a change the sheet is rebuilt: keep the filter text and the scroll position, so nothing jumps.
+      if (q) { qEl.value = q; filterRows(); }
+      if (scroll) el.scrollTop = scroll;
+      let memo = { scroll, q };
+      const remember = () => { memo = { scroll: el.scrollTop, q: qEl.value }; };
+      const reopen = () => groupsSheet(p, tab, memo);
       const setHidden = async (fn) => {
         const set = new Set(p.hiddenGroups || []);
         fn(set);
         p.hiddenGroups = [...set];
         await save(p);
         rerender();
-        groupsSheet(p, tab, { scroll: $('#sheet').scrollTop });
+        reopen();
       };
       // Reorder groups: `order` is the full list of group names in the wanted order.
       const applyOrder = async order => {
@@ -1704,7 +1843,7 @@ function groupsSheet(p, tab, { scroll = 0 } = {}) {
         p.channels = [...p.channels].sort((a, c) => (rank.get(a.group || '') ?? 1e9) - (rank.get(c.group || '') ?? 1e9));
         await save(p);
         rerender();
-        groupsSheet(p, tab, { scroll: $('#sheet').scrollTop });
+        reopen();
       };
       // Drag a row by its handle to reorder (touch and mouse).
       const list = el.querySelector('.glist');
@@ -1742,11 +1881,13 @@ function groupsSheet(p, tab, { scroll = 0 } = {}) {
       };
       list.onpointerup = list.onpointercancel = async () => {
         if (!drag) return;
+        remember();
         drag.li.classList.remove('dragging');
         drag = null;
         await applyOrder([...list.children].map(li => groups[+li.dataset.i].name));
       };
       el.onclick = async e => {
+        remember();   // menus close the sheet before their action runs, so note the place now
         const srt = e.target.closest('[data-sort]');
         if (srt) {
           const names = groups.map(g => g.name);
@@ -1786,6 +1927,7 @@ function groupsSheet(p, tab, { scroll = 0 } = {}) {
           p.homeGroups = groups.map(x => x.name).filter(n => set.has(n));   // keep the list's order
           await save(p);
           b.classList.toggle('on', set.has(g.name));   // in place: no re-render, so the list stays where you are
+          if (!state.current) showHome();             // Home's tiles sit under the sheet
           return;
         }
         const toggle = async (key, name) => {
@@ -1794,7 +1936,7 @@ function groupsSheet(p, tab, { scroll = 0 } = {}) {
           p[key] = [...set];
           await save(p);
           rerender();
-          groupsSheet(p, tab, { scroll: $('#sheet').scrollTop });
+          reopen();
         };
         const inGroup = p.channels.filter(c => (c.group || '') === g.name);
         const others = groups.map(x => x.name).filter(n => n !== g.name);
@@ -1815,10 +1957,12 @@ function groupsSheet(p, tab, { scroll = 0 } = {}) {
             if (state.group === g.name) state.group = v.name;
             rerender();
             toast('Group renamed');
+            reopen();
           } },
           tab === 'live' && { label: `Delete group and its ${plural(g.count, 'channel')}`, danger: true, fn: async () => {
             if (!await confirmDialog(`Delete “${g.name || UNGROUPED}” and its ${plural(g.count, 'channel')}?`, 'Delete', true)) return;
             await deleteChannels(p, new Set(inGroup.map(c => c.id)));
+            reopen();
           } },
         ]);
       };
@@ -1967,6 +2111,7 @@ function addPlaylistSheet() {
 }
 
 async function refreshSource(p, { silent = false } = {}) {
+  const redraw = () => { if (!silent || state.current === p) rerender(); };
   if (!silent) toast('Refreshing…');
   try {
     const before = p.channels;
@@ -1984,7 +2129,7 @@ async function refreshSource(p, { silent = false } = {}) {
     }
     p.refreshedAt = Date.now();
     await save(p);
-    rerender();
+    redraw();
     if (!silent) toast(`Updated: ${plural(p.channels.length, 'channel')}`, { action: 'Undo', fn: async () => { p.channels = before; await save(p); rerender(); } });
   } catch (err) {
     if (!silent) toast(err.message);

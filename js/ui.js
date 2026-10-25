@@ -40,13 +40,15 @@ const backdrop = $('#sheet-backdrop');
 const sheetEl = $('#sheet');
 let onSheetClose = null;
 
-export function sheet(html, { onMount, onClose } = {}) {
+// keepScroll: re-render an open sheet in place (season chips, Save) without jumping to the top.
+export function sheet(html, { onMount, onClose, keepScroll = false } = {}) {
   const prev = onSheetClose;
   onSheetClose = null;
   prev?.();
+  const y = keepScroll && !sheetEl.hidden ? sheetEl.scrollTop : 0;
   sheetEl.innerHTML = `<div class="sheet-grip"></div>${html}`;
   sheetEl.hidden = backdrop.hidden = false;
-  sheetEl.scrollTop = 0;
+  sheetEl.scrollTop = y;
   onSheetClose = onClose || null;
   onMount?.(sheetEl);
   return sheetEl;

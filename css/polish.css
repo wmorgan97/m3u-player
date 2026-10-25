@@ -201,3 +201,14 @@
 }
 .browse.scrolls::-webkit-scrollbar { display: none; }
 .browse.scrolls .bt { scroll-snap-align: start; }
+
+/* Search + group chips stay pinned directly under the top bar, or under the video while one plays */
+.filters { top: var(--chrome-h, calc(var(--safe-top) + 50px)); }
+/* iOS zooms into any field under 16px: keep the paste box at 16px */
+.form textarea { font-size: 16px; }
+.row-sub { display: contents; }
+
+/* ---------- Reorder channels in a group ---------- */
+.rhandle { display: grid; place-items: center; width: 44px; height: 44px; flex: none; color: var(--muted); touch-action: none; -webkit-user-select: none; user-select: none; cursor: grab; }
+.rhandle .ico { width: 22px; height: 22px; fill: currentColor; stroke: none; }
+#list .row.dragging { background: var(--surface-2); box-shadow: 0 8px 24px rgba(0, 0, 0, .45); opacity: .92; position: relative; z-index: 2; content-visibility: visible; }
