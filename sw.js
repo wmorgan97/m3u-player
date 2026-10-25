@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens offline. Streams, logos and
 // playlist downloads (other origins) always go straight to the network.
 
-const CACHE = 'm3u-player-v47';
+const CACHE = 'm3u-player-v48';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/polish.css',
   'js/app.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/epg-worker.js', 'js/vod.js', 'js/native.js', 'vendor/hls.min.js',
@@ -39,5 +39,14 @@ self.addEventListener('fetch', e => {
     } catch {}
     const hit = await cache.match(req, { ignoreSearch: true });
     return hit || fresh;
+  }));
+});
+
+// A reminder notification opens (or focuses) the app.
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    const c = list.find(w => 'focus' in w);
+    return c ? c.focus() : self.clients.openWindow('./');
   }));
 });

@@ -75,9 +75,11 @@ const cloneChannel = c => ({ ...c, id: uid(), src: srcOf(c) || undefined, attrs:
 
 // ---------- boot ----------
 async function init() {
-  const [playlists, favorites, recents, settings, progress, meta] = await Promise.all([
-    db.allPlaylists(), db.get('favorites'), db.get('recents'), db.get('settings'), db.get('progress'), db.get('syncMeta'),
+  const [playlists, favorites, recents, settings, progress, meta, reminders] = await Promise.all([
+    db.allPlaylists(), db.get('favorites'), db.get('recents'), db.get('settings'), db.get('progress'), db.get('syncMeta'), db.get('reminders'),
   ]);
+  state.reminders = reminders || [];
+  scheduleReminders();
   Object.assign(syncMeta, meta);
   state.playlists = playlists.sort((a, b) => a.createdAt - b.createdAt);
   state.favorites = favorites || [];
@@ -100,7 +102,7 @@ async function init() {
   if (!isNative) await detectServerProxy();
   if (resumeChannel) ensureGuide([resumeChannel]);
   syncNow();
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); } });
   await Promise.all(state.playlists.map(p => loadGuide(p.id)));
   rerenderRows();
   backgroundRefresh();
@@ -269,7 +271,8 @@ function virtualPlaylist(id) {
 
 // ---------- groups: hidden & parental lock ----------
 function visibleGroup(p, g) {
-  if (!p || p.virtual) return true;
+  if (!p) return true;
+  if (p.virtual) return state.unlocked || !state.playlists.some(x => x.lockedGroups?.includes(g));   // locks follow the channel into Favorites, Recents, All
   if (p.hiddenGroups?.includes(g)) return false;
   return !(p.lockedGroups?.includes(g) && !state.unlocked);
 }
@@ -615,6 +618,7 @@ function showPlaylist(p) {
     if (state.tab !== 'live' && p.kind === 'xtream') loadVod(p, state.tab);
   });
   $('#list').onclick = onListClick;
+  $('#list').onkeydown = e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('row')) { e.preventDefault(); e.target.click(); } };
   bindRowDrag();
   // start the transcoder on the confirmed tap (pointerup lands just before click), without killing the
   // current stream on a mere scroll-touch
@@ -805,7 +809,7 @@ function rowHtml(c, i) {
   const playing = nowChannel()?.url === c.url;
   const epg = nowLine(c);
   const sub = epg || (!state.group && c.group ? `<span class="muted">${esc(prettyGroup(c.group))}</span>` : '');
-  return `<li class="row${selected ? ' selected' : ''}${playing ? ' playing' : ''}" data-i="${i}">
+  return `<li class="row${selected ? ' selected' : ''}${playing ? ' playing' : ''}" data-i="${i}" role="button" tabindex="0" aria-label="${esc(c.name)}">
     ${state.selecting ? `<span class="check">${selected ? icon('check') : ''}</span>` : ''}
     ${state.settings.numbers && c.num ? `<span class="ch-num">${c.num}</span>` : ''}${logoHtml(c)}
     <span class="row-text"><span class="row-name">${esc(c.name)}${archiveDays(c) ? '<span class="tag">Catch-up</span>' : ''}</span><span class="row-sub">${sub}</span>${progressBar(c)}</span>
@@ -1494,14 +1498,57 @@ function programmeSheet(c, prog) {
       <div class="detail-actions">
         ${live ? `<button class="btn primary" data-live>${icon('play')} Watch live</button>` : ''}
         ${(live || past) && canCatchUp(c, prog) ? `<button class="btn ${live ? '' : 'primary'}" data-cu>${live ? 'Watch from start' : `${icon('play')} Watch (catch-up)`}</button>` : ''}
-        ${!live && !past ? '<p class="muted">Not started yet.</p>' : ''}
+        ${!live && !past ? `<button class="btn ${hasReminder(c, prog) ? '' : 'primary'}" data-remind>${hasReminder(c, prog) ? 'Remove reminder' : `${icon('clock')} Remind me`}</button>` : ''}
         ${past && !canCatchUp(c, prog) ? '<p class="muted">This channel doesn’t offer catch-up.</p>' : ''}
       </div></div>`, {
     onMount: el => {
       el.querySelector('[data-live]')?.addEventListener('click', () => { closeSheet(); playChannel([c], 0); });
       el.querySelector('[data-cu]')?.addEventListener('click', () => { closeSheet(); playCatchup(c, prog); });
+      el.querySelector('[data-remind]')?.addEventListener('click', async () => { await toggleReminder(c, prog); programmeSheet(c, prog); });
     },
   });
+}
+
+// ---------- reminders ----------
+// Fire a few minutes before a programme starts: a phone notification when the installed app has
+// permission, and always a tap-to-watch toast if the app is open.
+const REMIND_BEFORE = 3 * MINUTE;
+const reminderKey = (c, prog) => `${c.url}|${prog[0]}`;
+const hasReminder = (c, prog) => (state.reminders || []).some(r => r.key === reminderKey(c, prog));
+let reminderTimer = 0;
+async function toggleReminder(c, prog) {
+  state.reminders ||= [];
+  const key = reminderKey(c, prog);
+  if (hasReminder(c, prog)) {
+    state.reminders = state.reminders.filter(r => r.key !== key);
+    toast('Reminder removed');
+  } else {
+    if ('Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch {} }
+    state.reminders.push({ key, at: prog[0], title: prog[2], channel: cloneChannel(c) });
+    toast(`Reminder set for ${fmtTime(prog[0])}`);
+  }
+  await db.set('reminders', state.reminders);
+  scheduleReminders();
+}
+function scheduleReminders() {
+  clearTimeout(reminderTimer);
+  const now = Date.now();
+  state.reminders = (state.reminders || []).filter(r => r.at > now - 10 * MINUTE);
+  const next = state.reminders.filter(r => !r.fired).sort((a, b) => a.at - b.at)[0];
+  if (!next) return;
+  reminderTimer = setTimeout(() => {
+    next.fired = true;
+    const ch = next.channel;
+    toast(`${next.title} starts at ${fmtTime(next.at)} on ${ch.name}`, { action: 'Watch', fn: () => playChannel([ch], 0) });
+    try {
+      if (Notification.permission === 'granted') {
+        navigator.serviceWorker?.ready.then(reg => reg.showNotification(`${next.title} starts soon`, { body: `${fmtTime(next.at)} on ${ch.name}`, icon: 'icons/icon-192.png', tag: next.key }))
+          .catch(() => new Notification(`${next.title} starts soon`, { body: `${fmtTime(next.at)} on ${ch.name}` }));
+      }
+    } catch {}
+    db.set('reminders', state.reminders).catch(() => {});
+    scheduleReminders();
+  }, Math.max(0, next.at - REMIND_BEFORE - now));
 }
 
 function scheduleSheet(c) {
