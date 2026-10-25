@@ -81,6 +81,8 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 .muted { color: var(--muted); font-size: 13px; }
 .error { color: var(--danger); font-size: 13px; }
 .section-title { margin: 22px 4px 8px; font-size: 12px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.section-title.split { display: flex; align-items: center; justify-content: space-between; }
+.link { padding: 2px 6px; font-size: 12px; font-weight: 600; letter-spacing: .02em; text-transform: none; color: var(--accent); }
 
 .banner {
   display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 12px 6px 12px 14px;
@@ -111,11 +113,13 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 
 /* Browse — category tiles on the home screen, each opens that group directly */
 .browse { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+/* Restrained: dark tiles with a subtle per-group tint and a thin coloured edge — identity without noise */
 .bt {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 13px 13px; text-align: left;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 13px 13px 13px 15px; text-align: left;
   border-radius: 13px; --hue: 220; color: var(--text);
-  background: linear-gradient(135deg, hsl(var(--hue) 40% 23%), hsl(calc(var(--hue) + 30) 38% 13%));
+  background: linear-gradient(135deg, hsl(var(--hue) 18% 17%), hsl(var(--hue) 16% 12%));
   border: 1px solid rgba(255, 255, 255, .06);
+  box-shadow: inset 3px 0 0 hsl(var(--hue) 55% 58%);
 }
 .bt:active { filter: brightness(1.15); }
 .bt-name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -164,11 +168,11 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 .logo {
   position: relative; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 12px; overflow: hidden; flex: none;
   --hue: 220;
-  background: linear-gradient(145deg, hsl(var(--hue) 42% 30%), hsl(calc(var(--hue) + 35) 40% 17%));
+  background: linear-gradient(145deg, hsl(var(--hue) 26% 25%), hsl(var(--hue) 22% 15%));
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .05);
 }
-.logo::before { content: attr(data-initials); font-size: 14px; font-weight: 700; letter-spacing: .02em; color: hsl(var(--hue) 70% 86%); }
-.logo img { position: absolute; inset: 0; width: 100%; height: 100%; padding: 5px; object-fit: contain; background: #161920; }
+.logo::before { content: attr(data-initials); font-size: 14px; font-weight: 700; letter-spacing: .02em; color: hsl(var(--hue) 45% 84%); }
+.logo img { position: absolute; inset: 0; width: 100%; height: 100%; padding: 5px; object-fit: contain; background: transparent; }
 .star { color: var(--muted); }
 .star.on { color: var(--star); }
 .star.on .ico { fill: currentColor; }
@@ -235,8 +239,17 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 .glist { list-style: none; margin: 0; padding: 0; }
 .glist li { display: flex; align-items: center; gap: 8px; padding: 10px 2px; border-top: 1px solid var(--line); }
 .glist li.is-hidden .row-text { opacity: .45; }
-.glist .eye.on { color: var(--accent); }
+.gcheck { width: 22px; height: 22px; margin: 0 4px 0 2px; accent-color: var(--accent); flex: none; }
+.glist { touch-action: pan-y; }
+.ghandle { display: grid; place-items: center; width: 36px; height: 36px; color: var(--muted); cursor: grab; touch-action: none; flex: none; }
+.ghandle .ico { width: 20px; height: 20px; fill: currentColor; stroke: none; }
+.glist li.dragging { background: var(--surface-2); border-radius: 10px; opacity: .85; box-shadow: 0 6px 18px rgba(0, 0, 0, .4); }
+.gsort { align-items: center; }
+.gsort .btn { flex: 0 1 auto; }
+.gdrag-hint { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; font-size: 12px; }
+.gdrag-hint .ico { width: 14px; height: 14px; fill: currentColor; stroke: none; }
 .gsearch { margin: 4px 0 10px; }
+.pchips { margin: 0 -16px 2px; padding: 6px 16px 8px; }
 .gbulk { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .gbulk .btn { flex: 1 1 auto; }
 

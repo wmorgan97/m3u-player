@@ -309,11 +309,18 @@ function showHome() {
   try { dismissed = localStorage.getItem('install-tip') === 'off'; } catch {}
   const pl = state.playlists;
   const cw = continueWatching();
-  // Browse: the biggest live categories across playlists, tap to open that group directly.
+  // Browse: the groups the user pinned to Home (in their order); until they pin any, the biggest live groups.
+  const pinnedAny = pl.some(p => p.homeGroups?.length);
   const browse = pl.flatMap(p => {
     const k = m3uKinds(p);
-    return groupsOf(k ? k.live : p.channels).filter(g => g.name && visibleGroup(p, g.name)).map(g => ({ pid: p.id, name: g.name, count: g.count }));
-  }).sort((a, b) => b.count - a.count).slice(0, 12);
+    const gs = groupsOf(k ? k.live : p.channels).filter(g => g.name && visibleGroup(p, g.name));
+    if (pinnedAny) {
+      const want = p.homeGroups || [];
+      return want.map(n => gs.find(g => g.name === n)).filter(Boolean).map(g => ({ pid: p.id, name: g.name, count: g.count }));
+    }
+    return gs.sort((a, b) => b.count - a.count).map(g => ({ pid: p.id, name: g.name, count: g.count }));
+  }).slice(0, pinnedAny ? 40 : 12);
+  const browseEdit = pl.length ? `<button class="link" data-edit-groups="${esc(pl[0].id)}">${pinnedAny ? 'Edit' : 'Choose'}</button>` : '';
   view.innerHTML = `
     ${isIOS && !isStandalone && !dismissed ? `<div class="banner">
       ${icon('share')}<span><b>Install on your iPhone:</b> tap Share, then “Add to Home Screen”. It opens full-screen and iOS keeps your playlists safe.</span>
@@ -324,7 +331,7 @@ function showHome() {
     ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search all channels" autocomplete="off" autocorrect="off" spellcheck="false"></label>` : ''}
     ${state.recents.length ? `<div class="section-title">Jump back in</div>
       <div class="strip">${state.recents.slice(0, 12).map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
-    ${browse.length ? `<div class="section-title">Browse</div>
+    ${browse.length || pinnedAny ? `<div class="section-title split">Browse${browseEdit}</div>
       <div class="browse">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
         <span class="bt-name">${esc(prettyGroup(b.name))}</span><span class="muted">${b.count.toLocaleString()}</span></button>`).join('')}</div>` : ''}
     ${cw.length ? `<div class="section-title">Continue watching</div>
@@ -364,6 +371,8 @@ function showHome() {
     if (r) return playChannel(state.recents, +r.dataset.recent);
     const b = e.target.closest('[data-browse]');
     if (b) { pendingGroup = b.dataset.group; location.hash = `#/p/${b.dataset.browse}`; return; }
+    const eg = e.target.closest('[data-edit-groups]');
+    if (eg) return groupsSheet(byId(eg.dataset.editGroups), 'live');
     const go = e.target.closest('[data-go]');
     if (go) location.hash = go.dataset.go;
   };
@@ -375,8 +384,24 @@ let pendingGroup = null;   // a group to pre-select when the next playlist opens
 // IPTV providers pad M3U lists with "category header" rows (### NEWS ###, ===== SPORTS =====)
 // that have no real stream. Hide them. And tidy raw group names ("UK | SPORT" -> "UK · SPORT").
 const SEP_RE = /^\s*[#*=_~·•▬—–-]{2,}|[#*=_~·•▬—–-]{2,}\s*$/;
-const isSeparator = c => !c || SEP_RE.test(c.name || '') || !/[a-z0-9]/i.test(c.name || '');
-const prettyGroup = name => String(name || '').replace(/\s*[|/►▶]\s*/g, ' · ').replace(/\s+/g, ' ').trim();
+const PROMO_RE = /⬇️|release update|learn that|^epgenius$/i;   // provider notice rows, not channels
+const isSeparator = c => !c || SEP_RE.test(c.name || '') || !/[a-z0-9]/i.test(c.name || '')
+  || PROMO_RE.test(c.group || '') || PROMO_RE.test(c.name || '') || /epgenius\.org/i.test(c.url || '');
+// Display name for a group: "UK| Sky Sports ᴳᴬᴺᴶᴬ" -> "UK · Sky Sports". Drops provider tags written in
+// superscript/modifier letters, keeps emoji (they make good tile icons).
+const prettyGroup = name => String(name || '')
+  .replace(/[ᴬ-ᵪ⁰-₟ᵃ-ᶿⱽ²³¹]+/g, '')
+  .replace(/\s*[|/►▶]\s*/g, ' · ').replace(/\s+/g, ' ').replace(/\s·\s*$/, '').trim();
+// Country/region of a group: a "UK|" style prefix, or a flag emoji; '' when neither.
+const FLAG_CC = { '🇬🇧': 'UK', '🇺🇸': 'US', '🇨🇦': 'CA', '🇦🇺': 'AU', '🇮🇪': 'IE', '🇳🇿': 'NZ', '🇪🇸': 'ES', '🇫🇷': 'FR', '🇩🇪': 'DE', '🇮🇹': 'IT', '🇵🇹': 'PT', '🇧🇷': 'BR', '🇮🇳': 'IN' };
+function regionOf(name) {
+  const n = String(name || '').trim();
+  const pre = n.match(/^([A-Za-z]{2,3})\s*\|/);
+  if (pre) return pre[1].toUpperCase();
+  const flag = n.match(/\p{Regional_Indicator}\p{Regional_Indicator}/u);
+  if (flag) return FLAG_CC[flag[0]] || flag[0];
+  return '';
+}
 // Classify an M3U entry as live TV vs VOD from its URL — reliable, unlike the group name.
 // Live streams are .ts/.m3u8 (or Xtream /live/ paths); VOD is a movie/series file.
 function channelKind(c) {
@@ -1357,9 +1382,20 @@ function groupsSheet(p, tab) {
   const locked = new Set(p.lockedGroups || []);
   const what = tab === 'live' ? 'channel' : tab === 'movies' ? 'movie' : 'show';
   const shown = groups.length - groups.filter(g => hidden.has(g.name)).length;
+  // Provider lists prefix groups with a country/region ("UK | SPORTS"). Offer those prefixes as
+  // one-tap filters: tap UK -> only UK groups stay visible; tap more to add; All restores.
+  const byPrefix = new Map();
+  for (const g of groups) { const k = regionOf(g.name) || 'OTHER'; if (!byPrefix.has(k)) byPrefix.set(k, []); byPrefix.get(k).push(g.name); }
+  const prefixes = [...byPrefix.entries()].sort((a, b) => (a[0] === 'OTHER') - (b[0] === 'OTHER') || b[1].length - a[1].length);
+  const prefixOn = k => byPrefix.get(k).some(n => !hidden.has(n));
+  const chipsHtml = prefixes.length > 1 ? `<div class="chips pchips">
+      <button class="chip ${hidden.size === 0 ? 'active' : ''}" data-prefix="*">All</button>
+      ${prefixes.map(([k, names]) => `<button class="chip ${prefixOn(k) && hidden.size ? 'active' : ''}" data-prefix="${esc(k)}">${k === 'OTHER' ? 'Other / US' : esc(k)}<span>${names.length}</span></button>`).join('')}
+    </div>` : '';
   // Bulk visibility: type a word (e.g. "UK") to filter the list, then keep only those / hide those / show all.
   sheet(`<div class="sheet-title">Groups${tab === 'live' ? '' : ` · ${tab}`}</div>
-    <p class="muted center">${shown} of ${groups.length} groups shown. Hidden groups disappear from lists, Browse and the guide.</p>
+    <p class="muted center">${shown} of ${groups.length} groups shown. Tick = shown everywhere. ★ = on your Home screen${(p.homeGroups || []).length ? ` (${p.homeGroups.length} pinned)` : ''}.</p>
+    ${chipsHtml}
     <label class="search gsearch">${icon('search')}<input id="g-q" type="search" placeholder="Filter groups, e.g. UK" autocomplete="off" autocorrect="off" spellcheck="false"></label>
     <div class="gbulk">
       <button class="btn small primary" data-bulk="only">Show only these</button>
@@ -1367,11 +1403,17 @@ function groupsSheet(p, tab) {
       <button class="btn small" data-bulk="show">Show these</button>
       <button class="btn small" data-bulk="all">Show all</button>
     </div>
-    <ul class="glist">${groups.map((g, i) => `<li data-gname="${esc((g.name || UNGROUPED).toLowerCase())}" class="${hidden.has(g.name) ? 'is-hidden' : ''}">
-      <button class="icon-btn eye${hidden.has(g.name) ? '' : ' on'}" data-act="eye" data-g="${i}" aria-label="${hidden.has(g.name) ? 'Show group' : 'Hide group'}">${icon(hidden.has(g.name) ? 'eye-off' : 'eye')}</button>
+    ${tab === 'live' ? `<div class="gbulk gsort"><span class="muted">Order:</span>
+      <button class="btn small" data-sort="shown">Shown first</button>
+      <button class="btn small" data-sort="az">A–Z</button>
+      <button class="btn small" data-sort="count">Biggest first</button>
+      <span class="muted gdrag-hint">${icon('grip')} drag to arrange</span></div>` : ''}
+    <ul class="glist">${groups.map((g, i) => `<li data-i="${i}" data-gname="${esc((g.name || UNGROUPED).toLowerCase())}" class="${hidden.has(g.name) ? 'is-hidden' : ''}">
+      <input type="checkbox" class="gcheck" data-act="eye" data-g="${i}" ${hidden.has(g.name) ? '' : 'checked'} aria-label="Show ${esc(g.name || UNGROUPED)}">
       <span class="row-text"><span class="row-name">${locked.has(g.name) ? icon('lock') : ''}${esc(prettyGroup(g.name) || UNGROUPED)}</span><span class="muted">${plural(g.count, what)}${hidden.has(g.name) ? ' · hidden' : ''}</span></span>
+      ${tab === 'live' ? `<button class="icon-btn star${(p.homeGroups || []).includes(g.name) ? ' on' : ''}" data-act="pin" data-g="${i}" aria-label="Show on Home">${icon('star')}</button>` : ''}
       <button class="btn small" data-act="more" data-g="${i}">Options</button>
-      ${tab === 'live' ? `<button class="icon-btn" data-act="up" data-g="${i}" ${i ? '' : 'disabled'} aria-label="Move up">▲</button><button class="icon-btn" data-act="down" data-g="${i}" ${i < groups.length - 1 ? '' : 'disabled'} aria-label="Move down">▼</button>` : ''}
+      ${tab === 'live' ? `<span class="ghandle" data-act="drag" aria-label="Drag to reorder">${icon('grip')}</span>` : ''}
     </li>`).join('')}</ul>`, {
     onMount: el => {
       const rows = [...el.querySelectorAll('.glist > li')];
@@ -1388,7 +1430,57 @@ function groupsSheet(p, tab) {
         rerender();
         groupsSheet(p, tab);
       };
+      // Reorder groups: `order` is the full list of group names in the wanted order.
+      const applyOrder = async order => {
+        const rank = new Map(order.map((n, k) => [n, k]));
+        p.channels = [...p.channels].sort((a, c) => (rank.get(a.group || '') ?? 1e9) - (rank.get(c.group || '') ?? 1e9));
+        await save(p);
+        rerender();
+        groupsSheet(p, tab);
+      };
+      // Drag a row by its handle to reorder (touch and mouse).
+      const list = el.querySelector('.glist');
+      let drag = null;
+      list.onpointerdown = e => {
+        const h = e.target.closest('[data-act="drag"]');
+        if (!h) return;
+        drag = { li: h.closest('li') };
+        drag.li.classList.add('dragging');
+        h.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      };
+      list.onpointermove = e => {
+        if (!drag) return;
+        const over = document.elementFromPoint(e.clientX, e.clientY)?.closest('.glist > li');
+        if (!over || over === drag.li) return;
+        const r = over.getBoundingClientRect();
+        list.insertBefore(drag.li, e.clientY < r.top + r.height / 2 ? over : over.nextSibling);
+      };
+      list.onpointerup = list.onpointercancel = async () => {
+        if (!drag) return;
+        drag.li.classList.remove('dragging');
+        drag = null;
+        await applyOrder([...list.children].map(li => groups[+li.dataset.i].name));
+      };
       el.onclick = async e => {
+        const srt = e.target.closest('[data-sort]');
+        if (srt) {
+          const names = groups.map(g => g.name);
+          const s = srt.dataset.sort;
+          if (s === 'az') return applyOrder([...names].sort((a, b) => collator.compare(prettyGroup(a), prettyGroup(b))));
+          if (s === 'count') return applyOrder([...groups].sort((a, b) => b.count - a.count).map(g => g.name));
+          if (s === 'shown') return applyOrder([...names.filter(n => !hidden.has(n)), ...names.filter(n => hidden.has(n))]);
+        }
+        const pc = e.target.closest('[data-prefix]');
+        if (pc) {
+          const k = pc.dataset.prefix;
+          if (k === '*') return setHidden(s => s.clear());
+          const names = byPrefix.get(k) || [];
+          // First tap from "everything visible" = only this country. After that, taps add or remove a country.
+          if (hidden.size === 0) return setHidden(s => { groups.forEach(g => s.add(g.name)); names.forEach(n => s.delete(n)); });
+          if (prefixOn(k)) return setHidden(s => names.forEach(n => s.add(n)));
+          return setHidden(s => names.forEach(n => s.delete(n)));
+        }
         const bulk = e.target.closest('[data-bulk]');
         if (bulk) {
           const names = visibleRows().map(li => groups[rows.indexOf(li)].name);
@@ -1403,14 +1495,12 @@ function groupsSheet(p, tab) {
         const i = +b.dataset.g;
         const g = groups[i];
         if (b.dataset.act === 'eye') return setHidden(s => { if (s.has(g.name)) s.delete(g.name); else s.add(g.name); });
-        if (b.dataset.act === 'up' || b.dataset.act === 'down') {
-          const order = groups.map(x => x.name);
-          const j = b.dataset.act === 'up' ? i - 1 : i + 1;
-          [order[i], order[j]] = [order[j], order[i]];
-          const rank = new Map(order.map((n, k) => [n, k]));
-          p.channels = [...p.channels].sort((a, c) => rank.get(a.group || '') - rank.get(c.group || ''));
+        if (b.dataset.act === 'drag') return;
+        if (b.dataset.act === 'pin') {
+          const set = new Set(p.homeGroups || []);
+          if (set.has(g.name)) set.delete(g.name); else set.add(g.name);
+          p.homeGroups = groups.map(x => x.name).filter(n => set.has(n));   // keep the list's order
           await save(p);
-          rerender();
           return groupsSheet(p, tab);
         }
         const toggle = async (key, name) => {
@@ -1422,8 +1512,11 @@ function groupsSheet(p, tab) {
           groupsSheet(p, tab);
         };
         const inGroup = p.channels.filter(c => (c.group || '') === g.name);
-        menu(g.name || UNGROUPED, [
+        const others = groups.map(x => x.name).filter(n => n !== g.name);
+        menu(prettyGroup(g.name) || UNGROUPED, [
           { label: hidden.has(g.name) ? 'Show group' : 'Hide group', fn: () => toggle('hiddenGroups', g.name) },
+          tab === 'live' && { label: 'Move to top', fn: () => applyOrder([g.name, ...others]) },
+          tab === 'live' && { label: 'Move to bottom', fn: () => applyOrder([...others, g.name]) },
           { label: locked.has(g.name) ? 'Unlock group' : 'Lock with PIN', fn: async () => {
             if (locked.has(g.name)) { if (await unlock()) toggle('lockedGroups', g.name); return; }
             if (!state.settings.pinHash && !await setPin()) return;
