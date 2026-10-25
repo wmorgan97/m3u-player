@@ -400,6 +400,10 @@ function resumeCardHtml(c) {
     <span class="resume-play">${icon('play')}</span></button>`;
 }
 
+// Home tiles fill top-to-bottom, then the next column (1 top-left, 2 under it). At most 4 rows, so the
+// block stays a fixed height: more groups add columns that scroll sideways instead of lengthening the page.
+const browseRows = n => (n <= 2 ? n : Math.min(4, Math.ceil(n / 2)));
+
 function showHome() {
   state.current = null;
   setTopbar({
@@ -439,7 +443,7 @@ function showHome() {
     ${state.recents.length ? `<div class="section-title">Jump back in</div>
       <div class="strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
     ${browse.length || pinnedAny ? `<div class="section-title split">Browse${browseEdit}</div>
-      <div class="browse">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
+      <div class="browse${browse.length > 8 ? ' scrolls' : ''}" style="--rows:${browseRows(browse.length)}">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
         <span class="bt-name">${esc(prettyGroup(b.name))}</span><span class="muted">${b.count.toLocaleString()}</span></button>`).join('')}</div>` : ''}
     ${cw.length ? `<div class="section-title">Continue watching</div>
       <div class="strip">${cw.map((e, i) => `<button class="cw" data-cw="${i}">

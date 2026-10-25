@@ -188,3 +188,16 @@
 .resume .bar { margin-top: 6px; }
 .resume-play { flex: none; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--accent); }
 .resume-play .ico { width: 18px; height: 18px; fill: #fff; stroke: none; margin-left: 2px; }
+
+/* ---------- Home: starred groups fill down each column, then across ---------- */
+.browse {
+  grid-auto-flow: column; grid-template-columns: none; grid-template-rows: repeat(var(--rows, 2), auto);
+  grid-auto-columns: calc((100% - 8px) / 2);
+}
+.browse.scrolls {
+  grid-auto-columns: calc((100% - 8px) / 2.15);   /* the next column peeks in, so it reads as scrollable */
+  overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; overscroll-behavior-x: contain;
+  margin-right: -16px; padding-right: 16px; scroll-padding-left: 0;
+}
+.browse.scrolls::-webkit-scrollbar { display: none; }
+.browse.scrolls .bt { scroll-snap-align: start; }
