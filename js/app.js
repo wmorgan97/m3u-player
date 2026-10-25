@@ -898,7 +898,7 @@ function updateGuide(p, { silent = false } = {}) {
     return Promise.resolve();
   }
   if (!silent) toast('Updating TV guide…');
-  const maxArchive = Math.min(3, Math.max(1, ...p.channels.map(archiveDays)));
+  const maxArchive = Math.min(3, p.channels.reduce((m, c) => Math.max(m, archiveDays(c)), 1));
   const job = loadEpg(urls, { from: Date.now() - maxArchive * DAY, to: Date.now() + 2 * DAY, wanted: wantedFor(p.channels) })
     .then(async data => {
       data.at = Date.now();
@@ -918,7 +918,12 @@ function updateGuide(p, { silent = false } = {}) {
   return job;
 }
 
+// Auto-loading the guide parses the whole EPG and matches every channel on the main
+// thread, which freezes the UI on startup for very large playlists. Above this size the
+// guide is not loaded automatically — it can still be loaded by hand from the guide screen.
+const AUTO_GUIDE_MAX = 8000;
 function maybeUpdateGuide(p) {
+  if ((p.channels?.length || 0) > AUTO_GUIDE_MAX) return;
   const g = guides.get(p.id);
   const stale = !g || Date.now() - g.at > 12 * HOUR;
   if (stale && epgUrls(p).length && !(Date.now() - (p.epgFailedAt || 0) < HOUR)) updateGuide(p, { silent: true });
