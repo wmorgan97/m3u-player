@@ -80,6 +80,7 @@ async function init() {
     db.allPlaylists(), db.get('favorites'), db.get('recents'), db.get('settings'), db.get('progress'), db.get('syncMeta'), db.get('reminders'),
   ]);
   state.reminders = reminders || [];
+  state.intros = (await db.get('intros')) || {};
   scheduleReminders();
   Object.assign(syncMeta, meta);
   state.playlists = playlists.sort((a, b) => a.createdAt - b.createdAt);
@@ -235,6 +236,51 @@ function warmNextEpisode() {
   warmedNext = next.url;
   const tc = transcodeUrl(next.url);
   if (tc) fetch(tc.replace('/hls?', '/hls/warm?'), { keepalive: true }).catch(() => {});
+}
+// ---- Next episode countdown ----
+let nextUpTimer = 0;
+function showNextUp(next) {
+  const el = $('#next-up');
+  if (!el) return step(1);
+  let left = 10;
+  const draw = () => { el.innerHTML = `<div class="nu-card">${logoHtml(next)}<div class="nu-text"><span class="muted small-caps">Next episode</span><b>${esc(next.name)}</b><span class="muted">Starting in ${left}s</span></div>
+    <div class="nu-actions"><button class="btn primary" data-nu="play">${icon('play')} Play now</button><button class="btn" data-nu="cancel">Cancel</button></div></div>`; };
+  draw();
+  el.hidden = false;
+  el.onclick = e => { const b = e.target.closest('[data-nu]'); if (!b) return; hideNextUp(); if (b.dataset.nu === 'play') step(1); };
+  clearInterval(nextUpTimer);
+  nextUpTimer = setInterval(() => { left--; if (left <= 0) { hideNextUp(); step(1); } else draw(); }, 1000);
+}
+function hideNextUp() { clearInterval(nextUpTimer); const el = $('#next-up'); if (el) { el.hidden = true; el.innerHTML = ''; } }
+
+// ---- Skip intro, learned from you ----
+// Providers don't mark intros. The first time you jump forward past one on an episode (20s–4min, within the
+// first 6 minutes), the span is remembered for that series and offered as "Skip intro" on its other episodes.
+const seriesKeyOf = c => c?.kind === 'episode' ? String(c.group || c.name).replace(/\s*·\s*Season.*$/i, '').toLowerCase() : null;
+let seekFrom = 0, lastT = 0;
+function learnIntro() {
+  const c = nowChannel();
+  const from = lastT, to = video.currentTime;
+  const key = seriesKeyOf(c);
+  if (!key || !Number.isFinite(from)) return;
+  const len = to - from;
+  if (from < 360 && len >= 20 && len <= 240) {
+    state.intros ||= {};
+    state.intros[key] = { from: Math.max(0, Math.floor(from)), to: Math.floor(to), at: Date.now() };
+    db.set('intros', state.intros).catch(() => {});
+    toast('Got it: this will be offered as "Skip intro" on other episodes');
+  }
+}
+function updateSkipIntro() {
+  const c = nowChannel(), el = $('#skip-intro');
+  const t = video.currentTime;
+  if (el) {
+    const intro = c && state.intros?.[seriesKeyOf(c)];
+    const show = intro && t >= intro.from - 3 && t < intro.to - 3 && !(state.progress[c.url]?.skipped === intro.to);
+    el.hidden = !show;
+    if (show) el.onclick = () => { seekVod(intro.to); el.hidden = true; };
+  }
+  if (!video.seeking) lastT = t;
 }
 function switchAudioTrack(i) {
   const c = nowChannel();
@@ -1567,7 +1613,7 @@ async function seriesSheet(s) {
   const eps = info?.episodes || {};
   const seasons = Object.keys(eps).sort((a, b) => a - b);
   const episodesOf = season => (eps[season] || []).map(ep => s.seasons ? { ...ep, src: p.id, duration: '', group: `${s.name} · Season ${season}` } : ({
-    id: `e${ep.id}`, kind: 'episode', src: p.id,
+    id: `e${ep.id}`, kind: 'episode', src: p.id, season,
     name: ep.title || `${s.name} S${season}E${ep.episode_num}`,
     url: x.episodeUrl(ep.id, ep.container_extension),
     logo: ep.info?.movie_image || s.logo,
@@ -1580,25 +1626,32 @@ async function seriesSheet(s) {
   let season = last ? urls.get(last.item.url) : seasons[0];
   const i = info.info || {};
 
+  // "Continue": the most recently watched unfinished episode, else the first unwatched one.
+  const allEps = seasons.flatMap(se => episodesOf(se));
+  const continueEp = (last && !state.progress[last.item.url]?.done ? allEps.find(e => e.url === last.item.url) : null) || allEps.find(e => !state.progress[e.url]?.done) || allEps[0];
   const render = (keepScroll = false) => {
     const list = episodesOf(season);
-    sheet(`<div class="detail" data-id="${esc(s.id)}">
+    const art = i.backdrop_path?.[0] || i.cover || s.logo;
+    const watched = allEps.filter(e => state.progress[e.url]?.done).length;
+    sheet(`<div class="detail film series" data-id="${esc(s.id)}">
+      <div class="film-hero" style="--hue:${hueOf(s.name)}">${art ? `<img class="film-bg" src="${esc(art)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>
       <div class="detail-top">
         <span class="detail-poster" data-initials="${initials(s.name)}">${(i.cover || s.logo) ? `<img src="${esc(i.cover || s.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
         <div class="detail-head">
           <div class="detail-title">${esc(s.name)}</div>
-          <div class="muted">${[s.year, i.genre || s.genre, plural(seasons.length, 'season')].filter(Boolean).map(esc).join(' · ')}</div>
-          ${s.rating ? `<div class="rating">★ ${s.rating.toFixed(1)}</div>` : ''}
+          <div class="film-meta">${[s.year, i.genre || s.genre, plural(seasons.length, 'season'), plural(allEps.length, 'episode')].filter(Boolean).map(m => `<span class="pill">${esc(m)}</span>`).join('')}${s.rating ? `<span class="pill rating">★ ${s.rating.toFixed(1)}</span>` : ''}</div>
+          ${watched ? `<span class="muted">${watched} of ${allEps.length} watched</span>` : ''}
         </div>
       </div>
-      ${i.plot || s.plot ? `<p class="detail-plot">${esc(i.plot || s.plot)}</p>` : ''}
+      ${i.plot || s.plot ? `<p class="detail-plot clamp3" data-plot>${esc(i.plot || s.plot)}</p>` : ''}
+      ${continueEp ? `<div class="detail-actions"><button class="btn primary" data-continue>${icon('play')} ${state.progress[continueEp.url]?.t > 30 && !state.progress[continueEp.url]?.done ? 'Continue' : 'Play'} S${esc(continueEp.season ?? seasons.find(se => episodesOf(se).includes(continueEp)))} E${esc(continueEp.num)}</button><button class="btn" data-sfav>${favUrls.has(s.url || s.id) ? '★ Saved' : '☆ Save'}</button></div>` : ''}
       ${seasons.length > 1 ? `<div class="chips season-chips">${seasons.map(se => `<button class="chip ${se === season ? 'active' : ''}" data-season="${esc(se)}">Season ${esc(se)}</button>`).join('')}</div>` : ''}
-      ${list.length ? `<ul class="eps">${list.map((e, k) => {
+      ${list.length ? `<ul class="eps cards-eps">${list.map((e, k) => {
         const pr = state.progress[e.url];
-        return `<li class="ep" data-e="${k}">
-          <span class="ep-num">${esc(e.num)}</span>
-          <span class="row-text"><span class="row-name">${esc(e.name)}</span><span class="muted">${esc(e.duration)}${pr?.done ? ' · Watched' : pr?.t > 30 ? ` · ${fmtDur(pr.d - pr.t)} left` : ''}</span>${progressBar(e)}</span>
-          ${pr?.done ? `<span class="ep-done">${icon('check')}</span>` : icon('play')}
+        const still = e.logo && e.logo !== s.logo && e.logo !== i.cover ? e.logo : '';
+        return `<li class="epc${pr?.done ? ' done' : ''}" data-e="${k}">
+          <span class="ep-still" data-initials="${esc(e.num)}">${still ? `<img src="${esc(still)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${pr && !pr.done && pr.t > 30 ? `<span class="bar"><i style="width:${Math.min(100, (pr.t / pr.d) * 100).toFixed(1)}%"></i></span>` : ''}<span class="ep-play">${pr?.done ? icon('check') : icon('play')}</span></span>
+          <span class="row-text"><span class="muted ep-label">Episode ${esc(e.num)}${e.duration ? ` · ${esc(e.duration)}` : ''}${pr?.done ? ' · Watched' : pr?.t > 30 ? ` · ${fmtDur(pr.d - pr.t)} left` : ''}</span><span class="row-name">${esc(e.name)}</span>${e.plot ? `<span class="muted clamp">${esc(e.plot)}</span>` : ''}</span>
         </li>`;
       }).join('')}</ul>` : '<p class="muted">No episodes listed.</p>'}
     </div>`, {
@@ -1607,6 +1660,9 @@ async function seriesSheet(s) {
         el.onclick = e => {
           const sc = e.target.closest('[data-season]');
           if (sc) { season = sc.dataset.season; return render(true); }
+          if (e.target.closest('[data-plot]')) return e.target.closest('[data-plot]').classList.toggle('open');
+          if (e.target.closest('[data-continue]')) { const se = seasons.find(x => episodesOf(x).some(y => y.url === continueEp.url)) || season; const l = episodesOf(se); closeSheet(); return playChannel(l, l.findIndex(y => y.url === continueEp.url)); }
+          if (e.target.closest('[data-sfav]')) { toggleFavorite({ ...s, url: s.url || s.id }, null).then(() => render(true)); return; }
           const ep = e.target.closest('[data-e]');
           if (ep) { closeSheet(); playChannel(list, +ep.dataset.e); }
         };
@@ -2995,8 +3051,10 @@ function bindPlayer() {
   video.addEventListener('ended', () => {
     trackProgress(true);
     const pl = state.playing;
-    if (pl && nowChannel()?.kind === 'episode' && pl.index < pl.list.length - 1) { toast('Playing next episode'); step(1); }
+    if (pl && nowChannel()?.kind === 'episode' && pl.index < pl.list.length - 1) showNextUp(pl.list[pl.index + 1]);
   });
+  video.addEventListener('timeupdate', updateSkipIntro);
+  video.addEventListener('seeking', learnIntro);
   // One silent retry on a mid-stream fault (provider blip, segment timeout) before showing the error.
   player.onFatal = msg => {
     const c = nowChannel();
@@ -3202,6 +3260,7 @@ function stopPlaying() {
   hideControls();
   const panel = $('#epg-panel'); if (panel) { panel.hidden = true; panel.innerHTML = ''; }
   const vp = $('#vod-panel'); if (vp) { vp.hidden = true; vp.innerHTML = ''; }
+  hideNextUp();
   const c = nowChannel();
   if (c) unwarm(streamOf(c));   // free the provider connection now, not after the idle timeout
   player.stop();
