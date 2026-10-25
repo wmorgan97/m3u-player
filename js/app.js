@@ -561,6 +561,43 @@ function resumeCardHtml(c) {
     <span class="resume-play">${icon('play')}</span></button>`;
 }
 
+// Home search: channels from every playlist plus movies and series from each Xtream catalogue (server search).
+let homeSearchSeq = 0;
+async function homeSearch(q) {
+  const box = $('#home-results');
+  if (!box) return;
+  const seq = ++homeSearchSeq;
+  if (q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
+  const t = q.toLowerCase();
+  const chans = [];
+  for (const p of state.playlists) {
+    for (const c of (m3uKinds(p)?.live || p.channels)) {
+      if (chans.length >= 8) break;
+      if (isLiveChannel(c) && c.name.toLowerCase().includes(t) && visibleGroup(p, c.group || '')) chans.push({ ...c, src: p.id });
+    }
+    if (chans.length >= 8) break;
+  }
+  shelfItems.set('hs-chan', chans);
+  const section = (title, key, items, row) => items.length ? `<div class="hs-title">${title}</div>${items.map((it, k) => row(it, key, k)).join('')}` : '';
+  const chanRow = (c, key, k) => `<div class="hs-row" data-shelf="${key}" data-k="${k}">${logoHtml(c)}<span class="row-text"><span class="row-name">${esc(c.name)}</span><span class="muted">${esc(prettyGroup(c.group) || '')}</span></span>${icon('play')}</div>`;
+  const vodRow = (it, key, k) => `<div class="hs-row" data-shelf="${key}" data-k="${k}"><span class="hs-poster">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span><span class="row-text"><span class="row-name">${esc(it.name)}</span><span class="muted">${[it.kind === 'series' ? 'Series' : 'Movie', it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : ''].filter(Boolean).map(esc).join(' · ')}</span></span></div>`;
+  box.innerHTML = section('Channels', 'hs-chan', chans, chanRow) || '<div class="muted hs-empty">Searching…</div>';
+  box.hidden = false;
+  if (!canSync()) { if (!chans.length) box.innerHTML = '<div class="muted hs-empty">No channels match.</div>'; return; }
+  const movies = [], series = [];
+  await Promise.all(state.playlists.filter(p => p.kind === 'xtream' && p.content !== 'live').map(async p => {
+    try {
+      const [m, s] = await Promise.all([vodApi(p, 'movies', { q }), vodApi(p, 'series', { q })]);
+      const cats = vodCache.get(vodKey(p, 'movies'))?.cats || [], scats = vodCache.get(vodKey(p, 'series'))?.cats || [];
+      movies.push(...toItems(p, 'movies', cats, (m.items || []).slice(0, 6)));
+      series.push(...toItems(p, 'series', scats, (s.items || []).slice(0, 6)));
+    } catch {}
+  }));
+  if (seq !== homeSearchSeq) return;
+  shelfItems.set('hs-movie', movies.slice(0, 8)); shelfItems.set('hs-series', series.slice(0, 8));
+  box.innerHTML = (section('Channels', 'hs-chan', chans, chanRow) + section('Movies', 'hs-movie', movies.slice(0, 8), vodRow) + section('Series', 'hs-series', series.slice(0, 8), vodRow)) || '<div class="muted hs-empty">Nothing matches.</div>';
+}
+
 // Home tiles fill top-to-bottom, then the next column (1 top-left, 2 under it). At most 4 rows, so the
 // block stays a fixed height: more groups add columns that scroll sideways instead of lengthening the page.
 const browseRows = n => (n <= 2 ? n : Math.min(4, Math.ceil(n / 2)));
@@ -578,6 +615,16 @@ function showHome() {
   try { dismissed = localStorage.getItem('install-tip') === 'off'; } catch {}
   const pl = state.playlists;
   const cw = continueWatching();
+  // Watchlist = saved films and series; New this week = the newest titles from each Xtream catalogue (loaded on demand).
+  const watchlist = state.favorites.filter(f => f.kind === 'movie' || f.kind === 'series').slice(-30).reverse();
+  shelfItems.set('home-watch', watchlist);
+  const week = Date.now() / 1000 - 7 * 86400;
+  const fresh = pl.filter(p => p.kind === 'xtream' && p.content !== 'live').flatMap(p => {
+    const e = vodCache.get(vodKey(p, 'movies'));
+    if (!e) { loadVod(p, 'movies').then(() => { if (!state.current) rerender(); }).catch(() => {}); return []; }
+    return Array.isArray(e) ? [] : e.recent.filter(it => it.added > week);
+  }).slice(0, 30);
+  shelfItems.set('home-new', fresh);
   // Snapshot: playing a channel moves it to the front of state.recents, so tiles must keep their own channel.
   const recentStrip = state.recents.slice(0, 12);
   // Browse: the groups the user pinned to Home (in their order); until they pin any, the biggest live groups.
@@ -599,7 +646,7 @@ function showHome() {
     ${serverProxy.needsKey ? `<div class="banner">
       ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
-    ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search all channels" autocomplete="off" autocorrect="off" spellcheck="false"></label>` : ''}
+    ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search channels, movies and series" autocomplete="off" autocorrect="off" spellcheck="false"></label><div id="home-results" class="home-results" hidden></div>` : ''}
     ${resumeCardHtml(recentStrip[0])}
     ${state.recents.length ? `<div class="section-title">Jump back in</div>
       <div class="strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
@@ -611,6 +658,8 @@ function showHome() {
         <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}</span>
         <span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span>
         <span class="cw-name">${esc(e.item.name)}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></button>`).join('')}</div>` : ''}
+    ${watchlist.length ? `<div class="section-title">Watchlist</div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul>` : ''}
+    ${fresh.length ? `<div class="section-title">New this week</div><ul class="shelf-row home-shelf">${fresh.map((it, k) => cardHtml(it, 'home-new', k)).join('')}</ul>` : ''}
     <div class="section-title">Library</div>
     <ul class="cards tiles">
       ${card('#/fav', 'star', 'Favorites', plural(state.favorites.length, 'item'))}
@@ -634,7 +683,16 @@ function showHome() {
   $('#home-q')?.addEventListener('keydown', e => {
     if (e.key === 'Enter' && e.target.value.trim()) { pendingQuery = e.target.value.trim(); location.hash = '#/all'; }
   });
+  $('#home-q')?.addEventListener('input', debounce(e => homeSearch(e.target.value.trim()), 250));
   view.onclick = e => {
+    const sc = e.target.closest('.scard, .hs-row');
+    if (sc) {
+      const it = shelfItems.get(sc.dataset.shelf)?.[+sc.dataset.k];
+      if (!it) return;
+      if (it.kind === 'series') return seriesSheet(it);
+      if (it.kind === 'movie') return movieSheet(it);
+      return playChannel([it], 0);
+    }
     const m = e.target.closest('[data-menu]');
     if (m) return playlistMenu(byId(m.dataset.menu));
     const c = e.target.closest('[data-cw]');
