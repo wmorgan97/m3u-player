@@ -41,6 +41,11 @@ let canTonemap = false;   // zscale+tonemap filters present in this ffmpeg build
 execFile(FFMPEG, ['-hide_banner', '-filters'], { windowsHide: true, maxBuffer: 4 << 20 }, (e, out) => { canTonemap = !e && /\bzscale\b/.test(out) && /\btonemap\b/.test(out); console.log(`[hls] tone mapping ${canTonemap ? 'available' : 'not available'}`); });
 const starting = new Map(); // id -> promise of the session: a warm + play for the same channel share one start
 try { rmSync(ROOT, { recursive: true, force: true }); mkdirSync(ROOT, { recursive: true }); } catch {}
+// A restarted server must not leave the previous one's ffmpeg children running: on Windows they outlive the
+// parent and would keep holding the provider's single connection.
+if (process.platform === 'win32') execFile('taskkill', ['/IM', 'ffmpeg.exe', '/F', '/T'], { windowsHide: true }, () => {});
+process.on('exit', () => { for (const s of sessions.values()) { try { s.proc?.kill(); } catch {} } });
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => process.exit(0));
 
 function isPrivateHost(hostname) {
   const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
