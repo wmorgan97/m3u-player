@@ -87,9 +87,17 @@ async function handleProxy(req, res, url) {
   const headers = { 'user-agent': req.headers['user-agent'] || 'Mozilla/5.0' };
   if (req.headers.range) headers.range = req.headers.range;
 
-  let upstream;
+  let upstream, next = t;
   try {
-    upstream = await fetch(t, { method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers, redirect: 'follow', signal: ctrl.signal });
+    // Follow redirects by hand so every hop gets the same private-address check (a public link can't
+    // bounce the proxy onto the server's own localhost services).
+    for (let hop = 0; ; hop++) {
+      upstream = await fetch(next, { method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers, redirect: 'manual', signal: ctrl.signal });
+      const loc = upstream.headers.get('location');
+      if (!(upstream.status >= 300 && upstream.status < 400 && loc) || hop >= 5) break;
+      next = new URL(loc, next);
+      if (!/^https?:$/.test(next.protocol) || (!allowPrivate && isPrivateHost(next.hostname))) return send(res, 403, 'Redirect to a private address was blocked');
+    }
   } catch (e) {
     if (!res.headersSent) send(res, 502, `Upstream error: ${e.cause?.code || e.message}`);
     return;
@@ -98,7 +106,7 @@ async function handleProxy(req, res, url) {
   const out = { ...CORS };
   upstream.headers.forEach((v, k) => { if (!DROP.has(k)) out[k] = v; });
   const type = upstream.headers.get('content-type') || '';
-  const finalUrl = upstream.url || t.href;
+  const finalUrl = upstream.url || next.href;
   const maybeHls = /mpegurl/i.test(type) || /\.m3u8$/i.test(new URL(finalUrl).pathname);
 
   if (maybeHls && req.method !== 'HEAD' && upstream.ok) {

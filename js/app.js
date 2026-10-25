@@ -333,6 +333,7 @@ function route() {
   if (multiActive && kind !== 'multi') stopMulti();
   view.onclick = null;
   view.classList.toggle('wide', kind === 'guide' || kind === 'multi');
+  if (kind !== 'guide') guideDay = 0;
   if (kind === 'p' || kind === 'guide') {
     const p = byId(id);
     if (p) return kind === 'p' ? showPlaylist(p) : showGuide(p);
@@ -544,6 +545,7 @@ function channelKind(c) {
 const dupKey = c => `${c.group || ''}\0${(c.tvgId || '').toLowerCase()}\0${normName(c.name)}`;
 function mergeDuplicates(list) {
   const out = [], seen = new Map();
+  for (const c of list) delete c.alts;   // rebuilt every time, never stale
   for (const c of list) {
     const k = dupKey(c);
     const first = seen.get(k);
@@ -560,7 +562,7 @@ function m3uKinds(p) {
     const k = { live: [], movies: [], series: [] };
     for (const c of p.channels) { if (!isSeparator(c)) k[channelKind(c)].push(c); }
     if (state.settings.mergeDupes !== false) k.live = mergeDuplicates(k.live);
-    k.live.forEach((c, i) => { c.num = i + 1; });
+    k.live.forEach((c, i) => { c.num = Number(c.attrs?.['tvg-chno']) || i + 1; });
     k.series = groupSeries(k.series);            // "Show S01E04" rows become one series with seasons
     for (const s of k.series) if (s.kind === 'series') s.src = p.id;
     p._kinds = k;
@@ -713,7 +715,9 @@ function applyFilter({ keep = false } = {}) {
   state.filtered = items.filter(c => {
     const g = c.group || '';
     if (state.group === null ? !visibleGroup(p, g) : g !== state.group) return false;
-    return !q || c.name.toLowerCase().includes(q) || g.toLowerCase().includes(q);
+    if (!q) return true;
+    if (/^\d+$/.test(q) && c.num) return String(c.num).startsWith(q);   // typing a number zaps by channel number
+    return c.name.toLowerCase().includes(q) || g.toLowerCase().includes(q);
   });
   const what = state.tab === 'movies' ? 'movie' : state.tab === 'series' ? 'series' : p.id === 'fav' ? 'item' : 'channel';
   $('#q').placeholder = `Search ${what === 'series' ? `${items.length.toLocaleString()} series` : plural(items.length, what)}`;
@@ -751,8 +755,8 @@ function renderMore() {
 
 // Fill in what's on for rows already on screen, touching only that line (no rebuild, no flicker, taps keep working).
 function updateRowsInPlace() {
-  document.querySelectorAll('#list .row').forEach(r => {
-    const c = state.filtered[+r.dataset.i];
+  document.querySelectorAll('#list .row, #ov-list .row').forEach(r => {
+    const c = r.dataset.k !== undefined ? ovShown[+r.dataset.k] : state.filtered[+r.dataset.i];
     const sub = r.querySelector('.row-sub');
     if (!c || !sub) return;
     const html = nowLine(c);
@@ -1038,14 +1042,18 @@ function copyToMenu(channels) {
 
 async function deleteChannels(p, ids) {
   const before = p.channels;
-  p.channels = p.channels.filter(c => !ids.has(c.id));
+  const all = new Set(ids);
+  for (const c of p.channels) if (ids.has(c.id)) copiesOf(p, c).forEach(x => all.add(x.id));
+  const urls = p.channels.filter(c => all.has(c.id)).map(c => c.url);
+  if (p.sourceUrl || p.kind === 'xtream') p.deletedUrls = [...new Set([...(p.deletedUrls || []), ...urls])].slice(-5000);   // stays deleted after a refresh
+  p.channels = p.channels.filter(c => !all.has(c.id));
   const removed = before.length - p.channels.length;
   await save(p);
   state.selected.clear();
   rerender();
   toast(`Deleted ${plural(removed, 'item')}`, {
     action: 'Undo',
-    fn: async () => { p.channels = before; await save(p); rerender(); },
+    fn: async () => { p.channels = before; if (p.deletedUrls) p.deletedUrls = p.deletedUrls.filter(u => !urls.includes(u)); await save(p); rerender(); },
   });
 }
 
@@ -1067,12 +1075,30 @@ function channelMenu(c) {
     hasGuide && { label: archiveDays(c) ? 'TV guide & catch-up' : 'TV guide', fn: () => scheduleSheet(c) },
     { label: favUrls.has(c.url) ? 'Remove from Favorites' : 'Add to Favorites', fn: () => toggleFavorite(c, null).then(highlightStars) },
     isLiveChannel(c) && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
+    p?.id === 'fav' && { label: 'Move to list…', fn: () => favListMenu(c) },
     editable && isLiveChannel(c) && { label: 'Move to top of group', fn: () => moveInGroup(c, true) },
     editable && isLiveChannel(c) && { label: 'Move to bottom of group', fn: () => moveInGroup(c, false) },
     editable && { label: 'Edit…', fn: () => editChannel(c, p) },
     ...externalItems(c),
     !c.kind && { label: 'Copy to playlist…', fn: () => copyToMenu([c]) },
     editable && { label: 'Delete', danger: true, fn: () => deleteChannels(p, new Set([c.id])) },
+  ]);
+}
+
+// Favourites can be organised into lists: each list is just the favourite's group, shown as the chips in Favorites.
+function favListMenu(c) {
+  const lists = groupsOf(state.favorites).map(g => g.name).filter(n => n && n !== c.group);
+  const moveTo = async name => {
+    c.group = name;
+    syncFavs();
+    await db.set('favorites', state.favorites);
+    favoritesChanged();
+    rerender();
+    toast(`Moved to ${prettyGroup(name)}`);
+  };
+  menu('Move to list', [
+    ...lists.map(n => ({ label: prettyGroup(n), fn: () => moveTo(n) })),
+    { label: 'New list…', fn: async () => { const v = await formSheet({ title: 'New list', fields: [{ name: 'name', label: 'List name', required: true, placeholder: 'e.g. Sports' }], submit: 'Create' }); if (v?.name) moveTo(v.name); } },
   ]);
 }
 
@@ -1096,7 +1122,9 @@ function channelFields(c, p) {
 async function editChannel(c, p) {
   const v = await formSheet({ title: 'Edit channel', fields: channelFields(c, p), submit: 'Save' });
   if (!v) return;
-  Object.assign(c, v);
+  const copies = copiesOf(p, c);
+  Object.assign(c, v, { edited: true });
+  for (const x of copies) Object.assign(x, { name: v.name, group: v.group, logo: v.logo, tvgId: v.tvgId, edited: true });
   await save(p);
   rerender();
   toast('Saved');
@@ -1308,7 +1336,7 @@ function parseEpgLocally(urls, opts) {
 // The server keeps the whole provider guide indexed; the app asks for the channels it is showing
 // (the rows on screen, the guide grid) in small batches and merges them into one Guide per playlist.
 const GUIDE_FRESH = 3 * HOUR;
-const guideAsked = new Map();   // playlist id -> Set of channel keys requested this session
+const guideAsked = new Map();   // playlist id -> Map of channel key -> when it was last requested
 const guideQueue = new Map();   // playlist id -> channels waiting for the next batch
 let guideFlush = null;
 const chanKey = c => (c.tvgId || '').toLowerCase() || normName(c.tvgName || c.name);
@@ -1323,9 +1351,9 @@ function ensureGuide(channels) {
     if (g && Date.now() - g.at < GUIDE_FRESH && g.key(c)) continue;
     const k = chanKey(c);
     let asked = guideAsked.get(p.id);
-    if (!asked) guideAsked.set(p.id, asked = new Set());
-    if (!k || asked.has(k)) continue;
-    asked.add(k);
+    if (!asked) guideAsked.set(p.id, asked = new Map());
+    if (!k || asked.get(k) > Date.now() - GUIDE_FRESH) continue;   // re-asked once the data is a few hours old
+    asked.set(k, Date.now());
     let q = guideQueue.get(p.id);
     if (!q) guideQueue.set(p.id, q = []);
     q.push(c);
@@ -1505,6 +1533,8 @@ function scheduleSheet(c) {
 const PX_PER_MIN = 4;
 const CH_W = 132;
 let guideState = null;
+let guideDay = 0, guideTick = 0;   // 0 = today (from 2h ago), 1 = tomorrow, …
+const startOfDay = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
 
 // Channels the guide grid covers: visible live channels, pinned Home groups first, capped so the grid stays fast.
 const GUIDE_GRID_MAX = 2500;
@@ -1539,14 +1569,17 @@ function showGuide(p) {
     return;
   }
   const groups = groupsOf(channels);
-  const t0 = Math.floor((Date.now() - 2 * HOUR) / (30 * MINUTE)) * 30 * MINUTE;
-  const t1 = t0 + 30 * HOUR;
+  const t0 = guideDay ? startOfDay(Date.now() + guideDay * DAY) : Math.floor((Date.now() - 2 * HOUR) / (30 * MINUTE)) * 30 * MINUTE;
+  const t1 = guideDay ? t0 + DAY : t0 + 30 * HOUR;
+  const dayLabel = d => d === 0 ? 'Today' : d === 1 ? 'Tomorrow' : new Date(Date.now() + d * DAY).toLocaleDateString(undefined, { weekday: 'long' });
   const width = CH_W + ((t1 - t0) / MINUTE) * PX_PER_MIN;
   const x = t => ((t - t0) / MINUTE) * PX_PER_MIN;
-  guideState = { p, g, all: channels, channels, t0, t1, rendered: 0, group: null };
+  guideState = { p, g, all: channels, channels, t0, t1, rendered: 0, group: null, q: '' };
   let times = '';
   for (let t = t0; t < t1; t += 30 * MINUTE) times += `<span style="left:${x(t)}px">${new Date(t).getHours() === 0 && new Date(t).getMinutes() === 0 ? `${fmtDay(t)} ` : ''}${fmtTime(t)}</span>`;
   view.innerHTML = `
+    <div class="gtools"><div class="chips gdays">${[0, 1, 2].map(d => `<button class="chip${d === guideDay ? ' active' : ''}" data-day="${d}">${dayLabel(d)}</button>`).join('')}</div>
+      <label class="search gq">${icon('search')}<input id="gq" type="search" placeholder="Search programmes" autocomplete="off" autocorrect="off" spellcheck="false"></label></div>
     ${groups.length > 1 ? `<div class="chips" id="gchips"><button class="chip active" data-all>All<span>${channels.length}</span></button>${groups.map(gr => `<button class="chip" data-group="${esc(gr.name)}">${esc(gr.name || UNGROUPED)}<span>${gr.count}</span></button>`).join('')}</div>` : ''}
     <div class="guide" id="guide">
       <div class="guide-inner" style="width:${width}px">
@@ -1558,20 +1591,36 @@ function showGuide(p) {
   const el = $('#guide');
   sizeGuide();
   renderGuideRows();
-  const jump = () => { el.scrollLeft = x(Date.now() - 30 * MINUTE); };
+  const jump = () => { el.scrollLeft = Math.max(0, x(Date.now() - 30 * MINUTE)); };
   jump();
   el.onscroll = () => { if (el.scrollTop + el.clientHeight > el.scrollHeight - 400) renderGuideRows(); };
+  // The "now" line and the live highlight move with the clock.
+  clearInterval(guideTick);
+  guideTick = setInterval(() => {
+    const line = $('#guide .guide-now');
+    if (!line) return clearInterval(guideTick);
+    line.style.left = `${CH_W + x(Date.now())}px`;
+    line.hidden = Date.now() < t0 || Date.now() > t1;
+  }, 30_000);
+  const applyGuideFilter = () => {
+    const gs = guideState, t = gs.q.trim().toLowerCase();
+    gs.channels = gs.all.filter(c => (gs.group === null || (c.group || '') === gs.group)
+      && (!t || c.name.toLowerCase().includes(t) || gs.g.list(c).some(p => p[1] > t0 && p[0] < t1 && p[2].toLowerCase().includes(t))));
+    gs.rendered = 0;
+    $('#grows').innerHTML = gs.channels.length ? '' : '<p class="muted center gempty">Nothing on matching that.</p>';
+    el.scrollTop = 0;
+    renderGuideRows();
+  };
+  $('#gq').oninput = debounce(e => { guideState.q = e.target.value; applyGuideFilter(); }, 150);
   view.onclick = e => {
+    const day = e.target.closest('[data-day]');
+    if (day) { guideDay = +day.dataset.day; return showGuide(p); }
     if (e.target.closest('[data-jump]')) return jump();
     const chip = e.target.closest('#gchips .chip');
     if (chip) {
       guideState.group = chip.hasAttribute('data-all') ? null : chip.dataset.group;
       $('#gchips').querySelectorAll('.chip').forEach(c => c.classList.toggle('active', c === chip));
-      guideState.channels = guideState.group === null ? guideState.all : guideState.all.filter(c => (c.group || '') === guideState.group);
-      guideState.rendered = 0;
-      $('#grows').innerHTML = '';
-      el.scrollTop = 0;
-      return renderGuideRows();
+      return applyGuideFilter();
     }
     const ch = e.target.closest('[data-ch]');
     const row = e.target.closest('.grow');
@@ -2139,6 +2188,24 @@ function addPlaylistSheet() {
   });
 }
 
+// A refresh takes the provider's new list but keeps what you changed: your order, renamed or moved
+// channels (edited), and deletions. New channels are added at the end.
+function mergeRefresh(p, fresh) {
+  const deleted = new Set(p.deletedUrls || []);
+  const byUrl = new Map(fresh.map(c => [c.url, c]));
+  const seen = new Set(), out = [];
+  for (const old of p.channels) {
+    const n = byUrl.get(old.url);
+    if (!n || seen.has(old.url)) continue;
+    seen.add(old.url);
+    out.push(old.edited ? { ...n, id: old.id, name: old.name, group: old.group, logo: old.logo || n.logo, tvgId: old.tvgId || n.tvgId, edited: true } : { ...n, id: old.id });
+  }
+  for (const n of fresh) if (!seen.has(n.url) && !deleted.has(n.url)) out.push(n);
+  return out;
+}
+// Backup copies of a merged channel (same group, id and name) follow its edits and deletions.
+const copiesOf = (p, c) => { const k = dupKey(c); return p.channels.filter(x => x !== c && dupKey(x) === k); };
+
 async function refreshSource(p, { silent = false } = {}) {
   const redraw = () => { if (!silent || state.current === p) rerender(); };
   if (!silent) toast('Refreshing channels…', { busy: true });
@@ -2148,12 +2215,12 @@ async function refreshSource(p, { silent = false } = {}) {
       const x = xtOf(p);
       const info = await x.login();
       const [cats, streams] = await Promise.all([x.categories('live'), x.liveStreams()]);
-      p.channels = liveChannels(x, cats, streams);
+      p.channels = mergeRefresh(p, liveChannels(x, cats, streams));
       p.userInfo = info.user_info;
       p.serverInfo = info.server_info;
     } else {
       const { header, channels } = parseSource(await fetchText(p.sourceUrl, { timeout: 60000 }), p.sourceUrl);
-      p.channels = channels;
+      p.channels = mergeRefresh(p, channels);
       p.header = header;
     }
     p.refreshedAt = Date.now();
@@ -2277,6 +2344,42 @@ async function settingsSheet() {
 
 // ---------- playback ----------
 let statusError = false;
+// Channel list over the video (TiviMate-style): search, type a number, tap to switch. The video keeps playing.
+let ovShown = [];
+function channelsOverlay() {
+  const pl = state.playing;
+  if (!pl || pl.list.length < 2) return;
+  const list = pl.list;
+  let q = '';
+  const fill = el => {
+    const t = q.trim().toLowerCase();
+    const num = /^\d+$/.test(t);
+    ovShown = (t ? list.filter(c => num ? String(c.num || '').startsWith(t) : c.name.toLowerCase().includes(t) || (c.group || '').toLowerCase().includes(t)) : list).slice(0, 400);
+    el.querySelector('#ov-list').innerHTML = ovShown.map((c, k) => `<li class="row${c === list[pl.index] ? ' playing' : ''}" data-k="${k}">
+      ${c.num ? `<span class="ch-num">${c.num}</span>` : ''}${logoHtml(c)}
+      <span class="row-text"><span class="row-name">${esc(c.name)}</span><span class="row-sub">${nowLine(c) || (c.group ? `<span class="muted">${esc(prettyGroup(c.group))}</span>` : '')}</span></span></li>`).join('')
+      || '<li class="empty small">No matches.</li>';
+    ensureGuide(ovShown);
+    if (!t) el.querySelector('#ov-list .playing')?.scrollIntoView({ block: 'center' });
+  };
+  sheet(`<div class="sheet-title">Channels</div>
+    <label class="search ovsearch">${icon('search')}<input id="ov-q" type="search" inputmode="search" placeholder="Search, or type a channel number" autocomplete="off" autocorrect="off" spellcheck="false"></label>
+    <ul class="list ovlist" id="ov-list"></ul>`, {
+    onMount: el => {
+      fill(el);
+      el.querySelector('#ov-q').oninput = debounce(e => { q = e.target.value; fill(el); }, 100);
+      el.querySelector('#ov-list').onclick = e => {
+        const li = e.target.closest('[data-k]');
+        if (!li) return;
+        const c = ovShown[+li.dataset.k];
+        closeSheet();
+        playChannel(list, list.indexOf(c));
+      };
+    },
+    onClose: () => { ovShown = []; },
+  });
+}
+
 function setStatus(text, isError = false) {
   const el = $('#now-status');
   const c = nowChannel();
@@ -2357,6 +2460,9 @@ function bindPlayer() {
   $('#next').onpointerdown = () => { const p = state.playing; if (p) warm(p.list[p.index + 1]?.url); };
   $('#close').onclick = stopPlaying;
   $('#now-more').onclick = playerMenu;
+  $('#now-list').innerHTML = icon('list');
+  $('#now-list').onclick = channelsOverlay;
+  $('.now').onclick = channelsOverlay;
   setInterval(() => { if (state.playing && !statusError) setStatus(''); }, 30000);
   try {
     navigator.mediaSession?.setActionHandler('previoustrack', () => step(-1));
@@ -2426,6 +2532,7 @@ function playChannel(list, index) {
   const c = list[index];
   if (!c) return;
   trackProgress(true);
+  const prev = nowChannel();
   state.playing = { list, index };
   $('#player').hidden = false;
   $('#player-error').hidden = true;
@@ -2438,7 +2545,7 @@ function playChannel(list, index) {
   showTuning(c);
   highlightPlaying();
   addRecent(c);
-  tuneFrom = nowChannel();
+  tuneFrom = prev;
   try {
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({ title: c.name, artist: c.group || 'M3U Player', artwork: c.logo ? [{ src: c.logo }] : [] });
@@ -2508,6 +2615,8 @@ function showPlayerError(c, err) {
 
 function stopPlaying() {
   trackProgress(true);
+  const c = nowChannel();
+  if (c) unwarm(streamOf(c));   // free the provider connection now, not after the idle timeout
   player.stop();
   state.playing = null;
   $('#player').hidden = true;

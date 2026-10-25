@@ -11,6 +11,7 @@ import { promises as fs, createReadStream, rmSync, mkdirSync } from 'node:fs';
 import { join, sep, extname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isIP } from 'node:net';
+import { createHmac } from 'node:crypto';
 
 const FFMPEG = process.env.FFMPEG || 'C:\\ffmpeg\\ffmpeg.exe';
 const PROXY_KEY = process.env.PROXY_KEY || '';
@@ -31,6 +32,7 @@ const TYPES = {
 };
 
 const sessions = new Map(); // id -> { proc, dir, lastAccess, exited, errTail, startedAt }
+const starting = new Map(); // id -> promise of the session: a warm + play for the same channel share one start
 try { rmSync(ROOT, { recursive: true, force: true }); mkdirSync(ROOT, { recursive: true }); } catch {}
 
 function isPrivateHost(hostname) {
@@ -44,10 +46,10 @@ function isPrivateHost(hostname) {
   return false;
 }
 
+// Session ids are an HMAC of the stream url with the server key: segment paths can't be guessed,
+// so /hls/<id>/<file> needs no key in the manifest the native player fetches.
 function sessionId(url) {
-  let h = 5381;
-  for (let i = 0; i < url.length; i++) h = ((h * 33) ^ url.charCodeAt(i)) >>> 0;
-  return h.toString(36);
+  return createHmac('sha256', PROXY_KEY || 'm3u').update(url).digest('base64url').slice(0, 22);
 }
 
 function send(res, status, body, headers = {}) {
@@ -168,8 +170,12 @@ export async function handleHls(req, res, url) {
   }
   if (s && s.exited) { stopSession(id); s = null; }
   if (!s) {
-    await closeOthers(id);           // one provider connection at a time, and never two in flight
-    s = await startSession(id, t.href);
+    // The app sends a warm on touch and the play a few ms later: both must wait for ONE start, or the
+    // second ffmpeg is orphaned holding the only provider connection.
+    if (!starting.has(id)) {
+      starting.set(id, (async () => { await closeOthers(id); return startSession(id, t.href); })().finally(() => starting.delete(id)));
+    }
+    s = await starting.get(id);
   }
   s.lastAccess = Date.now();
   if (warm) return send(res, 204, '');

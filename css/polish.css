@@ -219,3 +219,14 @@
 
 /* Long-press to move a channel: no iOS text-selection or callout on rows */
 #list .row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+
+/* ---------- Channel list over the video ---------- */
+.ovsearch { margin: 4px 0 8px; }
+.ovlist .row { padding-right: 8px; }
+.now { cursor: pointer; }
+
+/* ---------- Guide tools: day picker + programme search ---------- */
+.gtools { display: flex; gap: 8px; align-items: center; margin: 2px 0 6px; }
+.gtools .gdays { flex: none; margin: 0; }
+.gtools .gq { flex: 1; min-width: 0; }
+.gempty { padding: 32px 16px; }

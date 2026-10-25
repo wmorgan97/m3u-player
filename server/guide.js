@@ -20,8 +20,16 @@ const DIR = fileURLToPath(new URL('../data/', import.meta.url));
 const URLS_FILE = join(DIR, 'guide-urls.json');
 const indexes = new Map();   // urls key -> { at, chans: Map(id -> JSON string), names, job }
 
+let allowed = () => true;
 async function feedUrl(parser, url) {
-  const res = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(180_000) });
+  let res, next = new URL(url);
+  for (let hop = 0; ; hop++) {   // redirects re-checked against the private-address block, like the proxy
+    res = await fetch(next, { headers: { 'user-agent': 'Mozilla/5.0' }, redirect: 'manual', signal: AbortSignal.timeout(180_000) });
+    const loc = res.headers.get('location');
+    if (!(res.status >= 300 && res.status < 400 && loc) || hop >= 5) break;
+    next = new URL(loc, next);
+    if (!/^https?:$/.test(next.protocol) || !allowed(next)) throw new Error('Guide link redirected to a blocked address');
+  }
   if (!res.ok) throw new Error(`Guide server replied ${res.status}`);
   const reader = res.body.getReader();
   const first = await reader.read();
@@ -36,7 +44,7 @@ async function feedUrl(parser, url) {
 
 async function build(urls) {
   const t0 = Date.now();
-  const parser = new XmltvParser({ from: Date.now() - 26 * HOUR, to: Date.now() + 40 * HOUR });
+  const parser = new XmltvParser({ from: Date.now() - 26 * HOUR, to: Date.now() + 74 * HOUR });
   let ok = 0, lastError;
   for (const u of urls) { try { await feedUrl(parser, u); ok++; } catch (e) { lastError = e; } }
   if (!ok) throw lastError;
@@ -76,7 +84,8 @@ async function remember(urls) {
 fs.readFile(URLS_FILE, 'utf8').then(t => JSON.parse(t).forEach(indexFor)).catch(() => {});
 setInterval(() => { for (const key of indexes.keys()) indexFor(key.split('\n')); }, HOUR).unref();
 
-export async function handleGuide(req, res, url, send, allowed) {
+export async function handleGuide(req, res, url, send, allow) {
+  allowed = allow;
   if (PROXY_KEY && url.searchParams.get('key') !== PROXY_KEY) return send(res, 403, 'Wrong or missing key');
   if (req.method !== 'POST') return send(res, 405, 'POST only');
   let q;

@@ -80,9 +80,13 @@ export class Player {
       for (const mode of this.modes(candidate)) tries.push([candidate, mode]);
     }
     if (!raw && tc) for (const mode of this.modes(tc)) tries.push([tc, mode]);
+    // A dead channel fails fast: every way of playing it shares one ~18s budget instead of 25s each.
+    const deadline = Date.now() + 18000;
     for (const [candidate, mode] of tries) {
+      const left = deadline - Date.now();
+      if (left < 2500 && lastError) break;
       try {
-        await this.attempt(candidate, mode);
+        await this.attempt(candidate, mode, Math.max(2500, left));
         return token === this.token;
       } catch (e) {
         if (token !== this.token) return false;
@@ -107,7 +111,7 @@ export class Player {
     v.load();
   }
 
-  attempt(url, mode) {
+  attempt(url, mode, timeoutMs = 25000) {
     this.teardown();
     const v = this.video;
     const Hls = window.Hls;
@@ -126,7 +130,7 @@ export class Player {
       };
       const ok = () => { this.ready = true; settle(resolve); };
       const bad = () => settle(reject, new Error(mediaErrorMessage(v.error)));
-      const timer = setTimeout(() => settle(reject, new Error('The stream took too long to respond.')), 25000);
+      const timer = setTimeout(() => settle(reject, new Error('The stream took too long to respond.')), timeoutMs);
       this.cancel = () => settle(reject, new Error('Cancelled'));
 
       v.addEventListener('loadeddata', ok);
