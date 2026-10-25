@@ -294,7 +294,9 @@ export async function handleDownload(req, res, url, send, allowed) {
   const track = Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0));
   // One connection per provider: while something from this provider is playing, say so instead of fighting it
   // (the app waits and retries; an exact-file copy then resumes from where it stopped).
-  if ([...sessions.values()].some(s => s.host === t.hostname && !s.exited && Date.now() - s.lastAccess < 30_000)) return send(res, 409, 'Busy: something from this provider is playing');
+  // "Playing" means segments were fetched in the last 10s; a stream merely kept warm after you stopped is closed to make room.
+  if ([...sessions.values()].some(s => s.host === t.hostname && !s.exited && Date.now() - s.lastAccess < 10_000)) return send(res, 409, 'Busy: something from this provider is playing');
+  await closeOthers(null, t.hostname);
   if (q === 'file') {
     // The provider's file exactly as it is (4K stays 4K, HEVC stays HEVC): for saving to a computer and playing in VLC etc.
     await closeOthers(null, t.hostname);

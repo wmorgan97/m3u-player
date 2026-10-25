@@ -3186,7 +3186,7 @@ function channelsOverlay() {
 // ---------- the app's own player controls ----------
 // Tap the video: channel + what's on, play/pause (pause live), back 30s, a scrub bar over the server's
 // 45-minute buffer, LIVE to jump back to the edge, channel list, mute, AirPlay, PiP, full screen.
-let ctlHide = 0, keepAlive = 0;
+let ctlHide = 0, keepAlive = 0, pausedAt = 0;
 const seekRange = () => { try { const s = video.seekable; return s.length ? { start: s.start(0), end: s.end(s.length - 1) } : null; } catch { return null; } };
 function showControls() {
   const ctl = $('#ctl');
@@ -3287,7 +3287,8 @@ function bindControls() {
     updateControls();
     // While paused or behind live, keep the server's stream alive so the buffer is there when you resume.
     const c = nowChannel();
-    if (c && (video.paused || (seekRange() && seekRange().end - video.currentTime > 10)) && Date.now() - keepAlive > 8000) {
+    if (video.paused && !pausedAt) pausedAt = Date.now(); else if (!video.paused) pausedAt = 0;
+    if (c && !c.offline && (video.paused ? Date.now() - pausedAt < 10 * MINUTE : (seekRange() && seekRange().end - video.currentTime > 10)) && Date.now() - keepAlive > 8000) {
       keepAlive = Date.now();
       const tc = transcodeUrl(streamOf(c));
       if (tc) fetch(tc.replace('/hls?', '/hls/warm?'), { keepalive: true }).catch(() => {});
@@ -3509,7 +3510,7 @@ function playChannel(list, index) {
   trackProgress(true);
   const prev = nowChannel();
   state.playing = { list, index };
-  if (dlActive && !c.offline && isLiveChannel(c) === isLiveChannel(c)) { const m = state.downloads[dlActive.id]; if (m && !m.done) toast('Your download pauses while you watch and resumes afterwards'); }
+  if (dlActive && !c.offline) { const m = state.downloads[dlActive.id]; if (m && !m.done) toast('Your download pauses while you watch and resumes afterwards'); }
   $('#player').hidden = false;
   document.body.classList.add('playing');
   document.body.classList.toggle('vod-playing', !isLiveChannel(c));   // films: wide "cinema" layout, not the live dock
