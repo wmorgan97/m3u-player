@@ -233,7 +233,7 @@ let vodTrack = 0, vodInfo = null, subTrackEl = null, vodEnc = false, vodInfoFor 
 const IS_SAFARI = /^((?!chrome|chromium|crios|fxios|android).)*safari/i.test(navigator.userAgent);
 function canDecode(v) {
   if (!v) return true;
-  if (v.chroma444 || v.interlaced) return false;   // 4:2:2 / 4:4:4 and interlaced sources: convert
+  if (v.chroma444) return false;   // 4:2:2 / 4:4:4 sources: convert (interlaced plays fine as it is)
   if (v.codec === 'h264') return !v.bit10;
   // Only Apple's own player is trusted with HEVC/10-bit. Chrome claims support, then plays sound with no picture.
   if (!IS_SAFARI) return false;
@@ -307,6 +307,31 @@ function updateSkipIntro() {
   }
   if (!video.seeking) lastT = t;
 }
+// Audio sync: a per-channel / per-title correction in ms (+ = sound later, - = sound earlier), applied by the
+// server when it repackages the stream. Remembered, like TiviMate's audio delay.
+const avSyncFor = url => Number(state.settings.avSync?.[url]) || 0;
+function setAvSync(c, ms) {
+  if (avSyncFor(c.url) === ms) return;
+  unwarm(c.url);   // free the provider connection held by the old timing before the new one opens
+  state.settings.avSync = { ...(state.settings.avSync || {}) };
+  if (ms) state.settings.avSync[c.url] = ms; else delete state.settings.avSync[c.url];
+  db.set('settings', state.settings);
+  const pos = transcodeVod ? vodPos() : 0;
+  toast(ms ? `Audio ${ms > 0 ? 'later' : 'earlier'} by ${Math.abs(ms) / 1000}s` : 'Audio sync reset');
+  const list = state.playing.list, index = state.playing.index;
+  if (transcodeVod) player.play(streamOf(c)).then(ok => { if (ok && pos > 2) seekVod(pos); }).catch(() => playChannel(list, index));
+  else playChannel(list, index);
+}
+function avSyncMenu(c) {
+  const cur = avSyncFor(c.url);
+  const steps = [-1000, -500, -300, -200, -100, 0, 100, 200, 300, 500, 1000];
+  const name = ms => ms === 0 ? 'In sync (no change)' : `${ms < 0 ? 'Sound earlier' : 'Sound later'} ${Math.abs(ms) / 1000}s`;
+  menu('Audio sync', [
+    { label: 'Lips move before the sound? Pick “Sound earlier”.', fn: () => avSyncMenu(c) },
+    ...steps.map(ms => ({ label: `${ms === cur ? '✓ ' : ''}${name(ms)}`, fn: () => setAvSync(c, ms) })),
+    cur && !steps.includes(cur) && { label: `✓ ${name(cur)}`, fn: () => {} },
+  ].filter(Boolean));
+}
 function switchAudioTrack(i) {
   const c = nowChannel();
   if (!c || !transcodeVod) return;
@@ -374,7 +399,7 @@ function transcodeUrl(url) {
   if (serverProxy.needsKey && !key) return null;
   const b = bufferLevel();
   if (/^blob:/.test(url)) return null;       // a downloaded file plays from storage
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}${vodEnc ? '&enc=1' : ''}` : liveEnc.has(url) ? '&enc=1' : ''}&url=${encodeURIComponent(url)}`;
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}${vodEnc ? '&enc=1' : ''}` : liveEnc.has(url) ? '&enc=1' : ''}${avSyncFor(url) ? `&av=${avSyncFor(url)}` : ''}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -3618,15 +3643,16 @@ function bindPlayer() {
   };
   // No picture: sound plays and the clock runs but the video never gets a frame (a codec this device can't
   // decode). Switch that channel/title to server-side H.264 conversion and play again.
-  let blankSince = 0;
+  // A slow feed (sound arriving before picture, buffering) is NOT this: only convert once the clock has run
+  // at least 6s with sound playing and the video still has no size and no decoded frames.
+  let blankSince = 0, blankFrom = 0;
   setInterval(() => {
     const c = nowChannel();
-    if (!c || video.paused || c.offline || video.currentTime < 3 || Date.now() - lastTune < 8000) { blankSince = 0; return; }
+    if (!c || video.paused || c.offline || video.readyState < 3 || Date.now() - lastTune < 8000) { blankSince = 0; return; }
     const q = video.getVideoPlaybackQuality?.();
-    const framesOk = q ? q.totalVideoFrames - (q.droppedVideoFrames || 0) > 5 : video.videoWidth > 0;
-    if (framesOk && video.videoWidth > 0) { blankSince = 0; return; }
-    blankSince ||= Date.now();
-    if (Date.now() - blankSince < 5000) return;
+    if (video.videoWidth > 0 || (q && q.totalVideoFrames > 5)) { blankSince = 0; return; }
+    if (!blankSince) { blankSince = Date.now(); blankFrom = video.currentTime; return; }
+    if (Date.now() - blankSince < 8000 || video.currentTime - blankFrom < 6) return;
     blankSince = 0;
     if (isLiveChannel(c) ? liveEnc.has(c.url) : vodEnc) return;   // already converting: nothing more we can do
     if (isLiveChannel(c)) liveEnc.add(c.url); else vodEnc = true;
@@ -3686,6 +3712,7 @@ function playerMenu() {
       { label: subs.some(t => t.active) ? 'Off' : '✓ Off', fn: () => fileSubs.length ? useSubtitles(-1) : player.setSubtitleTrack(-1) },
       ...subs.map(t => ({ label: `${t.active ? '✓ ' : ''}${t.label}`, fn: () => fileSubs.length ? useSubtitles(t.i) : player.setSubtitleTrack(t.i) })),
     ]) },
+    transcodeUrl(c.url) && { label: `Audio sync${avSyncFor(c.url) ? ` (${avSyncFor(c.url) > 0 ? '+' : ''}${avSyncFor(c.url) / 1000}s)` : ''}…`, fn: () => avSyncMenu(c) },
     Number.isFinite(video.duration) && { label: `Speed (${video.playbackRate}×)…`, fn: () => menu('Playback speed', [0.75, 1, 1.25, 1.5, 2].map(r => ({ label: `${video.playbackRate === r ? '✓ ' : ''}${r}×`, fn: () => { video.playbackRate = r; } }))) },
     { label: state.sleepAt ? `Sleep timer (${Math.ceil((state.sleepAt - Date.now()) / MINUTE)} min left)…` : 'Sleep timer…', fn: sleepMenu },
     { label: 'Picture in Picture', fn: () => player.togglePip().catch(e => toast(e.message)) },
