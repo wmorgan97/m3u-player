@@ -100,7 +100,17 @@ export class XmltvParser {
     const start = parseTime(attr(open, 'start'));
     const stop = parseTime(attr(open, 'stop'));
     if (!(stop > this.from) || !(start < this.to)) return;
-    (this.programmes[ch] ??= []).push([start, stop, child(block, 'title'), child(block, 'desc').slice(0, 600)]);
+    // Programmes are [start, stop, title, description, extra?] with extra = { img, new, s, e } when present.
+    let desc = child(block, 'desc');
+    const extra = {};
+    const img = /<icon\s+src="([^"]+)"/.exec(block);
+    if (img) extra.img = decode(img[1]);
+    if (/<new\s*\/>/.test(block)) extra.new = 1;
+    const se = /^S(\d{1,3})\s*E(\d{1,4})\b[\s:.\-]*/i.exec(desc) || /^(?:Series|Season)\s*(\d{1,3})[,:]?\s*Episode\s*(\d{1,4})\b[\s:.\-]*/i.exec(desc);
+    if (se) { extra.s = +se[1]; extra.e = +se[2]; desc = desc.slice(se[0].length); }
+    const p = [start, stop, child(block, 'title'), desc.slice(0, 600)];
+    if (Object.keys(extra).length) p.push(extra);
+    (this.programmes[ch] ??= []).push(p);
   }
 
   finish() {

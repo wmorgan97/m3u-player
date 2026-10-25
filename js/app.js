@@ -1547,14 +1547,26 @@ function playCatchup(c, prog) {
   playChannel([{ id: uid(), kind: 'catchup', name: `${prog[2]}`, url: catchupUrlFor(c, prog), logo: c.logo, group: `${c.name} · ${fmtDay(prog[0])} ${fmtRange(prog)}`, src: srcOf(c) }], 0);
 }
 
+// Programme page: picture (when the guide has one), channel, date and time, series/episode and NEW
+// chips, title, summary, then Watch / catch-up / Remind.
 function programmeSheet(c, prog) {
   const now = Date.now();
   const live = prog[0] <= now && prog[1] > now;
   const past = prog[1] <= now;
-  sheet(`<div class="detail">
-      <div class="detail-title">${esc(prog[2])}</div>
-      <div class="muted">${esc(c.name)} · ${fmtDay(prog[0])} ${fmtRange(prog)}</div>
-      ${prog[3] ? `<p class="detail-plot">${esc(prog[3])}</p>` : ''}
+  const x = prog[4] || {};
+  const pct = live ? (((now - prog[0]) / (prog[1] - prog[0])) * 100).toFixed(1) : 0;
+  sheet(`<div class="detail prog">
+      <div class="prog-hero${x.img ? '' : ' no-img'}" style="--hue:${hueOf(c.name)}">
+        ${x.img ? `<img src="${esc(x.img)}" alt="" referrerpolicy="no-referrer" loading="lazy" onerror="this.parentNode.classList.add('no-img'); this.remove()">` : ''}
+        <div class="prog-hero-top">${logoHtml(c)}<span class="prog-ch">${esc(c.name)}</span>${live ? '<span class="tag live">ON NOW</span>' : ''}</div>
+        <div class="prog-hero-bottom">
+          <div class="prog-when"><b>${esc(fmtDay(prog[0]))}</b><span>${fmtRange(prog)}</span></div>
+          <div class="detail-title">${esc(prog[2])}</div>
+          ${live ? `<span class="bar prog-bar"><i style="width:${pct}%"></i></span>` : ''}
+        </div>
+      </div>
+      ${x.new || x.s ? `<div class="prog-chips">${x.new ? '<span class="pill new">NEW</span>' : ''}${x.s ? `<span class="pill">Series ${x.s} · Episode ${x.e}</span>` : ''}</div>` : ''}
+      ${prog[3] ? `<div class="section-title">Summary</div><p class="detail-plot">${esc(prog[3])}</p>` : '<p class="muted">No description in the guide.</p>'}
       <div class="detail-actions">
         ${live ? `<button class="btn primary" data-live>${icon('play')} Watch live</button>` : ''}
         ${(live || past) && canCatchUp(c, prog) ? `<button class="btn ${live ? '' : 'primary'}" data-cu>${live ? 'Watch from start' : `${icon('play')} Watch (catch-up)`}</button>` : ''}

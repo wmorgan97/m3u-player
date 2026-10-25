@@ -51,7 +51,7 @@ async function build(urls) {
   const data = parser.finish();
   // Store each channel's programmes as ready-made JSON (short descriptions): cheap to hold and to send.
   const chans = new Map();
-  for (const [id, list] of Object.entries(data.programmes)) chans.set(id, JSON.stringify(list.map(p => [p[0], p[1], p[2], p[3].slice(0, 220)])));
+  for (const [id, list] of Object.entries(data.programmes)) chans.set(id, JSON.stringify(list.map(p => p[4] ? [p[0], p[1], p[2], p[3].slice(0, 600), p[4]] : [p[0], p[1], p[2], p[3].slice(0, 600)])));
   console.log(`[guide] indexed ${chans.size} channels in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   return { at: Date.now(), chans, names: data.names };
 }
