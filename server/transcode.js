@@ -13,6 +13,8 @@ import { tmpdir } from 'node:os';
 import { isIP } from 'node:net';
 import { createHmac } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { request as httpsRequest } from 'node:https';
+import { request as httpRequest } from 'node:http';
 
 const FFMPEG = process.env.FFMPEG || 'C:\\ffmpeg\\ffmpeg.exe';
 const FFPROBE = process.env.FFPROBE || FFMPEG.replace(/ffmpeg(\.exe)?$/i, 'ffprobe$1');
@@ -309,15 +311,22 @@ export async function handleDownload(req, res, url, send, allowed) {
     res.on('close', () => { ctrl.abort(); if (downloads.get(t.hostname)?.ctrl === ctrl) downloads.delete(t.hostname); });
     downloads.set(t.hostname, { ctrl, proc: { kill: () => { ctrl.abort(); try { res.destroy(); } catch {} } } });
     const range = /^bytes=\d+-$/.test(req.headers.range || '') ? req.headers.range : null;
-    let up;
-    try { up = await fetch(t.href, { headers: { 'user-agent': 'Mozilla/5.0', ...(range ? { range } : {}) }, signal: ctrl.signal }); } catch (e) { return send(res, 502, `Upstream error: ${e.message}`); }
-    if (!up.ok || !up.body) return send(res, 502, `The provider replied ${up.status}`);
-    const total = up.status === 206 ? (up.headers.get('content-range') || '').split('/')[1] : up.headers.get('content-length');
-    console.log(`[dl] file copy ${t.href.slice(0, 80)} ${total || '?'} bytes${range ? ` (resume ${range})` : ''}`);
-    res.writeHead(up.status === 206 ? 206 : 200, { 'content-type': up.headers.get('content-type') || 'application/octet-stream', 'access-control-allow-origin': '*', 'cache-control': 'no-store',
-      ...(up.status === 206 ? { 'content-range': up.headers.get('content-range') } : {}),
-      'x-mode': 'file', 'x-estimate': total || '0', 'access-control-expose-headers': 'x-duration, x-mode, x-estimate, content-range' });
-    return Readable.fromWeb(up.body).on('error', () => res.destroy()).pipe(res);
+    // One plain socket, no keep-alive pool: the provider counts open connections, so nothing may linger.
+    const mk = t.protocol === 'https:' ? httpsRequest : httpRequest;
+    const upReq = mk(t, { method: 'GET', agent: false, headers: { 'user-agent': 'Mozilla/5.0', connection: 'close', ...(range ? { range } : {}) } });
+    ctrl.signal.addEventListener('abort', () => upReq.destroy());
+    upReq.on('error', e => { if (!res.headersSent) send(res, 502, `Upstream error: ${e.message}`); else res.destroy(); });
+    upReq.on('response', up => {
+      if (up.statusCode !== 200 && up.statusCode !== 206) { up.resume(); return send(res, 502, `The provider replied ${up.statusCode}`); }
+      const total = up.statusCode === 206 ? (up.headers['content-range'] || '').split('/')[1] : up.headers['content-length'];
+      console.log(`[dl] file copy ${t.href.slice(0, 80)} ${total || '?'} bytes${range ? ` (resume ${range})` : ''}`);
+      res.writeHead(up.statusCode, { 'content-type': up.headers['content-type'] || 'application/octet-stream', 'access-control-allow-origin': '*', 'cache-control': 'no-store',
+        ...(up.statusCode === 206 ? { 'content-range': up.headers['content-range'] } : {}),
+        'x-mode': 'file', 'x-estimate': total || '0', 'access-control-expose-headers': 'x-duration, x-mode, x-estimate, content-range' });
+      up.on('error', () => res.destroy()).pipe(res);
+    });
+    upReq.end();
+    return;
   }
   const probe = await probeFile(t.href);
   if (!probe.duration) return send(res, 502, 'Could not read the file');
