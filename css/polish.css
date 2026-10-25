@@ -436,3 +436,12 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
 .dl-stats { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 12.5px; color: var(--muted); }
 .dl-stats b { font-size: 15px; color: var(--text); font-variant-numeric: tabular-nums; }
 .dl-stats span { font-variant-numeric: tabular-nums; }
+
+/* ---------- Brand mark: always a way home ---------- */
+.brand { display: inline-grid; place-items: center; width: 34px; height: 34px; margin-left: 2px; border-radius: 10px; text-decoration: none; color: #fff; flex: none;
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #000)); box-shadow: 0 2px 8px rgba(0,0,0,.35); }
+.brand-mark { font-size: 13px; line-height: 1; margin-left: 2px; }
+.brand:active { transform: scale(.94); }
+#back:not([hidden]) + .brand { display: none; }   /* a Back arrow already leads out; keep the bar uncluttered */
+.topbar h1.home-link { cursor: pointer; }
+@media (min-width: 900px) { #back:not([hidden]) + .brand { display: inline-grid; } .topbar h1 { margin-left: 10px; } }

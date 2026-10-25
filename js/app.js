@@ -534,6 +534,8 @@ function rerender() {
 
 function setTopbar({ title, back = false, actions = [] }) {
   $('#title').textContent = title;
+  $('#title').onclick = back ? null : () => { if (location.hash && location.hash !== '#/') location.hash = '#/'; else scrollTo({ top: 0, behavior: 'smooth' }); };
+  $('#title').classList.toggle('home-link', !back);
   const b = $('#back');
   b.hidden = !back;
   b.innerHTML = icon('back');
