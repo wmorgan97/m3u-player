@@ -1955,6 +1955,15 @@ function trackProgress(force = false) {
 }
 
 function bindPlayer() {
+  // Swipe up/down on the video for the next/previous channel (inline only: iOS owns full-screen gestures).
+  let sx = 0, sy = 0, st = 0;
+  const surface = video.parentElement;
+  surface.addEventListener('touchstart', e => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; st = Date.now(); }, { passive: true });
+  surface.addEventListener('touchend', e => {
+    const t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+    if (e.touches.length || Date.now() - st > 600 || Math.abs(dy) < 70 || Math.abs(dx) > Math.abs(dy) / 2) return;
+    if (state.playing?.list.length > 1 && player.isLive) step(dy < 0 ? 1 : -1);
+  }, { passive: true });
   video.addEventListener('waiting', () => { if (state.playing) setStatus('Buffering…'); });
   video.addEventListener('playing', () => { setStatus(''); hideTuning(); });
   video.addEventListener('timeupdate', () => trackProgress());

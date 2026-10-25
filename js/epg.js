@@ -181,6 +181,13 @@ const pad = n => String(n).padStart(2, '0');
 export function m3uCatchupUrl(c, start, stop, now = Date.now()) {
   const a = c.attrs || {};
   const mode = (a.catchup || a['catchup-type'] || '').toLowerCase();
+  // Xtream-style providers ("xc"): /live/user/pass/id.ts -> /timeshift/user/pass/minutes/YYYY-MM-DD:HH-MM/id.ts
+  const xc = /^(https?:\/\/[^/]+)\/(?:live\/)?([^/]+)\/([^/]+)\/(\d+)(?:\.\w+)?$/i.exec(c.url);
+  if (xc && (mode === 'xc' || mode === 'xtream' || (!a['catchup-source'] && /\/live\//.test(c.url)))) {
+    const d = new Date(start);
+    const when = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}:${pad(d.getUTCHours())}-${pad(d.getUTCMinutes())}`;
+    return `${xc[1]}/timeshift/${xc[2]}/${xc[3]}/${Math.ceil((stop - start) / 60000)}/${when}/${xc[4]}.ts`;
+  }
   let source = a['catchup-source'] || '';
   if (!source || mode === 'shift' || mode === 'timeshift') {
     source = 'utc={utc}&lutc={lutc}';
