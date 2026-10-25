@@ -19,6 +19,8 @@ import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
 import { isIP } from 'node:net';
 import { handleHls } from './transcode.js';
+import { handleSync } from './sync.js';
+import { handleGuide } from './guide.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const port = Number(process.env.PORT) || 8080;
@@ -34,7 +36,7 @@ const TYPES = {
 };
 const CORS = {
   'access-control-allow-origin': '*',
-  'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+  'access-control-allow-methods': 'GET, HEAD, POST, OPTIONS',
   'access-control-allow-headers': '*',
   'access-control-expose-headers': '*',
 };
@@ -138,6 +140,9 @@ export function createAppServer() {
     let url;
     try { url = new URL(req.url, 'http://local'); } catch { return send(res, 400, 'Bad request'); }   // e.g. '//' would crash the server
     if (req.method === 'OPTIONS') return send(res, 204, '');
+    if (url.pathname === '/sync') return handleSync(req, res, url, send).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
+    if (url.pathname === '/guide') return handleGuide(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
+      .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
     const handler = url.pathname === '/proxy' ? handleProxy
       : (url.pathname === '/hls' || url.pathname.startsWith('/hls/')) ? handleHls

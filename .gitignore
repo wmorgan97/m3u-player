@@ -9,3 +9,6 @@ run.log
 pm2.config.cjs
 err.txt
 out.txt
+
+# synced favourites/recents (personal data)
+data/

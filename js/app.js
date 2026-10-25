@@ -74,9 +74,10 @@ const cloneChannel = c => ({ ...c, id: uid(), src: srcOf(c) || undefined, attrs:
 
 // ---------- boot ----------
 async function init() {
-  const [playlists, favorites, recents, settings, progress] = await Promise.all([
-    db.allPlaylists(), db.get('favorites'), db.get('recents'), db.get('settings'), db.get('progress'),
+  const [playlists, favorites, recents, settings, progress, meta] = await Promise.all([
+    db.allPlaylists(), db.get('favorites'), db.get('recents'), db.get('settings'), db.get('progress'), db.get('syncMeta'),
   ]);
+  Object.assign(syncMeta, meta);
   state.playlists = playlists.sort((a, b) => a.createdAt - b.createdAt);
   state.favorites = favorites || [];
   state.recents = recents || [];
@@ -90,6 +91,8 @@ async function init() {
   route();
   if (!isNative && 'serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
   if (!isNative) await detectServerProxy();
+  syncNow();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
   await Promise.all(state.playlists.map(p => loadGuide(p.id)));
   rerenderRows();
   backgroundRefresh();
@@ -117,6 +120,44 @@ async function detectServerProxy() {
   } catch {}
 }
 
+// ---------- sync across devices ----------
+// Favourites, recently watched and progress are also kept on the VPS (server/sync.js), so the
+// phone, iPad and laptop all match. The server merges; the app sends its state and adopts the result.
+const syncMeta = { favAt: 0, recReset: 0 };
+const canSync = () => serverProxy.available && !serverProxy.needsKey;
+const serverApi = path => serverProxy.base.replace(/proxy$/, path) + (state.settings.serverKey ? `?key=${encodeURIComponent(state.settings.serverKey)}` : '');
+let syncing = null, syncAgain = false;
+async function syncNow() {
+  if (!canSync()) return;
+  if (syncing) { syncAgain = true; return syncing; }
+  syncing = (async () => {
+    try {
+      const res = await fetch(serverApi('sync'), { method: 'POST', cache: 'no-store', body: JSON.stringify({
+        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress }) });
+      if (!res.ok) return;
+      const d = await res.json();
+      const urls = list => (list || []).map(c => c.url).join('\n');
+      let changed = false;
+      if (Array.isArray(d.favorites) && urls(d.favorites) !== urls(state.favorites)) {
+        state.favorites = d.favorites; syncFavs(); db.set('favorites', d.favorites); changed = true;
+        if (state.current?.id === 'fav') { state.current.channels = state.favorites; refreshPlaylistView(); }
+      }
+      if (Array.isArray(d.recents) && urls(d.recents) !== urls(state.recents)) { state.recents = d.recents; db.set('recents', d.recents); changed = true; }
+      if (d.progress) { state.progress = d.progress; db.set('progress', d.progress).catch(() => {}); }
+      Object.assign(syncMeta, { favAt: d.favAt || syncMeta.favAt, recReset: d.recReset || syncMeta.recReset });
+      db.set('syncMeta', syncMeta).catch(() => {});
+      if (changed && !state.current && !state.playing) showHome();   // never redraw Home under a playing channel
+    } catch {} finally {
+      syncing = null;
+      if (syncAgain) { syncAgain = false; syncNow(); }
+    }
+  })();
+  return syncing;
+}
+const syncSoon = debounce(syncNow, 1500);
+const syncLater = debounce(syncNow, 20000);   // watch progress ticks every few seconds
+function favoritesChanged() { syncMeta.favAt = Date.now(); syncSoon(); }
+
 async function enterServerKey() {
   const v = await formSheet({
     title: 'Server key',
@@ -131,6 +172,7 @@ async function enterServerKey() {
   await db.set('settings', state.settings);
   applySettings();
   toast('Connected to your server');
+  syncNow();
   rerender();
 }
 
@@ -183,8 +225,13 @@ const invalidate = p => { if (p) { delete p._groupCache; delete p._kinds; delete
 async function save(p) {
   p.updatedAt = Date.now();
   invalidate(p);
-  if (p.id === 'fav') { state.favorites = p.channels; syncFavs(); await db.set('favorites', p.channels); }
-  else if (p.id === 'recent') { state.recents = p.channels; await db.set('recents', p.channels); }
+  if (p.id === 'fav') { state.favorites = p.channels; syncFavs(); await db.set('favorites', p.channels); favoritesChanged(); }
+  else if (p.id === 'recent') {
+    // An edit (remove/reorder) replaces the list everywhere; stamp times so the server keeps this order.
+    syncMeta.recReset = Date.now();
+    p.channels.forEach((c, i) => { c.at = syncMeta.recReset - i; });
+    state.recents = p.channels; await db.set('recents', p.channels); syncSoon();
+  }
   else if (!p.virtual) await db.putPlaylist(p);
 }
 
@@ -703,6 +750,7 @@ async function toggleFavorite(c, button) {
   state.favorites = adding ? [...state.favorites, cloneChannel(c)] : state.favorites.filter(f => f.url !== c.url);
   syncFavs();
   await db.set('favorites', state.favorites);
+  favoritesChanged();
   button?.classList.toggle('on', adding);
   if (state.current?.id === 'fav') { state.current.channels = state.favorites; refreshPlaylistView(); }
   toast(adding ? 'Added to Favorites' : 'Removed from Favorites');
@@ -713,6 +761,7 @@ async function addFavorites(channels) {
   state.favorites = [...state.favorites, ...fresh];
   syncFavs();
   await db.set('favorites', state.favorites);
+  favoritesChanged();
   toast(`Added ${plural(fresh.length, 'channel')} to Favorites`);
 }
 
@@ -1031,8 +1080,17 @@ function guideChannels(p) {
   return live.filter(c => pinned.has(c.group) || favUrls.has(c.url));
 }
 
-// Parse in a Web Worker so the main thread never stalls; falls back inline where module workers are missing.
-function parseEpg(urls, opts) {
+// With the VPS server, it downloads and filters the guide (server/guide.js) and the phone gets a small
+// JSON. Otherwise parse in a Web Worker so the main thread never stalls (inline where workers are missing).
+async function parseEpg(urls, opts) {
+  if (canSync()) {
+    const res = await fetch(serverApi('guide'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ urls, ids: [...opts.wanted.ids], names: [...opts.wanted.names] }) });
+    if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
+    return res.json();
+  }
+  return parseEpgLocally(urls, opts);
+}
+function parseEpgLocally(urls, opts) {
   if (typeof Worker === 'undefined') return loadEpg(urls, opts);
   return new Promise((resolve, reject) => {
     let w;
@@ -1079,7 +1137,7 @@ function updateGuide(p, { silent = false } = {}) {
 // the video for bandwidth on a phone. Above this size the guide only loads when asked, from the guide screen.
 const AUTO_GUIDE_MAX = 8000;
 function maybeUpdateGuide(p) {
-  if ((p.channels?.length || 0) > AUTO_GUIDE_MAX) return;
+  if ((p.channels?.length || 0) > AUTO_GUIDE_MAX && !canSync()) return;   // the server makes big guides small
   const g = guides.get(p.id);
   const stale = !g || Date.now() - g.at > 12 * HOUR;
   if (stale && epgUrls(p).length && !(Date.now() - (p.epgFailedAt || 0) < HOUR)) updateGuide(p, { silent: true });
@@ -1893,6 +1951,7 @@ function trackProgress(force = false) {
   const entries = Object.entries(state.progress);
   if (entries.length > MAX_PROGRESS) state.progress = Object.fromEntries(entries.sort((a, b) => b[1].at - a[1].at).slice(0, MAX_PROGRESS));
   db.set('progress', state.progress).catch(() => {});
+  syncLater();
 }
 
 function bindPlayer() {
@@ -2084,8 +2143,9 @@ function stopPlaying() {
 
 async function addRecent(c) {
   if (c.kind === 'catchup') return;
-  state.recents = [cloneChannel(c), ...state.recents.filter(r => r.url !== c.url)].slice(0, MAX_RECENTS);
+  state.recents = [{ ...cloneChannel(c), at: Date.now() }, ...state.recents.filter(r => r.url !== c.url)].slice(0, MAX_RECENTS);
   await db.set('recents', state.recents);
+  syncSoon();
 }
 
 init().catch(err => {
