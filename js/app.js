@@ -275,6 +275,14 @@ function continueWatching() {
   return Object.values(state.progress).filter(e => !e.done && e.t > 30).sort((a, b) => b.at - a.at).slice(0, 20);
 }
 
+// A display name for a playlist — never a raw URL/host (which is what a nameless
+// import defaults to), so the home list stays readable.
+const URLISH = /^(https?:\/\/)?[a-z0-9-]+(\.[a-z0-9-]+)+(\/|:|$)/i;
+function playlistTitle(p) {
+  const n = (p.name || '').trim();
+  return !n || URLISH.test(n) ? 'My playlist' : n;
+}
+
 function playlistSub(p) {
   const parts = [plural(p.channels.length, 'channel')];
   if (p.kind === 'xtream') {
@@ -283,7 +291,6 @@ function playlistSub(p) {
     if (exp) parts.push(`expires ${new Date(exp * 1000).toLocaleDateString()}`);
   } else {
     parts.push(plural(groupsOf(p.channels).length, 'group'));
-    if (p.sourceUrl) parts.push(esc(host(p.sourceUrl)));
   }
   if (guides.get(p.id)?.channelCount) parts.push('TV guide');
   return parts.join(' · ');
@@ -324,7 +331,7 @@ function showHome() {
     </ul>
     <div class="section-title">Playlists</div>
     ${pl.length
-      ? `<ul class="cards">${pl.map(p => card(`#/p/${p.id}`, p.kind === 'xtream' ? 'tv' : 'list', p.name, playlistSub(p), p.id)).join('')}</ul>`
+      ? `<ul class="cards">${pl.map(p => card(`#/p/${p.id}`, p.kind === 'xtream' ? 'tv' : 'list', playlistTitle(p), playlistSub(p), p.id)).join('')}</ul>`
       : `<div class="empty">${icon('tv', 'big')}<p><b>No playlists yet</b></p>
           <p class="muted">Add an Xtream login, an M3U / M3U8 link, or a playlist file.</p>
           <button class="btn primary" id="add-first">Add playlist</button></div>`}`;
