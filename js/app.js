@@ -220,15 +220,16 @@ const liveEnc = new Set();  // live channel urls that showed no picture: convert
 // time and duration are the truth; seeking anywhere is a plain seek (the server makes segments on demand).
 let vodTrack = 0, vodInfo = null, subTrackEl = null, vodEnc = false, vodInfoFor = '';   // audio track in use, the file's probe, subtitles, "convert video for this device"
 // Can this device decode the file's video as-is? Chrome has no HEVC/10-bit; Safari on Apple silicon has HEVC.
+const IS_SAFARI = /^((?!chrome|chromium|crios|fxios|android).)*safari/i.test(navigator.userAgent);
 function canDecode(v) {
   if (!v) return true;
   if (v.chroma444 || v.interlaced) return false;   // 4:2:2 / 4:4:4 and interlaced sources: convert
   if (v.codec === 'h264') return !v.bit10;
+  // Only Apple's own player is trusted with HEVC/10-bit. Chrome claims support, then plays sound with no picture.
+  if (!IS_SAFARI) return false;
   const type = v.codec === 'hevc' ? `video/mp4; codecs="${v.bit10 ? 'hvc1.2.4.L153.B0' : 'hvc1.1.6.L123.B0'}"`
     : v.codec === 'av1' ? `video/mp4; codecs="av01.0.08M.${v.bit10 ? '10' : '08'}"` : v.codec === 'vp9' ? `video/mp4; codecs="vp09.00.10.${v.bit10 ? '10' : '08'}"` : '';
-  if (!type) return false;
-  const native = !!video.canPlayType('application/vnd.apple.mpegurl');
-  return native ? !!video.canPlayType(type) : !!(window.MediaSource?.isTypeSupported?.(type));
+  return !!type && !!video.canPlayType(type);
 }
 const vodPos = () => video.currentTime;
 const vodTotal = () => (Number.isFinite(video.duration) ? video.duration : 0) || seekRange()?.end || 0;
@@ -3363,7 +3364,9 @@ function bindPlayer() {
   setInterval(() => {
     const c = nowChannel();
     if (!c || video.paused || c.offline || video.currentTime < 3 || Date.now() - lastTune < 8000) { blankSince = 0; return; }
-    if (video.videoWidth > 0) { blankSince = 0; return; }
+    const q = video.getVideoPlaybackQuality?.();
+    const framesOk = q ? q.totalVideoFrames - (q.droppedVideoFrames || 0) > 5 : video.videoWidth > 0;
+    if (framesOk && video.videoWidth > 0) { blankSince = 0; return; }
     blankSince ||= Date.now();
     if (Date.now() - blankSince < 5000) return;
     blankSince = 0;
