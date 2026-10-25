@@ -185,7 +185,7 @@ async function save(p) {
   invalidate(p);
   if (p.id === 'fav') { state.favorites = p.channels; syncFavs(); await db.set('favorites', p.channels); }
   else if (p.id === 'recent') { state.recents = p.channels; await db.set('recents', p.channels); }
-  else if (!p.virtual) { await db.putPlaylist(p); maybeUpdateGuide(p); }   // pinned/hidden groups changed → rescope the guide
+  else if (!p.virtual) await db.putPlaylist(p);
 }
 
 async function createPlaylist(name, channels, extra = {}) {
@@ -1075,10 +1075,13 @@ function updateGuide(p, { silent = false } = {}) {
   return job;
 }
 
-// Reload when the guide is old or when the set of visible/pinned channels it covers has changed.
+// Automatic guide loads download the whole XMLTV file (20MB+ for big providers), which competes with
+// the video for bandwidth on a phone. Above this size the guide only loads when asked, from the guide screen.
+const AUTO_GUIDE_MAX = 8000;
 function maybeUpdateGuide(p) {
+  if ((p.channels?.length || 0) > AUTO_GUIDE_MAX) return;
   const g = guides.get(p.id);
-  const stale = !g || Date.now() - g.at > 12 * HOUR || (g.scope !== undefined && g.scope !== guideChannels(p).length);
+  const stale = !g || Date.now() - g.at > 12 * HOUR;
   if (stale && epgUrls(p).length && !(Date.now() - (p.epgFailedAt || 0) < HOUR)) updateGuide(p, { silent: true });
 }
 
