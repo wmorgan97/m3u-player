@@ -1593,7 +1593,7 @@ function accountSheet(p) {
   });
 }
 
-function groupsSheet(p, tab) {
+function groupsSheet(p, tab, { scroll = 0 } = {}) {
   const items = tab === 'live' ? p.channels : vodCache.get(vodKey(p, tab)) || [];
   const groups = groupsOf(items);
   const hidden = new Set(p.hiddenGroups || []);
@@ -1634,6 +1634,7 @@ function groupsSheet(p, tab) {
       ${tab === 'live' ? `<span class="ghandle" data-act="drag" aria-label="Drag to reorder">${icon('grip')}</span>` : ''}
     </li>`).join('')}</ul>`, {
     onMount: el => {
+      if (scroll) el.scrollTop = scroll;   // re-rendered after a change: stay where you were
       const rows = [...el.querySelectorAll('.glist > li')];
       const visibleRows = () => rows.filter(li => !li.hidden);
       el.querySelector('#g-q').oninput = e => {
@@ -1646,7 +1647,7 @@ function groupsSheet(p, tab) {
         p.hiddenGroups = [...set];
         await save(p);
         rerender();
-        groupsSheet(p, tab);
+        groupsSheet(p, tab, { scroll: $('#sheet').scrollTop });
       };
       // Reorder groups: `order` is the full list of group names in the wanted order.
       const applyOrder = async order => {
@@ -1654,7 +1655,7 @@ function groupsSheet(p, tab) {
         p.channels = [...p.channels].sort((a, c) => (rank.get(a.group || '') ?? 1e9) - (rank.get(c.group || '') ?? 1e9));
         await save(p);
         rerender();
-        groupsSheet(p, tab);
+        groupsSheet(p, tab, { scroll: $('#sheet').scrollTop });
       };
       // Drag a row by its handle to reorder (touch and mouse).
       const list = el.querySelector('.glist');
@@ -1719,7 +1720,8 @@ function groupsSheet(p, tab) {
           if (set.has(g.name)) set.delete(g.name); else set.add(g.name);
           p.homeGroups = groups.map(x => x.name).filter(n => set.has(n));   // keep the list's order
           await save(p);
-          return groupsSheet(p, tab);
+          b.classList.toggle('on', set.has(g.name));   // in place: no re-render, so the list stays where you are
+          return;
         }
         const toggle = async (key, name) => {
           const set = new Set(p[key] || []);
@@ -1727,7 +1729,7 @@ function groupsSheet(p, tab) {
           p[key] = [...set];
           await save(p);
           rerender();
-          groupsSheet(p, tab);
+          groupsSheet(p, tab, { scroll: $('#sheet').scrollTop });
         };
         const inGroup = p.channels.filter(c => (c.group || '') === g.name);
         const others = groups.map(x => x.name).filter(n => n !== g.name);
