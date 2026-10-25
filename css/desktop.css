@@ -97,3 +97,13 @@
   .epg-cur-img { grid-row: 1 / 5; width: 180px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 12px; background: var(--surface-2); }
   .epg-cur-head .pill { padding: 2px 8px; font-size: 11px; }
 }
+
+/* ---------- Films play in a wide "cinema" layout, not the live dock ---------- */
+@media (min-width: 1100px) {
+  body.playing.vod-playing .player { position: static; width: auto; max-width: 1240px; margin: 0 auto; border-left: 0; border-bottom: 1px solid var(--line); display: block; }
+  body.playing.vod-playing .player video { max-height: 72vh; }
+  body.playing.vod-playing .epg-panel { display: none; }
+  body.playing.vod-playing #view { margin-right: auto; max-width: 1240px; }
+  body.playing.vod-playing .list:not(.grid):not(.discover) { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  body.playing.vod-playing .filters { top: calc(var(--safe-top) + 50px); }
+}

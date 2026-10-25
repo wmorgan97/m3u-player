@@ -212,23 +212,14 @@ function noteStall() {
   }
 }
 let transcodeVod = false;   // set per play: movies, episodes and catch-up get an on-demand (seekable) stream
-// VOD through the server: the stream begins at vodStart (seconds into the film); positions shown to the user
-// are vodStart + video time; the real length comes from the server's probe. Seeking to a point the current
-// stream doesn't have yet restarts the stream from there.
-let vodStart = 0, vodDuration = 0, pendingSeek = null;
-const viaServerVod = () => transcodeVod && String(player.lastUrl || '').startsWith('/hls');
-const vodPos = () => (viaServerVod() ? vodStart : 0) + video.currentTime;
-const vodTotal = () => vodDuration || (Number.isFinite(video.duration) ? (viaServerVod() ? vodStart : 0) + video.duration : 0) || (seekRange()?.end || 0) + (viaServerVod() ? vodStart : 0);
+// The server hands VOD over as a complete playlist with the real length, so the video element's own
+// time and duration are the truth; seeking anywhere is a plain seek (the server makes segments on demand).
+const vodPos = () => video.currentTime;
+const vodTotal = () => (Number.isFinite(video.duration) ? video.duration : 0) || seekRange()?.end || 0;
 function seekVod(t) {
-  const c = nowChannel();
-  if (!c) return;
-  t = Math.max(0, Math.min(t, (vodTotal() || Infinity) - 1));
-  const r = seekRange();
-  if (!viaServerVod()) { video.currentTime = t; return; }
-  if (t >= vodStart && r && t - vodStart <= r.end) { video.currentTime = t - vodStart; return; }
-  pendingSeek = t;                      // not remuxed yet (or before the start): restart the stream from there
-  setStatus(`Jumping to ${fmtDur(t)}…`);
-  playChannel(state.playing.list, state.playing.index);
+  const total = vodTotal();
+  video.currentTime = Math.max(0, Math.min(t, total ? total - 0.5 : t));
+  if (video.paused) video.play().catch(() => {});
 }
 function transcodeUrl(url) {
   if (isNative) return null;                 // the native app plays raw streams itself
@@ -236,7 +227,7 @@ function transcodeUrl(url) {
   const key = state.settings.serverKey || '';
   if (serverProxy.needsKey && !key) return null;
   const b = bufferLevel();
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1&start=${Math.floor(vodStart)}` : ''}&url=${encodeURIComponent(url)}`;
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? '&vod=1' : ''}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -818,9 +809,80 @@ function renderChips() {
   $('#chips .chip.active')?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
 }
 
+// Movies/Series front page for a server-backed catalogue: a hero, "Recently added", then a shelf per
+// group (loaded as you scroll). Picking a group chip or searching switches to the normal poster grid.
+const shelfItems = new Map();   // shelf key -> items shown in it (for taps)
+let shelfObserver = null;
+const discoverMode = () => {
+  const p = state.current;
+  if (!p || p.kind !== 'xtream' || state.tab === 'live' || state.group !== null || state.query) return false;
+  const e = vodCache.get(vodKey(p, state.tab));
+  return !!e && !Array.isArray(e);
+};
+function cardHtml(it, key, k) {
+  return `<li class="scard" data-shelf="${esc(key)}" data-k="${k}">
+    <span class="poster-img" data-initials="${initials(it.name)}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+      ${it.rating ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
+    <span class="poster-name">${esc(it.name)}</span>${it.year ? `<span class="muted">${esc(it.year)}</span>` : ''}</li>`;
+}
+function shelfHtml(title, key, items, { total = 0, group = null, pending = false } = {}) {
+  shelfItems.set(key, items);
+  const more = group !== null && total > items.length;
+  return `<li class="shelf" data-key="${esc(key)}" ${group !== null ? `data-group="${esc(group)}"` : ''}>
+    <div class="shelf-head"><h3>${esc(title)}</h3>${group !== null ? `<button class="btn small" data-see="${esc(group)}">See all${total ? ` ${total.toLocaleString()}` : ''}</button>` : ''}</div>
+    <ul class="shelf-row">${items.map((it, k) => cardHtml(it, key, k)).join('')}${pending && !items.length ? '<li class="shelf-empty muted">Loading…</li>' : ''}${more ? `<li class="scard more" data-see="${esc(group)}"><span class="poster-img more-tile"><b>+${(total - items.length).toLocaleString()}</b><span>more</span></span></li>` : ''}</ul>
+  </li>`;
+}
+function renderDiscover() {
+  const p = state.current, tab = state.tab, entry = vodCache.get(vodKey(p, tab)), list = $('#list');
+  shelfItems.clear();
+  shelfObserver?.disconnect();
+  const hidden = new Set(p.hiddenGroups || []);
+  const groups = entry.groupList.filter(g => !hidden.has(g.name));
+  const hero = entry.recent.find(it => it.logo) || entry.recent[0];
+  const what = tab === 'movies' ? 'movies' : 'series';
+  list.className = 'list discover';
+  list.innerHTML = `
+    ${hero ? `<li class="hero" data-shelf="hero" data-k="0" style="--hue:${hueOf(hero.name)}">
+      ${hero.logo ? `<img class="hero-bg" src="${esc(hero.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+      <div class="hero-body">
+        ${hero.logo ? `<span class="poster-img hero-poster"><img src="${esc(hero.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>` : ''}
+        <div class="hero-text">
+          <span class="muted small-caps">New in ${what}</span>
+          <div class="hero-title">${esc(hero.name)}</div>
+          <div class="muted">${[hero.year, hero.rating ? `★ ${hero.rating.toFixed(1)}` : '', prettyGroup(hero.group)].filter(Boolean).map(esc).join(' · ')}</div>
+          <div class="hero-actions"><button class="btn primary" data-hero="play">${icon('play')} ${tab === 'movies' ? 'Play' : 'Episodes'}</button><button class="btn" data-hero="info">Details</button></div>
+        </div>
+      </div></li>` : ''}
+    ${shelfHtml('Recently added', 'recent', entry.recent.slice(0, 40))}
+    ${groups.slice(0, 40).map(g => shelfHtml(prettyGroup(g.name) || UNGROUPED, 'g:' + g.name, (entry.groups.get(g.name) || []).slice(0, 24), { total: g.count, group: g.name, pending: !entry.groups.has(g.name) })).join('')}
+    ${groups.length > 40 ? `<li class="muted center shelf-note">${(groups.length - 40).toLocaleString()} more groups: use the chips above.</li>` : ''}`;
+  shelfItems.set('hero', [hero].filter(Boolean));
+  // Load a group's titles when its shelf scrolls near the viewport.
+  shelfObserver = new IntersectionObserver(es => {
+    for (const e of es) {
+      if (!e.isIntersecting) continue;
+      const g = e.target.dataset.group;
+      if (g !== undefined && !entry.groups.has(g)) requestVod(p, tab, { group: g });
+      shelfObserver.unobserve(e.target);
+    }
+  }, { rootMargin: '600px' });
+  list.querySelectorAll('.shelf[data-group]').forEach(el => shelfObserver.observe(el));
+}
+
 function applyFilter({ keep = false } = {}) {
   const p = state.current;
   const keepRows = keep ? state.rendered : 0, keepY = scrollY;
+  if (discoverMode()) {
+    const entry = vodCache.get(vodKey(p, state.tab));
+    state.filtered = entry.recent;
+    $('#q').placeholder = `Search ${state.tab === 'series' ? `${entry.total.toLocaleString()} series` : plural(entry.total, 'movie')}`;
+    renderDiscover();
+    if (keep) scrollTo(0, keepY);
+    renderSelbar();
+    return;
+  }
+  shelfObserver?.disconnect();
   const q = state.query;
   const items = currentItems();
   state.filtered = items.filter(c => {
@@ -835,6 +897,7 @@ function applyFilter({ keep = false } = {}) {
   const count = entry && !Array.isArray(entry) ? entry.total : items.length;
   $('#q').placeholder = `Search ${what === 'series' ? `${count.toLocaleString()} series` : plural(count, what)}`;
   const list = $('#list');
+  list.classList.remove('discover');
   list.classList.toggle('grid', state.tab !== 'live' && state.current.kind === 'xtream');
   list.innerHTML = '';
   state.rendered = 0;
@@ -970,6 +1033,16 @@ function posterHtml(it, i) {
 }
 
 function onListClick(e) {
+  const see = e.target.closest('[data-see]');
+  if (see) { state.group = see.dataset.see; updateTopbar(); renderChips(); applyFilter(); toListTop(); return; }
+  const card = e.target.closest('.scard, .hero');
+  if (card) {
+    const it = shelfItems.get(card.dataset.shelf)?.[+card.dataset.k];
+    if (!it) return;
+    const heroBtn = e.target.closest('[data-hero]')?.dataset.hero;
+    if (heroBtn === 'play' && it.kind !== 'series') return playChannel([it], 0);
+    return it.kind === 'series' ? seriesSheet(it) : movieSheet(it);
+  }
   const el = e.target.closest('.row, .poster');
   if (!el) return;
   const i = +el.dataset.i;
@@ -1317,13 +1390,15 @@ function detailHtml(m, info = {}) {
   const pr = state.progress[m.url];
   const resumable = pr && !pr.done && pr.t > 30;
   const meta = [String(i.releasedate || i.release_date || '').slice(0, 4) || m.year, i.duration, i.genre || m.genre].filter(Boolean);
-  return `<div class="detail" data-id="${esc(m.id)}">
+  const art = i.backdrop_path?.[0] || i.movie_image || i.cover_big || m.logo;
+  return `<div class="detail film" data-id="${esc(m.id)}">
+    <div class="film-hero" style="--hue:${hueOf(m.name)}">${art ? `<img class="film-bg" src="${esc(art)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>
     <div class="detail-top">
       <span class="detail-poster" data-initials="${initials(m.name)}">${(i.movie_image || i.cover_big || m.logo) ? `<img src="${esc(i.movie_image || i.cover_big || m.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
       <div class="detail-head">
         <div class="detail-title">${esc(m.name)}</div>
-        <div class="muted">${meta.map(esc).join(' · ')}</div>
-        ${m.rating ? `<div class="rating">★ ${m.rating.toFixed(1)}</div>` : ''}
+        <div class="film-meta">${meta.map(x => `<span class="pill">${esc(x)}</span>`).join('')}${m.rating ? `<span class="pill rating">★ ${m.rating.toFixed(1)}</span>` : ''}</div>
+        ${pr && !pr.done && pr.t > 30 ? `<span class="bar film-bar"><i style="width:${Math.min(100, (pr.t / pr.d) * 100).toFixed(1)}%"></i></span><span class="muted">${fmtDur(pr.d - pr.t)} left</span>` : ''}
       </div>
     </div>
     ${i.plot || i.description || m.plot ? `<p class="detail-plot">${esc(i.plot || i.description || m.plot)}</p>` : ''}
@@ -2775,12 +2850,12 @@ let lastProgressSave = 0;
 function trackProgress(force = false) {
   const c = nowChannel();
   if (!c || !c.kind || c.kind === 'live' || c.kind === 'catchup') return;
-  const d = viaServerVod() ? vodTotal() : video.duration;
+  const d = vodTotal();
   if (!Number.isFinite(d) || d < 60) return;
   if (!force && Date.now() - lastProgressSave < 5000) return;
   lastProgressSave = Date.now();
   const t = vodPos();
-  state.progress[c.url] = { t, d, v: 2, at: Date.now(), done: t / d > 0.93, item: { id: c.id, kind: c.kind, name: c.name, url: c.url, logo: c.logo, group: c.group, src: c.src } };
+  state.progress[c.url] = { t, d, v: 3, at: Date.now(), done: t / d > 0.93, item: { id: c.id, kind: c.kind, name: c.name, url: c.url, logo: c.logo, group: c.group, src: c.src } };
   const entries = Object.entries(state.progress);
   if (entries.length > MAX_PROGRESS) state.progress = Object.fromEntries(entries.sort((a, b) => b[1].at - a[1].at).slice(0, MAX_PROGRESS));
   db.set('progress', state.progress).catch(() => {});
@@ -2914,6 +2989,7 @@ function playChannel(list, index) {
   state.playing = { list, index };
   $('#player').hidden = false;
   document.body.classList.add('playing');
+  document.body.classList.toggle('vod-playing', !isLiveChannel(c));   // films: wide "cinema" layout, not the live dock
   $('#player-error').hidden = true;
   $('#now-name').textContent = c.name;
   $('#now-logo').outerHTML = logoHtml(c, 'id="now-logo"');
@@ -2953,24 +3029,16 @@ function tune(c, list, index) {
   transcodeVod = !isLiveChannel(c);
   player.vod = transcodeVod;
   const pr = state.progress[c.url];
-  const resumeAt = pr && pr.v === 2 && !pr.done && pr.t > 30 && pr.t < (pr.d || Infinity) - 60 ? pr.t : 0;   // only positions saved by the current VOD logic
-  if (transcodeVod) {
-    vodStart = pendingSeek ?? resumeAt;   // a seek restart, or resume where you left off, else the beginning
-    vodDuration = pendingSeek !== null ? vodDuration : 0;
-    pendingSeek = null;
-    const tc = transcodeUrl(c.url);
-    if (tc && !vodDuration) fetch(tc.replace('/hls?', '/hls/info?')).then(r => r.json()).then(d => { if (nowChannel() === c && d.duration) { vodDuration = d.duration; updateControls(); } }).catch(() => {});
-  } else { vodStart = 0; vodDuration = 0; pendingSeek = null; }
+  const resumeAt = pr && pr.v === 3 && !pr.done && pr.t > 30 && pr.t < (pr.d || Infinity) - 60 ? pr.t : 0;   // only positions saved by the current VOD logic
   if (tuneFrom && tuneFrom.url !== c.url) unwarm(streamOf(tuneFrom));   // free the single provider slot right before connecting
   tuneFrom = null;
   player.play(streamOf(c)).then(ok => {
     if (!ok) return;
     setStatus('');
     setTimeout(() => { if (nowChannel() === c && !video.paused && video.currentTime > 2) retried.delete(c.url); }, 15_000);   // healthy again: allow a future retry
-    if (viaServerVod()) { if (vodStart === resumeAt && resumeAt) toast(`Resumed at ${fmtDur(resumeAt)}`, { action: 'Start over', fn: () => seekVod(0) }); }
-    else if (resumeAt && Number.isFinite(video.duration)) {
-      video.currentTime = resumeAt;
-      toast(`Resumed at ${fmtDur(resumeAt)}`, { action: 'Start over', fn: () => { video.currentTime = 0; } });
+    if (resumeAt && transcodeVod) {
+      seekVod(resumeAt);
+      toast(`Resumed at ${fmtDur(resumeAt)}`, { action: 'Start over', fn: () => seekVod(0) });
     }
   }).catch(err => {
     if (nowChannel() !== c) return;
@@ -3014,7 +3082,7 @@ function stopPlaying() {
   player.stop();
   state.playing = null;
   $('#player').hidden = true;
-  document.body.classList.remove('playing');
+  document.body.classList.remove('playing', 'vod-playing');
   highlightPlaying();
   if (location.hash.startsWith('#/guide')) sizeGuide();
 }

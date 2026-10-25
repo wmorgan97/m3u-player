@@ -142,9 +142,11 @@ export class Player {
 
       if (useHlsJs) {
         // VOD arrives as a growing playlist: start at 0 and never "catch up to live" (no latency chasing, no speed-up).
-        const hls = this.hls = new Hls({ enableWorker: true, backBufferLength: 30, maxBufferLength: 60, maxMaxBufferLength: 120, startPosition: this.vod ? 0 : -1,
-          liveSyncDurationCount: this.vod ? 1e6 : (this.liveSync || 3), liveMaxLatencyDurationCount: this.vod ? Infinity : (this.liveSync || 3) + 6,
-          maxLiveSyncPlaybackRate: 1, fragLoadingMaxRetry: 6, levelLoadingMaxRetry: 6 });
+        // VOD comes as a complete playlist (server/transcode.js), so plain VOD handling; live gets the live tuning.
+        const hls = this.hls = this.vod
+          ? new Hls({ enableWorker: true, backBufferLength: 60, maxBufferLength: 60, maxMaxBufferLength: 180, fragLoadingMaxRetry: 8, fragLoadingTimeOut: 40000, levelLoadingMaxRetry: 6 })
+          : new Hls({ enableWorker: true, backBufferLength: 30, maxBufferLength: 60, maxMaxBufferLength: 120,
+              liveSyncDurationCount: this.liveSync || 3, liveMaxLatencyDurationCount: (this.liveSync || 3) + 6, fragLoadingMaxRetry: 6, levelLoadingMaxRetry: 6 });
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (!data.fatal) return;
           if (!settled) return settle(reject, new Error(hlsErrorMessage(data)));

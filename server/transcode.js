@@ -24,6 +24,7 @@ const START_TIMEOUT_MS = 25_000;
 // Re-encoding forces a keyframe every second (fast starts on huge-GOP sources) but costs ~4 cores and is SLOWER
 // for 1080p50 sports feeds; copy mode measured 0.9-2.1s cold on this provider. Opt in with TRANSCODE_VIDEO=1.
 const REENCODE = process.env.TRANSCODE_VIDEO === '1';
+const VOD_SEG_S = 4;                     // VOD: fixed 4-second segments, so the whole playlist is known up front
 const READY_SEGMENTS = REENCODE ? 2 : 1;   // copy-mode segments are keyframe-aligned (2-4s): one is buffer enough
 const START_BEHIND_LIVE_S = REENCODE ? 3 : 4; // start playback this far behind the live edge so there's always buffer in hand
 
@@ -74,36 +75,47 @@ function probeDuration(target) {
   return job;
 }
 
-async function startSession(id, target, vod = false, start = 0) {
-  // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
-  const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
-  await fs.mkdir(dir, { recursive: true });
-  const args = [
+// Live: one ffmpeg per channel writing a rolling window. VOD: the file is cut into fixed 4s segments
+// (seg0, seg1, …) in one or more "runs"; a run can start at any segment index (-ss), so a seek far
+// ahead or back just restarts the run there while already-made segments stay on disk. The playlist the
+// player gets is synthesised from the file's duration (see vodManifest), so it is a plain VOD to every
+// player: real length, instant seeking, no live behaviour.
+function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac' } = {}) {
+  return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '2',
     '-rw_timeout', '15000000',                                   // 15s: a dead upstream fails fast instead of hanging
-    '-probesize', '500000', '-analyzeduration', '500000',     // open the input fast (don't over-probe a known TS)
-    ...(vod && start > 0 ? ['-ss', String(start)] : []),   // VOD seek: begin remuxing from this point
+    // Live TS: open fast with a small probe. Files (mkv/mp4): probe properly, or ffmpeg misses the B-frame
+    // reorder depth and writes frames with no decode timestamps, which freezes players after half a second.
+    ...(vod ? [] : ['-probesize', '500000', '-analyzeduration', '500000']),
+    ...(vod && fromIdx > 0 ? ['-ss', String(fromIdx * VOD_SEG_S)] : []),
     '-fflags', '+genpts+flush_packets', '-i', target,
     '-map', '0:v:0?', '-map', '0:a:0?',
     ...(REENCODE
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
          '-g', '25', '-keyint_min', '25', '-sc_threshold', '0', '-crf', '22', '-maxrate', '5M', '-bufsize', '10M', '-threads', '4']
       : ['-c:v', 'copy']),
-    '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+    ...(audio === 'none' ? ['-an'] : audio === 'copy' ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '128k', '-ac', '2']),
     '-flush_packets', '1', '-muxdelay', '0',
-    // ~45 minutes of segments stay on disk (delete_segments trims older ones): pause, rewind and
-    // jump-back work in the app; the player still starts near the live edge (EXT-X-START).
-    '-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_init_time', '1',
-    // Live: a rolling window. VOD (movies, episodes, catch-up): keep every segment and close the playlist
-    // at the end, so the player gets a seekable timeline with a real duration instead of a "live" stream.
-    ...(vod ? ['-hls_list_size', '0', '-hls_playlist_type', 'event', '-hls_flags', 'append_list+independent_segments']
-            : ['-hls_list_size', '1000', '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments']),
-    '-hls_segment_type', 'mpegts',
+    ...(vod
+      // A seek run keeps the file's own timestamps (copyts) so segment N holds time N*4s onwards. The run from
+      // the start doesn't: copyts there leaves the first B-frames with negative times, which stalls players.
+      ? [...(fromIdx > 0 ? ['-copyts'] : []), '-f', 'hls', '-hls_time', String(VOD_SEG_S), '-hls_list_size', '0', '-start_number', String(fromIdx),
+         '-hls_flags', 'split_by_time+temp_file', '-hls_segment_type', 'mpegts']
+      // ~45 minutes of segments stay on disk (delete_segments trims older ones): pause, rewind and
+      // jump-back work in the app; the player still starts near the live edge (EXT-X-START).
+      : ['-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_init_time', '1', '-hls_list_size', '1000',
+         '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments', '-hls_segment_type', 'mpegts']),
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
   ];
-  const proc = spawn(FFMPEG, args, { windowsHide: true });
-  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start };
+}
+
+async function startSession(id, target, vod = false, start = 0, audio = 'aac') {
+  // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
+  const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
+  await fs.mkdir(dir, { recursive: true });
+  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio }), { windowsHide: true });
+  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: 0, audio };
   console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
   proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
   proc.on('exit', () => { session.exited = true; });
@@ -111,6 +123,40 @@ async function startSession(id, target, vod = false, start = 0) {
   sessions.set(id, session);
   return session;
 }
+
+// VOD: restart the run at segment index n (seek). Existing segments stay; the new run writes seg n, n+1, …
+function restartRun(s, n) {
+  try { s.proc.kill(); } catch {}
+  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio }), { windowsHide: true });
+  Object.assign(s, { proc, exited: false, errTail: '', startedAt: Date.now(), runStart: n });
+  proc.stderr.on('data', d => { s.errTail = (s.errTail + d).slice(-1500); });
+  proc.on('exit', () => { if (s.proc === proc) s.exited = true; });
+  proc.on('error', () => { if (s.proc === proc) s.exited = true; });
+  s.runAt = Date.now();
+  console.log(`[hls] vod run from segment ${n} (${n * VOD_SEG_S}s)`);
+}
+
+// Highest segment index the current run has finished (from ffmpeg's own playlist).
+async function producedUpTo(s) {
+  try {
+    const t = await fs.readFile(join(s.dir, 'index.m3u8'), 'utf8');
+    const m = [...t.matchAll(/seg(\d+)\.ts/g)];
+    return m.length ? Number(m[m.length - 1][1]) : s.runStart - 1;
+  } catch { return s.runStart - 1; }
+}
+
+// The whole film as a VOD playlist: N fixed-length segments and an end marker. Segments that don't
+// exist yet are made on request (see the segment branch of handleHls).
+function vodManifest(id, duration) {
+  const n = Math.ceil(duration / VOD_SEG_S);
+  let out = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:${VOD_SEG_S + 1}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
+  for (let i = 0; i < n; i++) {
+    const len = i === n - 1 ? Math.max(0.5, duration - i * VOD_SEG_S) : VOD_SEG_S;
+    out += `#EXTINF:${len.toFixed(3)},\n/hls/${id}/seg${i}.ts\n`;
+  }
+  return out + '#EXT-X-ENDLIST\n';
+}
+
 
 function stopSession(id) {
   const s = sessions.get(id);
@@ -123,14 +169,16 @@ function stopSession(id) {
 }
 // Providers allow one connection: before opening a new stream, close every other one and WAIT for the
 // processes to exit so the old connection is really gone (rapid channel skipping otherwise trips rate limits).
-async function closeOthers(keepId) {
-  const others = [...sessions.keys()].filter(k => k !== keepId);
+async function closeOthers(keepId, host) {
+  // The one-connection rule is per provider: a stream from another host (a different provider, or a test
+  // file) must not close this one.
+  const others = [...sessions.entries()].filter(([k, v]) => k !== keepId && (!host || v.host === host)).map(([k]) => k);
   if (others.length) { await Promise.all(others.map(stopSession)); await new Promise(r => setTimeout(r, 120)); }
 }
 
 setInterval(() => {
   const now = Date.now();
-  for (const [id, s] of sessions) if (now - s.lastAccess > IDLE_MS) stopSession(id);
+  for (const [id, s] of sessions) if (now - s.lastAccess > (s.vod ? 90_000 : IDLE_MS)) stopSession(id);   // a paused film keeps its segments for a while
 }, 10_000).unref();
 
 async function waitForPlaylist(dir, timeout, alive = () => true, ready = READY_SEGMENTS) {
@@ -160,7 +208,26 @@ export async function handleHls(req, res, url) {
     const f = join(s.dir, name);
     if (!f.startsWith(s.dir + sep)) return send(res, 400, 'Bad path');
     let st;
-    try { st = await fs.stat(f); } catch { return send(res, 404, 'Not ready'); }
+    try { st = await fs.stat(f); } catch {
+      const seg = s.vod && /^seg(\d+)\.ts$/.exec(name);
+      if (!seg) return send(res, 404, 'Not ready');
+      // Not made yet. If it's just ahead of the current run, wait for it; otherwise restart the run there.
+      const n = Number(seg[1]);
+      const done = await producedUpTo(s);
+      // Players ask for two or three segments at once: one restart covers them all.
+      const fresh = Date.now() - (s.restartAt || 0) < 4000 && n >= s.runStart && n <= s.runStart + 8;
+      if (!fresh && (s.exited || n < s.runStart || n > done + 6)) { s.restartAt = Date.now(); restartRun(s, n); }
+      const deadline = Date.now() + 30_000, waitFrom = Date.now();
+      while (Date.now() < deadline && sessions.get(id) === s) {
+        try { st = await fs.stat(f); break; } catch {}
+        if (s.exited && (await producedUpTo(s)) < n) return send(res, 404, 'Segment unavailable');   // run ended before reaching it (past the end of the file)
+        await new Promise(r => setTimeout(r, 120));
+      }
+      if (!st) { console.log(`[hls] vod seg${n} not ready after 30s (run from ${s.runStart}, exited=${s.exited}) ${(s.errTail || '').split('\n').filter(Boolean).pop() || ''}`); return send(res, 504, 'Segment not ready'); }
+      const waited = Date.now() - waitFrom;
+      if (waited > 1500) console.log(`[hls] vod seg${n} took ${(waited / 1000).toFixed(1)}s (run from ${s.runStart} started ${((Date.now() - (s.runAt || s.startedAt)) / 1000).toFixed(1)}s ago) ${(s.errTail || '').split('\n').filter(Boolean).pop() || ''}`);
+      s.lastAccess = Date.now();
+    }
     res.writeHead(200, { 'content-type': TYPES[extname(name)] || 'application/octet-stream', 'content-length': st.size, 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
     if (req.method === 'HEAD') return res.end();
     return createReadStream(f).on('error', () => res.destroy()).pipe(res);
@@ -190,7 +257,8 @@ export async function handleHls(req, res, url) {
 
   const vod = url.searchParams.get('vod') === '1';
   const start = vod ? Math.max(0, Math.floor(Number(url.searchParams.get('start')) || 0)) : 0;
-  const id = sessionId(start ? `${t.href}#${start}` : t.href);
+  const audio = ['none', 'copy'].includes(url.searchParams.get('audio')) ? url.searchParams.get('audio') : 'aac';   // diagnostics
+  const id = sessionId((start ? `${t.href}#${start}` : t.href) + (audio !== 'aac' ? `#${audio}` : ''));
   let s = sessions.get(id);
   if (s && !s.exited && !warm) {
     // Stalled: ffmpeg alive but the playlist hasn't been touched for a while -> upstream froze. Restart it.
@@ -204,7 +272,7 @@ export async function handleHls(req, res, url) {
     // The app sends a warm on touch and the play a few ms later: both must wait for ONE start, or the
     // second ffmpeg is orphaned holding the only provider connection.
     if (!starting.has(id)) {
-      starting.set(id, (async () => { await closeOthers(id); return startSession(id, t.href, vod, start); })().finally(() => starting.delete(id)));
+      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio); })().finally(() => starting.delete(id)));
     }
     s = await starting.get(id);
   }
@@ -224,6 +292,14 @@ export async function handleHls(req, res, url) {
     return send(res, 502, `Could not start stream: ${tail}`);
   }
   console.log(`[hls] ready ${id}`);
+  if (s.vod && url.searchParams.get('raw') !== '1') {   // raw=1: ffmpeg's own playlist, for diagnostics
+    if (!s.duration) s.duration = await probeDuration(t.href);
+    if (s.duration > 0) {
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
+      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration));
+    }
+    // unknown length (probe failed): fall through and serve ffmpeg's growing playlist as before
+  }
   let manifest;
   try { manifest = await fs.readFile(join(s.dir, 'index.m3u8'), 'utf8'); }
   catch { return send(res, 502, 'Stream not ready'); }
