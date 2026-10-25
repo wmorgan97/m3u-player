@@ -6,7 +6,7 @@ import { Xtream, parseXtreamLink, liveChannels, movieItems, seriesItems } from '
 import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from './epg.js';
 import { groupSeries, vodMeta } from './vod.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
-import { isNative, nativePlay, nativeShare } from './native.js';
+import { isNative, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
 const PAGE = 150;
 const UNGROUPED = 'Ungrouped';
@@ -104,7 +104,7 @@ async function init() {
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !state.playing && !init.reloaded) { init.reloaded = true; location.reload(); } });
     navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
   }
-  if (!isNative) await detectServerProxy();
+  await detectServerProxy();
   // The first screen rendered before we knew the server was there: ask for its guide data now.
   if (state.current && !location.hash.startsWith('#/guide')) ensureGuide(state.filtered.slice(0, state.rendered));
   else if (location.hash.startsWith('#/guide') && state.current) ensureGuide(guideScope(state.current));
@@ -120,15 +120,17 @@ async function init() {
 const serverProxy = { available: false, needsKey: false, base: '' };
 const serverProxyUrl = () => `${serverProxy.base}?${state.settings.serverKey ? `key=${encodeURIComponent(state.settings.serverKey)}&` : ''}url={url}`;
 
-async function checkServerProxy(key = state.settings.serverKey) {
-  const base = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}proxy`;
+async function checkServerProxy(key = state.settings.serverKey, url = state.settings.serverUrl) {
+  // The native app isn't served by your server, so it needs its address; the web app uses its own origin.
+  const base = isNative ? (url ? `${url.replace(/\/+$/, '')}/proxy` : '') : `${location.origin}${location.pathname.replace(/[^/]*$/, '')}proxy`;
+  if (!base) return null;
   const res = await fetch(`${base}${key ? `?key=${encodeURIComponent(key)}` : ''}`, { cache: 'no-store' });
   const info = res.ok && /json/.test(res.headers.get('content-type') || '') ? await res.json() : null;
   return info?.m3uProxy ? { base, ...info } : null;
 }
 
 async function detectServerProxy() {
-  if (location.protocol === 'file:') return;
+  if (location.protocol === 'file:' && !isNative) return;
   try {
     const info = await checkServerProxy();
     if (!info) return;
@@ -179,13 +181,17 @@ function favoritesChanged() { syncMeta.favAt = Date.now(); syncSoon(); }
 
 async function enterServerKey() {
   const v = await formSheet({
-    title: 'Server key',
-    fields: [{ name: 'key', label: 'Shown at the end of the server install', value: state.settings.serverKey || '', required: true }],
+    title: isNative ? 'Your server' : 'Server key',
+    fields: [
+      isNative && { name: 'url', label: 'Server address (for TV guide, sync, movies & downloads)', value: state.settings.serverUrl || '', required: true, type: 'url', placeholder: 'https://your-server.ts.net:8443' },
+      { name: 'key', label: 'Server key (shown at the end of the server install)', value: state.settings.serverKey || '', required: true },
+    ].filter(Boolean),
     submit: 'Connect',
   });
   if (!v) return;
-  const info = await checkServerProxy(v.key).catch(() => null);
-  if (!info?.keyValid) { toast('That key didn’t work. Check it and try again.'); return; }
+  const info = await checkServerProxy(v.key, v.url).catch(() => null);
+  if (!info?.keyValid) { toast(isNative ? 'Couldn’t connect with that address and key.' : 'That key didn’t work. Check it and try again.'); return; }
+  if (isNative) { state.settings.serverUrl = v.url.replace(/\/+$/, ''); Object.assign(serverProxy, { available: true, base: info.base }); }
   state.settings.serverKey = v.key;
   serverProxy.needsKey = false;
   await db.set('settings', state.settings);
@@ -684,6 +690,9 @@ function showHome() {
     ${isIOS && !isStandalone && !dismissed ? `<div class="banner">
       ${icon('share')}<span><b>Install on your iPhone:</b> tap Share, then “Add to Home Screen”. It opens full-screen and iOS keeps your playlists safe.</span>
       <button class="icon-btn" id="tip-close" aria-label="Dismiss">${icon('close')}</button></div>` : ''}
+    ${isNative && !state.settings.serverUrl ? `<div class="banner">
+      ${icon('lock')}<span><b>Connect your server</b> for the TV guide, sync with your other devices, movies &amp; series and downloads.</span>
+      <button class="btn small primary" id="server-key">Connect</button></div>` : ''}
     ${serverProxy.needsKey ? `<div class="banner">
       ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
@@ -3050,7 +3059,8 @@ async function settingsSheet() {
   sheet(`<div class="sheet-title">Settings</div>
     <form class="form" id="settings">
       ${isNative ? `<div class="section-title">Connection</div>
-      <p class="muted">The iPhone app connects to any IPTV server directly, http:// included. No proxy needed.</p>` : `<div class="section-title">Proxy</div>
+      <p class="muted">The iPhone app plays streams directly from your provider. Your server adds the TV guide, sync with your other devices, movies &amp; series and downloads${state.settings.serverUrl ? ` (connected: ${esc(state.settings.serverUrl)})` : ''}.</p>
+      <button type="button" class="btn" id="server-key-2">${state.settings.serverUrl ? 'Change server' : 'Connect your server'}</button>` : `<div class="section-title">Proxy</div>
       ${serverProxy.available
         ? `<p class="muted">Your server’s built-in proxy is ${serverProxy.needsKey ? '<b>waiting for its key</b>' : 'active'}. Leave the address below empty to use it.</p>
            <button type="button" class="btn" id="server-key-2">${serverProxy.needsKey ? 'Enter server key' : 'Change server key'}</button>`
@@ -3364,7 +3374,9 @@ function trackProgress(force = false) {
   if (!Number.isFinite(d) || d < 60) return;
   if (!force && Date.now() - lastProgressSave < 5000) return;
   lastProgressSave = Date.now();
-  const t = vodPos();
+  writeProgress(c, vodPos(), d);
+}
+function writeProgress(c, t, d) {
   state.progress[c.pkey || c.url] = { t, d, v: 3, at: Date.now(), done: t / d > 0.93, item: { id: c.id, kind: c.kind, name: c.name, url: c.pkey || c.url, logo: c.logo, group: c.group, src: c.src } };
   const entries = Object.entries(state.progress);
   if (entries.length > MAX_PROGRESS) state.progress = Object.fromEntries(entries.sort((a, b) => b[1].at - a[1].at).slice(0, MAX_PROGRESS));
@@ -3513,9 +3525,38 @@ function showTuning(c) {
   el.hidden = false; el.classList.remove('out');
 }
 function hideTuning() { const el = $('#tuning'); if (el && !el.hidden) { el.classList.add('out'); setTimeout(() => { el.hidden = true; }, 320); } }
+// ---------- native iPhone app: the VLC player ----------
+// In the native app nothing goes through the server's converter: the VLC engine plays the provider's
+// .ts / .mkv / HEVC directly. The web app keeps the list; the player reports progress and channel steps.
+function playNative(list, index, c) {
+  state.playing = { list, index };
+  highlightPlaying();
+  addRecent(c);
+  const live = isLiveChannel(c);
+  const g = live && guideFor(c), now = g && g.nowNext(c).now;
+  if (live) ensureGuide([c]);
+  const pr = state.progress[c.pkey || c.url];
+  const start = !live && pr && !pr.done && pr.t > 30 ? pr.t : 0;
+  nativeVlc({
+    url: c.url, title: c.name, live, start,
+    subtitle: now ? `${now[2]} · ends ${fmtTime(now[1])}` : prettyGroup(c.group) || '',
+    info: now ? now[3] || '' : c.plot || '',
+    headers: headersFromOpts(c.opts), hasPrev: index > 0, hasNext: index < list.length - 1,
+  }).catch(e => toast(e.message || 'Couldn’t open the player'));
+}
+window.__nativePlayer = ev => {
+  const pl = state.playing, c = pl && pl.list[pl.index];
+  if (!ev || !c) return;
+  if (ev.type === 'step') { const i = pl.index + ev.dir; if (i >= 0 && i < pl.list.length) playChannel(pl.list, i); }
+  if ((ev.type === 'progress' || ev.type === 'closed') && !isLiveChannel(c) && c.kind !== 'catchup' && ev.d >= 60) writeProgress(c, ev.t, ev.d);
+  if (ev.type === 'ended' && c.kind === 'episode' && pl.index < pl.list.length - 1) playChannel(pl.list, pl.index + 1);
+  if (ev.type === 'closed') { state.playing = null; highlightPlaying(); if (!state.current) rerender(); }
+};
+
 function playChannel(list, index) {
   const c = list[index];
   if (!c) return;
+  if (isNative && !c.offline) return playNative(list, index, c);
   trackProgress(true);
   const prev = nowChannel();
   state.playing = { list, index };

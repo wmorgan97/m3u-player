@@ -39,4 +39,7 @@ export function headersFromOpts(opts = []) {
 }
 
 export const nativePlay = c => call('NativePlayer', 'play', { url: c.url, title: c.name, headers: headersFromOpts(c.opts) });
+// The app's own full-screen player on VLC's engine: plays .ts/.mkv/HEVC/DTS straight from the provider.
+export const nativeVlc = opts => call('NativePlayer', 'vlc', opts);
+export const nativeVlcClose = () => call('NativePlayer', 'close', {});
 export const nativeShare = (name, text) => call('NativePlayer', 'share', { name, text });
