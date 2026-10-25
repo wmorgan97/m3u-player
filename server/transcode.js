@@ -204,7 +204,7 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
     duration: probe?.duration || 0, audio, track, subs, enc, height, vinfo: probe?.video, segLen: enc ? ENC_SEG_S : VOD_SEG_S };
   sessions.set(id, session);
   if (enc) console.log(`[hls] encoding ${id} (${probe?.video?.codec}${probe?.video?.bit10 ? ' 10-bit' : ''} ${height}p -> h264)`);
-  console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
+  console.log(`[hls] start ${id} ${target.slice(0, 100)}${session.ua ? ` [${session.ua}]` : ''}`);
   if (vod) spawnRun(session, 0);
   else {
     const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod: false, audio, track, enc, height, vinfo: probe?.video }), { windowsHide: true });
@@ -301,7 +301,8 @@ export async function handleDownload(req, res, url, send, allowed) {
     // The provider's file exactly as it is (4K stays 4K, HEVC stays HEVC): for saving to a computer and playing in VLC etc.
     await closeOthers(null, t.hostname);
     const ctrl = new AbortController();
-    res.on('close', () => ctrl.abort());
+    res.on('close', () => { ctrl.abort(); if (downloads.get(t.hostname)?.ctrl === ctrl) downloads.delete(t.hostname); });
+    downloads.set(t.hostname, { ctrl, proc: { kill: () => { ctrl.abort(); try { res.destroy(); } catch {} } } });
     const range = /^bytes=\d+-$/.test(req.headers.range || '') ? req.headers.range : null;
     let up;
     try { up = await fetch(t.href, { headers: { 'user-agent': 'Mozilla/5.0', ...(range ? { range } : {}) }, signal: ctrl.signal }); } catch (e) { return send(res, 502, `Upstream error: ${e.message}`); }
@@ -439,7 +440,8 @@ export async function handleHls(req, res, url) {
     // The app sends a warm on touch and the play a few ms later: both must wait for ONE start, or the
     // second ffmpeg is orphaned holding the only provider connection.
     if (!starting.has(id)) {
-      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio, track, enc); })().finally(() => starting.delete(id)));
+      const ua = /iPhone|iPad/.test(req.headers['user-agent'] || '') ? 'iPhone' : /Macintosh/.test(req.headers['user-agent'] || '') ? 'Mac' : 'other';
+      starting.set(id, (async () => { await closeOthers(id, t.hostname); const s2 = await startSession(id, t.href, vod, start, audio, track, enc); s2.ua = ua; return s2; })().finally(() => starting.delete(id)));
     }
     s = await starting.get(id);
   }
