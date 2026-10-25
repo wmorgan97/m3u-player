@@ -2567,8 +2567,27 @@ function updateControls() {
   ctl.querySelector('[data-c="prev"]').disabled = !state.playing || state.playing.index === 0;
   ctl.querySelector('[data-c="next"]').disabled = !state.playing || state.playing.index >= state.playing.list.length - 1;
 }
+// Full screen toggles: the stage (video + our controls) on desktop, iOS's own player on iPhone.
+function toggleFullscreen() {
+  const stage = $('.stage');
+  if (document.fullscreenElement || document.webkitFullscreenElement) return (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+  if (stage.requestFullscreen) return stage.requestFullscreen().catch(() => {});
+  if (stage.webkitRequestFullscreen) return stage.webkitRequestFullscreen();
+  if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();   // iPhone: Apple's player
+}
+let mouseIdle = 0;
 function bindControls() {
   const ctl = $('#ctl'), stage = $('.stage');
+  // Moving the mouse over the video wakes the controls (and the cursor); they fade again when it stops.
+  stage.addEventListener('pointermove', e => {
+    if (e.pointerType !== 'mouse' || !state.playing || state.settings.nativeControls) return;
+    if (ctl.hidden) showControls(); else { clearTimeout(ctlHide); if (!video.paused) ctlHide = setTimeout(hideControls, 3500); }
+    stage.classList.remove('idle');
+    clearTimeout(mouseIdle);
+    mouseIdle = setTimeout(() => { if (ctl.hidden) stage.classList.add('idle'); }, 3600);
+  });
+  stage.addEventListener('pointerleave', () => { if (!video.paused) { clearTimeout(ctlHide); ctlHide = setTimeout(hideControls, 1200); } });
+  document.addEventListener('fullscreenchange', () => { stage.classList.toggle('fs', !!document.fullscreenElement); showControls(); });
   for (const b of ctl.querySelectorAll('[data-c]')) if (b.dataset.c !== 'live') b.innerHTML = icon({ list: 'list', mute: 'volume', airplay: 'airplay', pip: 'pip', full: 'expand', more: 'more', prev: 'prev', next: 'next', play: 'pause', back30: 'back30' }[b.dataset.c]);
   if (!video.webkitShowPlaybackTargetPicker) ctl.querySelector('[data-c="airplay"]').hidden = true;
   if (!(document.pictureInPictureEnabled || video.webkitSupportsPresentationMode?.('picture-in-picture'))) ctl.querySelector('[data-c="pip"]').hidden = true;
@@ -2591,7 +2610,7 @@ function bindControls() {
       case 'mute': video.muted = !video.muted; break;
       case 'airplay': try { video.webkitShowPlaybackTargetPicker(); } catch {} break;
       case 'pip': player.togglePip?.().catch(e => toast(e.message)); break;
-      case 'full': if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); else (stage.requestFullscreen?.() || video.requestFullscreen?.()); break;
+      case 'full': toggleFullscreen(); break;
       case 'more': playerMenu(); break;
     }
     showControls();
@@ -2641,12 +2660,12 @@ function bindKeys() {
       case 'ArrowLeft': e.preventDefault(); video.currentTime = Math.max(seekRange()?.start ?? 0, video.currentTime - 30); showControls(); break;
       case 'ArrowRight': e.preventDefault(); { const r = seekRange(); if (r) video.currentTime = Math.min(r.end - 3, video.currentTime + 30); showControls(); } break;
       case 'm': video.muted = !video.muted; showControls(); break;
-      case 'f': if (video.webkitEnterFullscreen && !document.fullscreenEnabled) video.webkitEnterFullscreen(); else $('.stage').requestFullscreen?.(); break;
+      case 'f': toggleFullscreen(); break;
       case 'l': channelsOverlay(); break;
     }
   });
   // double-click the video = full screen (desktop)
-  video.addEventListener('dblclick', () => { if (document.fullscreenElement) document.exitFullscreen?.(); else $('.stage').requestFullscreen?.(); });
+  video.addEventListener('dblclick', toggleFullscreen);
 }
 
 function setStatus(text, isError = false) {
