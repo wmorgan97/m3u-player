@@ -198,7 +198,7 @@ function spawnRun(s, fromIdx, { fast = s.enc } = {}) {
   return proc;
 }
 
-async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0, enc = false) {
+async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0, enc = false, ua = '') {
   // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
   const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
   await fs.mkdir(dir, { recursive: true });
@@ -206,7 +206,7 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
   const subs = (probe?.subs || []).filter(s => s.text).map(s => s.i);
   const height = probe?.video?.height || 0;
   const session = { id, proc: null, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0,
-    duration: probe?.duration || 0, audio, track, subs, enc, height, vinfo: probe?.video, segLen: enc ? ENC_SEG_S : VOD_SEG_S };
+    duration: probe?.duration || 0, audio, track, subs, enc, height, vinfo: probe?.video, segLen: enc ? ENC_SEG_S : VOD_SEG_S, ua };
   sessions.set(id, session);
   if (enc) console.log(`[hls] encoding ${id} (${probe?.video?.codec}${probe?.video?.bit10 ? ' 10-bit' : ''} ${height}p -> h264)`);
   console.log(`[hls] start ${id} ${target.slice(0, 100)}${session.ua ? ` [${session.ua}]` : ''}`);
@@ -446,7 +446,7 @@ export async function handleHls(req, res, url) {
     // second ffmpeg is orphaned holding the only provider connection.
     if (!starting.has(id)) {
       const ua = /iPhone|iPad/.test(req.headers['user-agent'] || '') ? 'iPhone' : /Macintosh/.test(req.headers['user-agent'] || '') ? 'Mac' : 'other';
-      starting.set(id, (async () => { await closeOthers(id, t.hostname); const s2 = await startSession(id, t.href, vod, start, audio, track, enc); s2.ua = ua; return s2; })().finally(() => starting.delete(id)));
+      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio, track, enc, `${ua}${warm ? ' warm' : ''}`); })().finally(() => starting.delete(id)));
     }
     s = await starting.get(id);
   }
