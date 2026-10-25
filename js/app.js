@@ -418,7 +418,11 @@ function playlistTitle(p) {
 }
 
 function playlistSub(p) {
-  const parts = [plural(p.channels.length, 'channel')];
+  const k = m3uKinds(p);
+  const vodCount = k ? k.movies.length + k.series.length : 0;
+  const parts = p.content === 'vod'
+    ? [k ? `${plural(k.movies.length, 'movie')} · ${plural(k.series.length, 'series')}` : 'Movies & series']
+    : [plural(p.channels.length, 'channel'), ...(vodCount ? [`${vodCount.toLocaleString()} VOD`] : [])];
   if (p.kind === 'xtream') {
     parts.unshift('Xtream');
     const exp = Number(p.userInfo?.exp_date);
