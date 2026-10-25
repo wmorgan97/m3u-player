@@ -214,8 +214,62 @@ function noteStall() {
 let transcodeVod = false;   // set per play: movies, episodes and catch-up get an on-demand (seekable) stream
 // The server hands VOD over as a complete playlist with the real length, so the video element's own
 // time and duration are the truth; seeking anywhere is a plain seek (the server makes segments on demand).
+let vodTrack = 0, vodInfo = null, subTrackEl = null;   // audio track in use, the file's probe, the attached <track>
 const vodPos = () => video.currentTime;
 const vodTotal = () => (Number.isFinite(video.duration) ? video.duration : 0) || seekRange()?.end || 0;
+// "1080p · HEVC · HDR" from the server's probe of the file.
+function qualityLabel() {
+  const v = vodInfo?.video;
+  if (!v) return '';
+  const h = v.height >= 2000 ? '4K' : v.height ? `${v.height}p` : '';
+  const codec = { hevc: 'HEVC', h264: 'H.264', av1: 'AV1', vp9: 'VP9' }[v.codec] || '';
+  return [h, codec, v.hdr ? 'HDR' : ''].filter(Boolean).join(' · ');
+}
+// Two minutes before an episode ends, ask the server to start cutting the next one so it opens instantly.
+let warmedNext = '';
+function warmNextEpisode() {
+  const pl = state.playing, c = nowChannel();
+  if (!pl || !c || c.kind !== 'episode' || !Number.isFinite(video.duration) || video.duration - video.currentTime > 120) return;
+  const next = pl.list[pl.index + 1];
+  if (!next || warmedNext === next.url) return;
+  warmedNext = next.url;
+  const tc = transcodeUrl(next.url);
+  if (tc) fetch(tc.replace('/hls?', '/hls/warm?'), { keepalive: true }).catch(() => {});
+}
+function switchAudioTrack(i) {
+  const c = nowChannel();
+  if (!c || !transcodeVod) return;
+  const pos = vodPos();
+  vodTrack = i;
+  toast(`Audio: ${vodInfo?.audio?.[i]?.label || `track ${i + 1}`}`);
+  const list = state.playing.list, index = state.playing.index;
+  player.play(streamOf(c)).then(ok => { if (ok && pos > 2) seekVod(pos); }).catch(() => playChannel(list, index));
+}
+function clearSubtitles() {
+  if (subTrackEl) { subTrackEl.remove(); subTrackEl = null; }
+}
+async function useSubtitles(i) {
+  const c = nowChannel();
+  clearSubtitles();
+  if (i < 0 || !c) return;
+  const tc = transcodeUrl(c.url);
+  if (!tc) return;
+  const src = tc.replace('/hls?', '/hls/subs?') + `&s=${i}`;
+  toast('Loading subtitles…', { busy: true });
+  try {
+    const r = await fetch(src);   // the server extracts them once (can take a while on a big file)
+    if (!r.ok) throw new Error(await r.text());
+    if (nowChannel() !== c) return;
+    const tr = document.createElement('track');
+    tr.kind = 'subtitles'; tr.label = vodInfo?.subs?.[i]?.label || 'Subtitles'; tr.srclang = vodInfo?.subs?.[i]?.lang || 'en'; tr.src = src; tr.default = true;
+    video.appendChild(tr);
+    subTrackEl = tr;
+    const show = () => { for (const t of video.textTracks) t.mode = t === tr.track ? 'showing' : 'disabled'; };
+    tr.addEventListener('load', show); show();
+    toast(`Subtitles: ${tr.label}`);
+  } catch (e) { toast(e.message || 'Subtitles unavailable'); }
+}
+
 function seekVod(t) {
   const total = vodTotal();
   video.currentTime = Math.max(0, Math.min(t, total ? total - 0.5 : t));
@@ -227,7 +281,7 @@ function transcodeUrl(url) {
   const key = state.settings.serverKey || '';
   if (serverProxy.needsKey && !key) return null;
   const b = bufferLevel();
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? '&vod=1' : ''}&url=${encodeURIComponent(url)}`;
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}` : ''}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -960,7 +1014,7 @@ async function renderVodPanel(c) {
         <span class="vp-poster poster-img" data-initials="${initials(c.name)}">${(i.movie_image || c.logo) ? `<img src="${esc(i.movie_image || c.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
         <div class="vp-text">
           <h2 class="vp-title">${esc(c.name)}</h2>
-          <div class="vp-meta">${meta.map(m => `<span class="pill">${esc(m)}</span>`).join('')}${c.rating ? `<span class="pill rating">★ ${c.rating.toFixed(1)}</span>` : ''}</div>
+          <div class="vp-meta">${meta.map(m => `<span class="pill">${esc(m)}</span>`).join('')}${c.rating ? `<span class="pill rating">★ ${c.rating.toFixed(1)}</span>` : ''}${qualityLabel() ? `<span class="pill q">${esc(qualityLabel())}</span>` : ''}${vodInfo?.audio?.length > 1 ? `<span class="pill">${vodInfo.audio.length} audio</span>` : ''}${vodInfo?.subs?.some(s => s.text) ? '<span class="pill">Subtitles</span>' : ''}</div>
           ${plot ? `<p class="vp-plot" data-plot>${esc(plot)}</p>` : ''}
           ${i.cast || i.actors || i.director ? `<p class="muted vp-cast">${i.director ? `Director: ${esc(i.director)}` : ''}${(i.cast || i.actors) ? `${i.director ? ' · ' : ''}Cast: ${esc(i.cast || i.actors)}` : ''}</p>` : ''}
           <div class="vp-actions">
@@ -2774,7 +2828,7 @@ function updateControls() {
   ctl.querySelector('[data-c="mute"]').innerHTML = icon(video.muted ? 'volume-off' : 'volume');
   $('#ctl-name').textContent = c.name;
   const g = isLiveChannel(c) && guideFor(c), nn = g && g.nowNext(c), now = nn?.now;
-  $('#ctl-prog').textContent = now ? `${now[2]} · ends ${fmtTime(now[1])}` : (c.group ? prettyGroup(c.group) : '');
+  $('#ctl-prog').textContent = now ? `${now[2]} · ends ${fmtTime(now[1])}` : [qualityLabel(), c.group ? prettyGroup(c.group) : ''].filter(Boolean).join(' · ');
   $('#ctl-pct').style.width = now ? `${(((Date.now() - now[0]) / (now[1] - now[0])) * 100).toFixed(1)}%` : '0';
   $('.ctl-pbar').hidden = !now;
   const seek = $('#ctl-seek');
@@ -2936,7 +2990,7 @@ function bindPlayer() {
   }, { passive: true });
   video.addEventListener('waiting', () => { if (state.playing) { setStatus('Buffering…'); noteStall(); } });
   video.addEventListener('playing', () => { setStatus(''); hideTuning(); showControls(); });
-  video.addEventListener('timeupdate', () => trackProgress());
+  video.addEventListener('timeupdate', () => { trackProgress(); warmNextEpisode(); });
   video.addEventListener('pause', () => trackProgress(true));
   video.addEventListener('ended', () => {
     trackProgress(true);
@@ -2988,18 +3042,20 @@ function bindPlayer() {
 function playerMenu() {
   const c = nowChannel();
   if (!c) return;
-  const audio = player.audioTracks();
-  const subs = player.subtitleTracks();
+  const fileAudio = transcodeVod && vodInfo?.audio?.length > 1 ? vodInfo.audio : null;
+  const fileSubs = transcodeVod ? (vodInfo?.subs || []).filter(s => s.text) : [];
+  const audio = fileAudio ? fileAudio.map(t => ({ i: t.i, label: `${t.label}${t.channels > 2 ? ` · ${t.channels}ch` : ''}`, active: t.i === vodTrack })) : player.audioTracks();
+  const subs = fileSubs.length ? fileSubs.map(t => ({ i: t.i, label: t.label, active: subTrackEl && subTrackEl.src.endsWith(`&s=${t.i}`) })) : player.subtitleTracks();
   const hasGuide = isLiveChannel(c) && guideFor(c)?.list(c).length;
   const g = hasGuide && guideFor(c);
   const now = g && g.nowNext(c).now;
   menu(c.name, [
     now && canCatchUp(c, now) && { label: `Watch “${now[2]}” from the start`, fn: () => playCatchup(c, now) },
     hasGuide && { label: archiveDays(c) ? 'TV guide & catch-up' : 'TV guide', fn: () => scheduleSheet(c) },
-    audio.length > 1 && { label: 'Audio track…', fn: () => menu('Audio', audio.map(t => ({ label: `${t.active ? '✓ ' : ''}${t.label}`, fn: () => player.setAudioTrack(t.i) }))) },
+    audio.length > 1 && { label: 'Audio track…', fn: () => menu('Audio', audio.map(t => ({ label: `${t.active ? '✓ ' : ''}${t.label}`, fn: () => fileAudio ? switchAudioTrack(t.i) : player.setAudioTrack(t.i) }))) },
     subs.length > 0 && { label: 'Subtitles…', fn: () => menu('Subtitles', [
-      { label: subs.some(t => t.active) ? 'Off' : '✓ Off', fn: () => player.setSubtitleTrack(-1) },
-      ...subs.map(t => ({ label: `${t.active ? '✓ ' : ''}${t.label}`, fn: () => player.setSubtitleTrack(t.i) })),
+      { label: subs.some(t => t.active) ? 'Off' : '✓ Off', fn: () => fileSubs.length ? useSubtitles(-1) : player.setSubtitleTrack(-1) },
+      ...subs.map(t => ({ label: `${t.active ? '✓ ' : ''}${t.label}`, fn: () => fileSubs.length ? useSubtitles(t.i) : player.setSubtitleTrack(t.i) })),
     ]) },
     Number.isFinite(video.duration) && { label: `Speed (${video.playbackRate}×)…`, fn: () => menu('Playback speed', [0.75, 1, 1.25, 1.5, 2].map(r => ({ label: `${video.playbackRate === r ? '✓ ' : ''}${r}×`, fn: () => { video.playbackRate = r; } }))) },
     { label: state.sleepAt ? `Sleep timer (${Math.ceil((state.sleepAt - Date.now()) / MINUTE)} min left)…` : 'Sleep timer…', fn: sleepMenu },
@@ -3091,6 +3147,11 @@ function tune(c, list, index) {
   if (nowChannel() !== c) return;
   transcodeVod = !isLiveChannel(c);
   player.vod = transcodeVod;
+  if (tuneFrom !== c) { vodTrack = 0; vodInfo = null; clearSubtitles(); }   // a different title: back to its default track
+  if (transcodeVod) {
+    const tc = transcodeUrl(c.url);
+    if (tc) fetch(tc.replace('/hls?', '/hls/info?')).then(r => r.json()).then(d => { if (nowChannel() === c) { vodInfo = d; updateControls(); renderVodPanel(c); } }).catch(() => {});
+  }
   const pr = state.progress[c.url];
   const resumeAt = pr && pr.v === 3 && !pr.done && pr.t > 30 && pr.t < (pr.d || Infinity) - 60 ? pr.t : 0;   // only positions saved by the current VOD logic
   if (tuneFrom && tuneFrom.url !== c.url) unwarm(streamOf(tuneFrom));   // free the single provider slot right before connecting

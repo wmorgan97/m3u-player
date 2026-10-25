@@ -62,16 +62,47 @@ function send(res, status, body, headers = {}) {
 // VOD: the real length of a film/episode, read from the file header (cached). The app draws its timeline from
 // this, and seeks by asking for a new session that starts at that point (-ss), so every position is reachable
 // at once instead of only what has been remuxed so far.
-const durations = new Map();
-function probeDuration(target) {
-  if (durations.has(target)) return durations.get(target);
+const probes = new Map();   // target -> Promise<{ duration, video, audio: [], subs: [] }>
+const probeDuration = target => probeFile(target).then(p => p.duration);
+// Everything the app needs to know about a file: length, picture quality, audio tracks, text subtitles.
+function probeFile(target) {
+  if (probes.has(target)) return probes.get(target);
   const job = new Promise(resolve => {
-    execFile(FFPROBE, ['-v', 'error', '-user_agent', 'Mozilla/5.0', '-show_entries', 'format=duration', '-of', 'csv=p=0', target],
-      { timeout: 20_000, windowsHide: true }, (err, out) => resolve(err ? 0 : Number(String(out).trim()) || 0));
+    execFile(FFPROBE, ['-v', 'error', '-user_agent', 'Mozilla/5.0', '-show_entries',
+      'format=duration:stream=index,codec_type,codec_name,width,height,color_transfer,profile,channels:stream_tags=language,title', '-of', 'json', target],
+      { timeout: 25_000, windowsHide: true, maxBuffer: 4 << 20 }, (err, out) => {
+        if (err) return resolve({ duration: 0, audio: [], subs: [] });
+        let j; try { j = JSON.parse(out); } catch { return resolve({ duration: 0, audio: [], subs: [] }); }
+        const streams = j.streams || [];
+        const v = streams.find(x => x.codec_type === 'video');
+        const name = x => [x.tags?.title, x.tags?.language].filter(Boolean).join(' · ');
+        let ai = 0, si = 0;
+        const audio = streams.filter(x => x.codec_type === 'audio').map(x => ({ i: ai++, label: name(x) || `Audio ${ai}`, lang: x.tags?.language || '', codec: x.codec_name, channels: x.channels || 0 }));
+        const TEXT = new Set(['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text']);
+        const subs = streams.filter(x => x.codec_type === 'subtitle').map(x => ({ i: si++, label: name(x) || `Subtitles ${si}`, lang: x.tags?.language || '', codec: x.codec_name, text: TEXT.has(x.codec_name) }));
+        resolve({ duration: Number(j.format?.duration) || 0, audio, subs,
+          video: v ? { codec: v.codec_name, width: v.width, height: v.height, hdr: /smpte2084|arib-std-b67/.test(v.color_transfer || '') } : null });
+      });
   });
-  durations.set(target, job);
-  job.then(d => { if (!d) durations.delete(target); });
-  setTimeout(() => durations.delete(target), 3600_000).unref();
+  probes.set(target, job);
+  job.then(p => { if (!p.duration) probes.delete(target); });
+  setTimeout(() => probes.delete(target), 3600_000).unref();
+  return job;
+}
+
+// Text subtitles pulled out of the file as WebVTT (one ffmpeg pass, cached): the app attaches them as a <track>.
+const subJobs = new Map();
+function extractSubs(target, idx) {
+  const key = `${target}#${idx}`;
+  if (subJobs.has(key)) return subJobs.get(key);
+  const file = join(ROOT, `subs-${sessionId(key)}.vtt`);
+  const job = new Promise((resolve, reject) => {
+    execFile(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-user_agent', 'Mozilla/5.0', '-i', target, '-map', `0:s:${idx}`, '-f', 'webvtt', '-y', file],
+      { timeout: 600_000, windowsHide: true, maxBuffer: 1 << 20 }, err => err ? reject(new Error('Could not read those subtitles')) : resolve(file));
+  });
+  subJobs.set(key, job);
+  job.catch(() => subJobs.delete(key));
+  setTimeout(() => { subJobs.delete(key); fs.rm(file, { force: true }).catch(() => {}); }, 6 * 3600_000).unref();
   return job;
 }
 
@@ -80,7 +111,7 @@ function probeDuration(target) {
 // ahead or back just restarts the run there while already-made segments stay on disk. The playlist the
 // player gets is synthesised from the file's duration (see vodManifest), so it is a plain VOD to every
 // player: real length, instant seeking, no live behaviour.
-function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac' } = {}) {
+function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0 } = {}) {
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '2',
@@ -90,7 +121,7 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac' } = {
     ...(vod ? [] : ['-probesize', '500000', '-analyzeduration', '500000']),
     ...(vod && fromIdx > 0 ? ['-ss', String(fromIdx * VOD_SEG_S)] : []),
     '-fflags', '+genpts+flush_packets', '-i', target,
-    '-map', '0:v:0?', '-map', '0:a:0?',
+    '-map', '0:v:0?', '-map', `0:a:${track}?`,
     ...(REENCODE
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
          '-g', '25', '-keyint_min', '25', '-sc_threshold', '0', '-crf', '22', '-maxrate', '5M', '-bufsize', '10M', '-threads', '4']
@@ -110,12 +141,12 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac' } = {
   ];
 }
 
-async function startSession(id, target, vod = false, start = 0, audio = 'aac') {
+async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0) {
   // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
   const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
   await fs.mkdir(dir, { recursive: true });
-  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio }), { windowsHide: true });
-  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: 0, audio };
+  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio, track }), { windowsHide: true });
+  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: 0, audio, track };
   console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
   proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
   proc.on('exit', () => { session.exited = true; });
@@ -127,7 +158,7 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac') {
 // VOD: restart the run at segment index n (seek). Existing segments stay; the new run writes seg n, n+1, …
 function restartRun(s, n) {
   try { s.proc.kill(); } catch {}
-  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio }), { windowsHide: true });
+  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio, track: s.track }), { windowsHide: true });
   Object.assign(s, { proc, exited: false, errTail: '', startedAt: Date.now(), runStart: n });
   proc.stderr.on('data', d => { s.errTail = (s.errTail + d).slice(-1500); });
   proc.on('exit', () => { if (s.proc === proc) s.exited = true; });
@@ -237,14 +268,17 @@ export async function handleHls(req, res, url) {
   const warm = parts.length === 2 && parts[1] === 'warm';
   const stop = parts.length === 2 && parts[1] === 'stop';
   const info = parts.length === 2 && parts[1] === 'info';
+  const subs = parts.length === 2 && parts[1] === 'subs';
   const target = url.searchParams.get('url');
   const key = url.searchParams.get('key') || '';
   if (!target) return send(res, 400, 'Missing url');
   if (stop) {   // the app switched away: free the provider connection right now instead of after the idle timeout
     if (PROXY_KEY && key !== PROXY_KEY) return send(res, 403, 'Wrong or missing proxy key');
-    try {
+    try {   // same id recipe as a start, so a stop finds the right session
       const href = new URL(target).href, st = Math.max(0, Math.floor(Number(url.searchParams.get('start')) || 0));
-      stopSession(sessionId(st ? `${href}#${st}` : href));
+      const au = ['none', 'copy'].includes(url.searchParams.get('audio')) ? url.searchParams.get('audio') : 'aac';
+      const tr = Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0));
+      stopSession(sessionId((st ? `${href}#${st}` : href) + (au !== 'aac' ? `#${au}` : '') + (tr ? `#a${tr}` : '')));
     } catch {}
     return send(res, 204, '');
   }
@@ -253,12 +287,21 @@ export async function handleHls(req, res, url) {
   try { t = new URL(target); } catch { return send(res, 400, 'Bad url'); }
   if (!/^https?:$/.test(t.protocol)) return send(res, 400, 'Only http and https links');
   if (!ALLOW_PRIVATE && isPrivateHost(t.hostname)) return send(res, 403, 'Private addresses are blocked');
-  if (info) return send(res, 200, JSON.stringify({ duration: await probeDuration(t.href) }), { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  if (info) return send(res, 200, JSON.stringify(await probeFile(t.href)), { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  if (subs) {
+    const idx = Math.max(0, Number(url.searchParams.get('s')) || 0);
+    try {
+      const file = await extractSubs(t.href, idx);
+      const body = await fs.readFile(file);
+      return send(res, 200, body, { 'content-type': 'text/vtt; charset=utf-8', 'cache-control': 'no-store' });
+    } catch (e) { return send(res, 502, e.message); }
+  }
 
   const vod = url.searchParams.get('vod') === '1';
   const start = vod ? Math.max(0, Math.floor(Number(url.searchParams.get('start')) || 0)) : 0;
   const audio = ['none', 'copy'].includes(url.searchParams.get('audio')) ? url.searchParams.get('audio') : 'aac';   // diagnostics
-  const id = sessionId((start ? `${t.href}#${start}` : t.href) + (audio !== 'aac' ? `#${audio}` : ''));
+  const track = vod ? Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0)) : 0;   // which audio track of the file
+  const id = sessionId((start ? `${t.href}#${start}` : t.href) + (audio !== 'aac' ? `#${audio}` : '') + (track ? `#a${track}` : ''));
   let s = sessions.get(id);
   if (s && !s.exited && !warm) {
     // Stalled: ffmpeg alive but the playlist hasn't been touched for a while -> upstream froze. Restart it.
@@ -272,7 +315,7 @@ export async function handleHls(req, res, url) {
     // The app sends a warm on touch and the play a few ms later: both must wait for ONE start, or the
     // second ffmpeg is orphaned holding the only provider connection.
     if (!starting.has(id)) {
-      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio); })().finally(() => starting.delete(id)));
+      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio, track); })().finally(() => starting.delete(id)));
     }
     s = await starting.get(id);
   }
