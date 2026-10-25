@@ -355,12 +355,13 @@ let pendingQuery = '';
 const SEP_RE = /^\s*[#*=_~·•▬—–-]{2,}|[#*=_~·•▬—–-]{2,}\s*$/;
 const isSeparator = c => !c || SEP_RE.test(c.name || '') || !/[a-z0-9]/i.test(c.name || '');
 const prettyGroup = name => String(name || '').replace(/\s*[|/►▶]\s*/g, ' · ').replace(/\s+/g, ' ').trim();
-// Infer whether an M3U channel is live TV, a movie, or a series episode from its group name.
+// Classify an M3U entry as live TV vs VOD from its URL — reliable, unlike the group name.
+// Live streams are .ts/.m3u8 (or Xtream /live/ paths); VOD is a movie/series file.
 function channelKind(c) {
-  const g = (c.group || '').toLowerCase();
-  if (/\b(series|seasons?|episodes?|tv shows?|shows)\b/.test(g)) return 'series';
-  if (/\b(movies?|vod|films?|cinema)\b/.test(g)) return 'movies';
-  return 'live';
+  const u = (c.url || '').toLowerCase().split(/[?#]/)[0];
+  if (/\/series\//.test(u)) return 'series';
+  if (/\/movie\//.test(u) || /\.(mp4|mkv|avi|mov|m4v|flv|wmv|mpg|mpeg)$/.test(u)) return 'movies';
+  return 'live';   // .ts, .m3u8, /live/, or anything else is a live channel
 }
 // Split an M3U playlist's channels into live/movies/series once, caching on the playlist.
 function m3uKinds(p) {
