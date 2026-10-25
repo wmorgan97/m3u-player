@@ -73,8 +73,9 @@ export class Player {
     // "loads" without ever rendering a frame — so the native attempt never errors and a
     // plain fallback is never reached. When we have a server repackager, use it FIRST for
     // anything that isn't already HLS or a plain media file.
-    const raw = !!tc && !isHls && !PROGRESSIVE.test(url);
+    const raw = !!tc && !isHls && !PROGRESSIVE.test(url) && !/^blob:/.test(url);
     const tries = [];
+    if (/^blob:/.test(url)) tries.push([url, 'direct']);   // a downloaded file: play it straight from storage
     if (raw) for (const mode of this.modes(tc)) tries.push([tc, mode]);
     for (const candidate of this.candidates(url)) {
       for (const mode of this.modes(candidate)) tries.push([candidate, mode]);

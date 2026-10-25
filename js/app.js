@@ -81,6 +81,8 @@ async function init() {
   ]);
   state.reminders = reminders || [];
   state.intros = (await db.get('intros')) || {};
+  state.downloads = (await db.get('downloads')) || {};
+  for (const m of Object.values(state.downloads)) if (!m.done && !m.error) m.error = 'Interrupted';   // the app was closed mid-download
   scheduleReminders();
   Object.assign(syncMeta, meta);
   state.playlists = playlists.sort((a, b) => a.createdAt - b.createdAt);
@@ -213,12 +215,14 @@ function noteStall() {
   }
 }
 let transcodeVod = false;   // set per play: movies, episodes and catch-up get an on-demand (seekable) stream
+const liveEnc = new Set();  // live channel urls that showed no picture: converted to H.264 from then on
 // The server hands VOD over as a complete playlist with the real length, so the video element's own
 // time and duration are the truth; seeking anywhere is a plain seek (the server makes segments on demand).
 let vodTrack = 0, vodInfo = null, subTrackEl = null, vodEnc = false;   // audio track in use, the file's probe, subtitles, "convert video for this device"
 // Can this device decode the file's video as-is? Chrome has no HEVC/10-bit; Safari on Apple silicon has HEVC.
 function canDecode(v) {
   if (!v) return true;
+  if (v.chroma444 || v.interlaced) return false;   // 4:2:2 / 4:4:4 and interlaced sources: convert
   if (v.codec === 'h264') return !v.bit10;
   const type = v.codec === 'hevc' ? `video/mp4; codecs="${v.bit10 ? 'hvc1.2.4.L153.B0' : 'hvc1.1.6.L123.B0'}"`
     : v.codec === 'av1' ? `video/mp4; codecs="av01.0.08M.${v.bit10 ? '10' : '08'}"` : v.codec === 'vp9' ? `video/mp4; codecs="vp09.00.10.${v.bit10 ? '10' : '08'}"` : '';
@@ -358,7 +362,8 @@ function transcodeUrl(url) {
   const key = state.settings.serverKey || '';
   if (serverProxy.needsKey && !key) return null;
   const b = bufferLevel();
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}${vodEnc ? '&enc=1' : ''}` : ''}&url=${encodeURIComponent(url)}`;
+  if (/^blob:/.test(url)) return null;       // a downloaded file plays from storage
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}${vodEnc ? '&enc=1' : ''}` : liveEnc.has(url) ? '&enc=1' : ''}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -512,6 +517,7 @@ function route() {
   }
   if (kind === 'fav' || kind === 'recent' || kind === 'all') return showPlaylist(virtualPlaylist(kind));
   if (kind === 'multi') return showMulti();
+  if (kind === 'downloads') return showDownloads();
   showHome();
   const y = viewMemo.get(memoKey)?.y;
   if (y) requestAnimationFrame(() => scrollTo(0, y));
@@ -521,6 +527,7 @@ function rerender() {
   const [, kind] = (location.hash || '#/').slice(1).split('/');
   if (kind === 'guide') return state.current && showGuide(state.current);
   if (kind === 'multi') return;
+  if (kind === 'downloads') return showDownloads();
   if (state.current) refreshPlaylistView({ keep: true });   // an edit: stay on the same row
   else { const y = scrollY; showHome(); scrollTo(0, y); }
 }
@@ -697,6 +704,7 @@ function showHome() {
       ${card('#/recent', 'clock', 'Recently watched', plural(state.recents.length, 'item'))}
       ${pl.length ? card('#/all', 'search', 'All channels', 'Every playlist in one list') : ''}
       ${pl.length ? card('#/multi', 'grid', 'Multi-view', 'Watch up to 4 channels at once') : ''}
+      ${Object.keys(state.downloads || {}).length ? card('#/downloads', 'film', 'Downloads', plural(Object.keys(state.downloads).length, 'title') + (dlActive ? ' · downloading' : '')) : ''}
     </ul>
     <div class="section-title">Playlists</div>
     ${pl.length
@@ -1126,6 +1134,106 @@ function renderMore() {
 // Fill in what's on for rows already on screen, touching only that line (no rebuild, no flicker, taps keep working).
 // Under the docked player (wide screens): what's on now with its description, then what's coming up;
 // earlier programmes are listed when the channel has catch-up. Tap any programme for details.
+// ---------- Offline downloads ----------
+// A title is fetched from the server as one playable MP4 (H.264/AAC, 720p by default) and kept in the
+// browser's storage in 8 MB pieces; the Downloads page plays it from there with no connection at all.
+const DL_CHUNK = 8 << 20;
+let dlActive = null;
+const fmtBytes = n => n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${Math.round(n / 1e6)} MB`;
+async function startDownload(item, q = '720') {
+  if (!canSync()) return toast('Downloads need your server connection');
+  if (dlActive) return toast('One download at a time: wait for the current one to finish');
+  const id = `dl-${uid()}`;
+  const meta = { id, name: item.name, logo: item.logo || '', group: item.group || '', year: item.year || '', kind: item.kind === 'episode' ? 'episode' : 'movie', q, bytes: 0, parts: 0, done: false, at: Date.now(), orig: item.url, src: item.src };
+  state.downloads[id] = meta;
+  await db.set('downloads', state.downloads);
+  try { await navigator.storage?.persist?.(); } catch {}
+  toast(`Downloading ${item.name}`, { action: 'View', fn: () => { location.hash = '#/downloads'; } });
+  runDownload(meta);
+}
+async function runDownload(meta) {
+  const ctrl = new AbortController();
+  dlActive = { id: meta.id, ctrl };
+  delete meta.error;
+  try {
+    const res = await fetch(`${serverApi('download')}&q=${meta.q}&url=${encodeURIComponent(meta.orig)}`, { signal: ctrl.signal, cache: 'no-store' });
+    if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
+    meta.duration = Number(res.headers.get('x-duration')) || 0;
+    const reader = res.body.getReader();
+    let buf = [], size = 0, lastSave = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf.push(value); size += value.length; meta.bytes += value.length;
+      if (size >= DL_CHUNK) {
+        await db.set(`dlc:${meta.id}:${meta.parts}`, new Blob(buf, { type: 'video/mp4' }));
+        meta.parts++; buf = []; size = 0;
+        if (Date.now() - lastSave > 3000) { lastSave = Date.now(); db.set('downloads', state.downloads).catch(() => {}); refreshDownloadsUi(); }
+      }
+    }
+    if (size) { await db.set(`dlc:${meta.id}:${meta.parts}`, new Blob(buf, { type: 'video/mp4' })); meta.parts++; }
+    if (meta.bytes < 1e6) throw new Error('The server sent no video (the file may be unavailable)');
+    meta.done = true;
+  } catch (e) {
+    meta.error = e.name === 'AbortError' ? 'Cancelled' : (e.message || 'Failed');
+  }
+  dlActive = null;
+  await db.set('downloads', state.downloads);
+  refreshDownloadsUi();
+  toast(meta.done ? `Downloaded: ${meta.name} (${fmtBytes(meta.bytes)})` : `Download stopped: ${meta.error}`);
+}
+async function offlineBlob(meta) {
+  const parts = [];
+  for (let i = 0; i < meta.parts; i++) parts.push(await db.get(`dlc:${meta.id}:${i}`));
+  return new Blob(parts.filter(Boolean), { type: 'video/mp4' });
+}
+async function playOffline(meta) {
+  const url = URL.createObjectURL(await offlineBlob(meta));
+  playChannel([{ id: meta.id, kind: meta.kind, name: meta.name, logo: meta.logo, group: meta.group, year: meta.year, url, pkey: meta.orig, offline: true, src: meta.src }], 0);
+}
+async function deleteDownload(meta) {
+  if (dlActive?.id === meta.id) dlActive.ctrl.abort();
+  for (let i = 0; i < meta.parts; i++) await db.del(`dlc:${meta.id}:${i}`).catch(() => {});
+  delete state.downloads[meta.id];
+  await db.set('downloads', state.downloads);
+}
+function downloadMenu(item) {
+  menu(`Download ${item.name}`, [
+    { label: 'Standard (720p, ~1 GB per 2 hours)', fn: () => startDownload(item, '720') },
+    { label: 'High (1080p, ~2.5 GB per 2 hours)', fn: () => startDownload(item, '1080') },
+    { label: 'Original quality (biggest)', fn: () => startDownload(item, 'orig') },
+  ]);
+}
+function refreshDownloadsUi() { if (location.hash === '#/downloads') showDownloads(); }
+async function showDownloads() {
+  state.current = null;
+  setTopbar({ title: 'Downloads', back: '#/' });
+  const list = Object.values(state.downloads).sort((a, b) => b.at - a.at);
+  let space = '';
+  try { const e = await navigator.storage?.estimate?.(); if (e?.quota) space = `${fmtBytes(e.usage || 0)} used of ${fmtBytes(e.quota)} available on this device`; } catch {}
+  view.innerHTML = `
+    <p class="muted">${esc(space || 'Downloaded titles play without a connection.')}</p>
+    ${list.length ? `<ul class="cards">${list.map(m => `<li class="card dl" data-dl="${m.id}">
+      <span class="hs-poster">${m.logo ? `<img src="${esc(m.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
+      <span class="card-text"><span class="card-title">${esc(m.name)}</span>
+        <span class="muted">${m.done ? `${fmtBytes(m.bytes)} · ${m.q === 'orig' ? 'Original' : m.q + 'p'}${m.duration ? ` · ${fmtDur(m.duration)}` : ''}` : m.error ? `Stopped: ${esc(m.error)} · ${fmtBytes(m.bytes)} saved` : `Downloading… ${fmtBytes(m.bytes)}${m.duration ? '' : ''}`}</span>
+        ${!m.done && !m.error ? '<span class="bar dl-bar"><i class="indeterminate"></i></span>' : ''}</span>
+      ${m.done ? `<button class="btn primary small" data-act="play">${icon('play')} Play</button>` : m.error ? '<button class="btn small" data-act="retry">Retry</button>' : '<button class="btn small" data-act="cancel">Cancel</button>'}
+      <button class="icon-btn" data-act="delete" aria-label="Delete">${icon('close')}</button>
+    </li>`).join('')}</ul>`
+    : `<div class="empty">${icon('film', 'big')}<p><b>No downloads yet</b></p><p class="muted">Open a film or episode and choose Download. Keep the app open while it downloads.</p></div>`}`;
+  view.onclick = async e => {
+    const li = e.target.closest('[data-dl]'), act = e.target.closest('[data-act]')?.dataset.act;
+    if (!li) return;
+    const m = state.downloads[li.dataset.dl];
+    if (!m) return;
+    if (act === 'play' || (!act && m.done)) return playOffline(m);
+    if (act === 'cancel' && dlActive?.id === m.id) return dlActive.ctrl.abort();
+    if (act === 'retry') { if (dlActive) return toast('One download at a time'); m.bytes = 0; m.parts = 0; runDownload(m); return showDownloads(); }
+    if (act === 'delete') { if (!await confirmDialog(`Delete the download of “${m.name}”?`, 'Delete', true)) return; await deleteDownload(m); showDownloads(); }
+  };
+}
+
 // Now-playing page for a film or episode (under the video): poster, title, chips, description, cast,
 // Save / trailer / start over, then more titles from the same group.
 const vodInfoCache = new Map();
@@ -1157,6 +1265,7 @@ async function renderVodPanel(c) {
             ${i.youtube_trailer ? '<button class="btn" data-vp="trailer">Trailer</button>' : ''}
             ${pr && pr.t > 30 ? '<button class="btn" data-vp="restart">Start over</button>' : ''}
             ${c.kind === 'episode' && state.playing && state.playing.index < state.playing.list.length - 1 ? `<button class="btn primary" data-vp="next">${icon('next')} Next episode</button>` : ''}
+            ${!c.offline && canSync() ? '<button class="btn" data-vp="dl">Download</button>' : ''}
           </div>
         </div>
       </div>
@@ -1169,6 +1278,7 @@ async function renderVodPanel(c) {
         if (b.dataset.vp === 'trailer') window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(i.youtube_trailer)}`, '_blank');
         if (b.dataset.vp === 'restart') seekVod(0);
         if (b.dataset.vp === 'next') step(1);
+        if (b.dataset.vp === 'dl') downloadMenu(c);
         return;
       }
       if (e.target.closest('[data-plot]')) e.target.closest('[data-plot]').classList.toggle('open');
@@ -1659,6 +1769,7 @@ function detailHtml(m, info = {}) {
       <button class="btn primary" data-play>${icon('play')} ${resumable ? `Resume ${fmtDur(pr.t)}` : 'Play'}</button>
       ${resumable ? '<button class="btn" data-restart>Start over</button>' : ''}
       <button class="btn" data-fav>${favUrls.has(m.url) ? '★ Saved' : '☆ Save'}</button>
+      ${canSync() && !m.offline ? '<button class="btn" data-dl>Download</button>' : ''}
       <button class="btn" data-more>More</button>
     </div>
   </div>`;
@@ -1672,6 +1783,7 @@ async function movieSheet(m) {
       el.querySelector('[data-play]').onclick = () => { closeSheet(); playChannel([m], 0); };
       el.querySelector('[data-restart]')?.addEventListener('click', () => { delete state.progress[m.url]; closeSheet(); playChannel([m], 0); });
       el.querySelector('[data-fav]').onclick = async () => { await toggleFavorite(m, null); open(true); };
+      el.querySelector('[data-dl]')?.addEventListener('click', () => downloadMenu(m));
       el.querySelector('[data-more]').onclick = () => menu(m.name, [
         info.info?.youtube_trailer && { label: 'Watch trailer', fn: () => window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(info.info.youtube_trailer)}`, '_blank') },
         ...externalItems(m),
@@ -3116,7 +3228,7 @@ function trackProgress(force = false) {
   if (!force && Date.now() - lastProgressSave < 5000) return;
   lastProgressSave = Date.now();
   const t = vodPos();
-  state.progress[c.url] = { t, d, v: 3, at: Date.now(), done: t / d > 0.93, item: { id: c.id, kind: c.kind, name: c.name, url: c.url, logo: c.logo, group: c.group, src: c.src } };
+  state.progress[c.pkey || c.url] = { t, d, v: 3, at: Date.now(), done: t / d > 0.93, item: { id: c.id, kind: c.kind, name: c.name, url: c.pkey || c.url, logo: c.logo, group: c.group, src: c.src } };
   const entries = Object.entries(state.progress);
   if (entries.length > MAX_PROGRESS) state.progress = Object.fromEntries(entries.sort((a, b) => b[1].at - a[1].at).slice(0, MAX_PROGRESS));
   db.set('progress', state.progress).catch(() => {});
@@ -3151,6 +3263,21 @@ function bindPlayer() {
     if (c && nextBackup(c)) { setStatus('Trying a backup stream…'); setTimeout(() => { if (nowChannel() === c) playChannel(state.playing.list, state.playing.index); }, 300); return; }
     setStatus(msg, true);
   };
+  // No picture: sound plays and the clock runs but the video never gets a frame (a codec this device can't
+  // decode). Switch that channel/title to server-side H.264 conversion and play again.
+  let blankSince = 0;
+  setInterval(() => {
+    const c = nowChannel();
+    if (!c || video.paused || c.offline || video.currentTime < 3 || Date.now() - lastTune < 8000) { blankSince = 0; return; }
+    if (video.videoWidth > 0) { blankSince = 0; return; }
+    blankSince ||= Date.now();
+    if (Date.now() - blankSince < 5000) return;
+    blankSince = 0;
+    if (isLiveChannel(c) ? liveEnc.has(c.url) : vodEnc) return;   // already converting: nothing more we can do
+    if (isLiveChannel(c)) liveEnc.add(c.url); else vodEnc = true;
+    toast('No picture from this stream: converting it for your device…');
+    playChannel(state.playing.list, state.playing.index);
+  }, 1000);
   // Stall watchdog: live video whose clock hasn't advanced for 12s while it should be playing -> reload the stream.
   let lastT = 0, lastTick = Date.now();
   setInterval(() => {
@@ -3207,6 +3334,7 @@ function playerMenu() {
     Number.isFinite(video.duration) && { label: `Speed (${video.playbackRate}×)…`, fn: () => menu('Playback speed', [0.75, 1, 1.25, 1.5, 2].map(r => ({ label: `${video.playbackRate === r ? '✓ ' : ''}${r}×`, fn: () => { video.playbackRate = r; } }))) },
     { label: state.sleepAt ? `Sleep timer (${Math.ceil((state.sleepAt - Date.now()) / MINUTE)} min left)…` : 'Sleep timer…', fn: sleepMenu },
     { label: 'Picture in Picture', fn: () => player.togglePip().catch(e => toast(e.message)) },
+    !isLiveChannel(c) && !c.offline && canSync() && { label: 'Download for offline…', fn: () => downloadMenu(c) },
     isNative && { label: 'Play in iPhone player (full screen)', fn: () => openNativePlayer(c) },
     isLiveChannel(c) && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
     { label: favUrls.has(c.url) ? 'Remove from Favorites' : 'Add to Favorites', fn: () => toggleFavorite(c, null).then(highlightStars) },
@@ -3312,7 +3440,7 @@ function tune(c, list, index) {
   player.vod = transcodeVod;
   if (tuneFrom !== c) { vodTrack = 0; vodInfo = null; vodEnc = false; clearSubtitles(); }   // a different title: back to its default track
   if (transcodeVod && !vodInfo && transcodeUrl(c.url)) return tuneVod(c, list, index);
-  const pr = state.progress[c.url];
+  const pr = state.progress[c.pkey || c.url];
   const resumeAt = pr && pr.v === 3 && !pr.done && pr.t > 30 && pr.t < (pr.d || Infinity) - 60 ? pr.t : 0;   // only positions saved by the current VOD logic
   if (tuneFrom && tuneFrom.url !== c.url) unwarm(streamOf(tuneFrom));   // free the single provider slot right before connecting
   tuneFrom = null;

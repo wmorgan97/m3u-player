@@ -424,3 +424,10 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
 .hs-empty { padding: 12px 8px; }
 .home-shelf { margin: 0 -16px 18px; padding: 2px 16px 6px; }
 @media (min-width: 900px) { .home-shelf { margin: 0 0 18px; padding-left: 0; padding-right: 0; } }
+
+/* ---------- Downloads ---------- */
+.card.dl { gap: 12px; }
+.card.dl .hs-poster { width: 44px; }
+.dl-bar { display: block; max-width: 220px; margin-top: 6px; overflow: hidden; }
+.dl-bar .indeterminate { display: block; width: 40%; height: 100%; background: var(--accent); animation: dlslide 1.2s ease-in-out infinite; }
+@keyframes dlslide { 0% { transform: translateX(-100%); } 100% { transform: translateX(260%); } }

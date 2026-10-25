@@ -34,6 +34,8 @@ const TYPES = {
 };
 
 const sessions = new Map(); // id -> { proc, dir, lastAccess, exited, errTail, startedAt }
+let canTonemap = false;   // zscale+tonemap filters present in this ffmpeg build (HDR -> SDR when converting)
+execFile(FFMPEG, ['-hide_banner', '-filters'], { windowsHide: true, maxBuffer: 4 << 20 }, (e, out) => { canTonemap = !e && /\bzscale\b/.test(out) && /\btonemap\b/.test(out); console.log(`[hls] tone mapping ${canTonemap ? 'available' : 'not available'}`); });
 const starting = new Map(); // id -> promise of the session: a warm + play for the same channel share one start
 try { rmSync(ROOT, { recursive: true, force: true }); mkdirSync(ROOT, { recursive: true }); } catch {}
 
@@ -69,7 +71,7 @@ function probeFile(target) {
   if (probes.has(target)) return probes.get(target);
   const job = new Promise(resolve => {
     execFile(FFPROBE, ['-v', 'error', '-user_agent', 'Mozilla/5.0', '-show_entries',
-      'format=duration:stream=index,codec_type,codec_name,width,height,color_transfer,profile,pix_fmt,channels:stream_tags=language,title', '-of', 'json', target],
+      'format=duration:stream=index,codec_type,codec_name,width,height,color_transfer,profile,pix_fmt,field_order,channels:stream_tags=language,title', '-of', 'json', target],
       { timeout: 25_000, windowsHide: true, maxBuffer: 4 << 20 }, (err, out) => {
         if (err) return resolve({ duration: 0, audio: [], subs: [] });
         let j; try { j = JSON.parse(out); } catch { return resolve({ duration: 0, audio: [], subs: [] }); }
@@ -81,7 +83,8 @@ function probeFile(target) {
         const TEXT = new Set(['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text']);
         const subs = streams.filter(x => x.codec_type === 'subtitle').map(x => ({ i: si++, label: name(x) || `Subtitles ${si}`, lang: x.tags?.language || '', codec: x.codec_name, text: TEXT.has(x.codec_name) }));
         resolve({ duration: Number(j.format?.duration) || 0, audio, subs,
-          video: v ? { codec: v.codec_name, width: v.width, height: v.height, profile: v.profile || '', bit10: /p10|p12|10le|12le/.test(v.pix_fmt || '') || /10/.test(v.profile || ''), hdr: /smpte2084|arib-std-b67/.test(v.color_transfer || '') } : null });
+          video: v ? { codec: v.codec_name, width: v.width, height: v.height, profile: v.profile || '', pix: v.pix_fmt || '', bit10: /p10|p12|10le|12le/.test(v.pix_fmt || '') || /10/.test(v.profile || ''),
+            chroma444: /422|444/.test(v.pix_fmt || ''), interlaced: /^(tt|bb|tb|bt)$/.test(v.field_order || ''), hdr: /smpte2084|arib-std-b67/.test(v.color_transfer || '') } : null });
       });
   });
   probes.set(target, job);
@@ -119,7 +122,16 @@ async function mergedVtt(s, idx) {
 // ahead or back just restarts the run there while already-made segments stay on disk. The playlist the
 // player gets is synthesised from the file's duration (see vodManifest), so it is a plain VOD to every
 // player: real length, instant seeking, no live behaviour.
-function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0, subs = [], enc = false, height = 0 } = {}) {
+// Video filters when converting: deinterlace, HDR -> SDR tone map, cap at 1080p, 8-bit 4:2:0 for every decoder.
+function encodeFilters(v = {}) {
+  const f = [];
+  if (v.interlaced) f.push('yadif');
+  if (v.hdr && canTonemap) f.push('zscale=t=linear:npl=100', 'format=gbrpf32le', 'zscale=p=bt709', 'tonemap=hable:desat=0', 'zscale=t=bt709:m=bt709:r=tv');
+  if ((v.height || 0) > 1080) f.push('scale=-2:1080');
+  f.push('format=yuv420p');
+  return f.join(',');
+}
+function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0, subs = [], enc = false, height = 0, vinfo = null } = {}) {
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '2',
@@ -133,9 +145,9 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
     ...(enc
       // The device can't decode this video (HEVC / 10-bit / AV1): convert to H.264, at most 1080p, with a
       // keyframe at every segment boundary so every segment starts clean.
-      ? ['-c:v', 'libx264', '-preset', height > 1100 ? 'superfast' : 'veryfast', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
-         ...(height > 1080 ? ['-vf', 'scale=-2:1080'] : []), '-crf', '23', '-maxrate', '6M', '-bufsize', '12M', '-threads', '4',
-         '-force_key_frames', `expr:gte(t,n_forced*${VOD_SEG_S})`, '-sc_threshold', '0']
+      ? ['-c:v', 'libx264', '-preset', height > 1100 ? 'superfast' : 'veryfast', '-profile:v', 'high', '-level', '4.1',
+         '-vf', encodeFilters({ ...(vinfo || {}), height }), '-crf', '23', '-maxrate', '6M', '-bufsize', '12M', '-threads', '4',
+         ...(vod ? ['-force_key_frames', `expr:gte(t,n_forced*${VOD_SEG_S})`] : ['-g', '50', '-keyint_min', '25', '-tune', 'zerolatency']), '-sc_threshold', '0']
       : REENCODE
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
          '-g', '25', '-keyint_min', '25', '-sc_threshold', '0', '-crf', '22', '-maxrate', '5M', '-bufsize', '10M', '-threads', '4']
@@ -165,8 +177,8 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
   const probe = vod ? await probeFile(target) : null;
   const subs = (probe?.subs || []).filter(s => s.text).map(s => s.i);
   const height = probe?.video?.height || 0;
-  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio, track, subs, enc, height }), { windowsHide: true });
-  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: probe?.duration || 0, audio, track, subs, enc, height };
+  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio, track, subs, enc, height, vinfo: probe?.video }), { windowsHide: true });
+  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: probe?.duration || 0, audio, track, subs, enc, height, vinfo: probe?.video };
   if (enc) console.log(`[hls] encoding ${id} (${probe?.video?.codec}${probe?.video?.bit10 ? ' 10-bit' : ''} ${height}p -> h264)`);
   console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
   proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
@@ -179,7 +191,7 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
 // VOD: restart the run at segment index n (seek). Existing segments stay; the new run writes seg n, n+1, …
 function restartRun(s, n) {
   try { s.proc.kill(); } catch {}
-  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio, track: s.track, subs: s.subs || [], enc: s.enc, height: s.height }), { windowsHide: true });
+  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio, track: s.track, subs: s.subs || [], enc: s.enc, height: s.height, vinfo: s.vinfo }), { windowsHide: true });
   Object.assign(s, { proc, exited: false, errTail: '', startedAt: Date.now(), runStart: n });
   proc.stderr.on('data', d => { s.errTail = (s.errTail + d).slice(-1500); });
   proc.on('exit', () => { if (s.proc === proc) s.exited = true; });
@@ -223,7 +235,8 @@ function stopSession(id) {
 // processes to exit so the old connection is really gone (rapid channel skipping otherwise trips rate limits).
 async function closeOthers(keepId, host) {
   // The one-connection rule is per provider: a stream from another host (a different provider, or a test
-  // file) must not close this one.
+  // file) must not close this one. A download in progress on that provider is stopped too.
+  if (host && downloads.get(host)) { try { downloads.get(host).proc.kill(); } catch {} downloads.delete(host); }
   const others = [...sessions.entries()].filter(([k, v]) => k !== keepId && (!host || v.host === host)).map(([k]) => k);
   if (others.length) { await Promise.all(others.map(stopSession)); await new Promise(r => setTimeout(r, 120)); }
 }
@@ -245,6 +258,41 @@ async function waitForPlaylist(dir, timeout, alive = () => true, ready = READY_S
     await new Promise(r => setTimeout(r, 80));
   }
   return false;
+}
+
+// Offline download: the whole title as one fragmented MP4 (H.264 + AAC, so any device plays it later),
+// streamed as it is made. q = 720 | 1080 | orig (copy the video when it's already H.264 8-bit).
+const downloads = new Map();   // host -> { proc }
+export async function handleDownload(req, res, url, send, allowed) {
+  if (PROXY_KEY && url.searchParams.get('key') !== PROXY_KEY) return send(res, 403, 'Wrong or missing proxy key');
+  let t;
+  try { t = new URL(url.searchParams.get('url') || ''); } catch { return send(res, 400, 'Bad url'); }
+  if (!allowed(t)) return send(res, 403, 'Address not allowed');
+  const q = ['720', '1080', 'orig'].includes(url.searchParams.get('q')) ? url.searchParams.get('q') : '720';
+  const track = Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0));
+  const probe = await probeFile(t.href);
+  if (!probe.duration) return send(res, 502, 'Could not read the file');
+  const v = probe.video || {};
+  const copy = q === 'orig' && v.codec === 'h264' && !v.bit10 && !v.chroma444 && !v.interlaced;
+  const target = q === 'orig' ? (v.height || 0) : Math.min(Number(q), v.height || Number(q));
+  await closeOthers(null, t.hostname);          // one provider connection: a download takes it
+  downloads.get(t.hostname)?.proc.kill();
+  const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2',
+    '-i', t.href, '-map', '0:v:0', '-map', `0:a:${track}?`,
+    ...(copy ? ['-c:v', 'copy'] : ['-c:v', 'libx264', '-preset', target > 1000 ? 'superfast' : 'veryfast', '-profile:v', 'high', '-level', '4.1',
+      '-vf', [...(v.interlaced ? ['yadif'] : []), ...(v.hdr && canTonemap ? ['zscale=t=linear:npl=100', 'format=gbrpf32le', 'zscale=p=bt709', 'tonemap=hable:desat=0', 'zscale=t=bt709:m=bt709:r=tv'] : []), ...((v.height || 0) > target ? [`scale=-2:${target}`] : []), 'format=yuv420p'].join(','),
+      '-crf', q === '720' ? '24' : '23', '-maxrate', q === '720' ? '3M' : '6M', '-bufsize', '12M', '-threads', '4', '-g', '96', '-sc_threshold', '0']),
+    '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+    '-movflags', 'frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1'];
+  const proc = spawn(FFMPEG, args, { windowsHide: true });
+  downloads.set(t.hostname, { proc });
+  console.log(`[dl] start ${t.href.slice(0, 80)} q=${q} ${copy ? 'copy' : 'encode'} ${v.codec} ${v.height}p`);
+  let errTail = '';
+  proc.stderr.on('data', d => { errTail = (errTail + d).slice(-800); });
+  res.writeHead(200, { 'content-type': 'video/mp4', 'access-control-allow-origin': '*', 'cache-control': 'no-store', 'x-duration': String(probe.duration), 'x-mode': copy ? 'copy' : 'encode' });
+  proc.stdout.pipe(res);
+  proc.on('exit', code => { if (downloads.get(t.hostname)?.proc === proc) downloads.delete(t.hostname); if (code && !res.writableEnded) console.log(`[dl] failed: ${errTail.split('\n').filter(Boolean).pop() || code}`); res.end(); });
+  res.on('close', () => { try { proc.kill(); } catch {} });
 }
 
 export async function handleHls(req, res, url) {
@@ -323,7 +371,7 @@ export async function handleHls(req, res, url) {
   const start = vod ? Math.max(0, Math.floor(Number(url.searchParams.get('start')) || 0)) : 0;
   const audio = ['none', 'copy'].includes(url.searchParams.get('audio')) ? url.searchParams.get('audio') : 'aac';   // diagnostics
   const track = vod ? Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0)) : 0;   // which audio track of the file
-  const enc = vod && url.searchParams.get('enc') === '1';   // the device can't decode the file's video codec
+  const enc = url.searchParams.get('enc') === '1';   // the device can't decode this video codec: convert to H.264
   const id = sessionId((start ? `${t.href}#${start}` : t.href) + (audio !== 'aac' ? `#${audio}` : '') + (track ? `#a${track}` : '') + (enc ? '#enc' : ''));
   let s = sessions.get(id);
   if (s && !s.exited && !warm) {

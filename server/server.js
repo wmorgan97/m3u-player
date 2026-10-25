@@ -18,7 +18,7 @@ import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Readable } from 'node:stream';
 import { isIP } from 'node:net';
-import { handleHls } from './transcode.js';
+import { handleHls, handleDownload } from './transcode.js';
 import { handleSync } from './sync.js';
 import { handleGuide } from './guide.js';
 import { handleCatalog } from './catalog.js';
@@ -151,6 +151,8 @@ export function createAppServer() {
     if (req.method === 'OPTIONS') return send(res, 204, '');
     if (url.pathname === '/sync' && req.method === 'POST') console.log(`[sync] ${(req.headers['user-agent'] || '').replace(/^.*?\(([^;)]+).*$/, '$1')}`);
     if (url.pathname === '/sync') return handleSync(req, res, url, send).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
+    if (url.pathname === '/download') return handleDownload(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
+      .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/vod') return handleCatalog(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
       .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/guide') return handleGuide(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
