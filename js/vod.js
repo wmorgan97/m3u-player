@@ -7,7 +7,8 @@
 const SUPER_RE = /[ʰ-˿ᴬ-ᵫ⁰-₟]+/g;
 const TAG_RE = /\s*(?:\[[^\]]*\]|\{[^}]*\})/g;
 // Leading region prefix: "EN | ", "UK - ", "FR: ".
-const PREFIX_RE = /^[A-Z]{2,3}\s*[|:\-]\s+/;
+// Also stacked provider tags: "4K-NF - ", "4K-D+ - ", "TOP - ", "EN | ".
+const PREFIX_RE = /^(?:[A-Z0-9+&]{1,5}(?:-[A-Z0-9+&]{1,5})*\s*[|:\-]\s+)+/;
 // Episode markers: S01E04, S1 E4, S01.E04, 1x04, Season 1 Episode 4, E04 / Ep 4 / Episode 4.
 const EP_RE = /(?:^|[\s.\-_(])(?:S(\d{1,2})\s*[.\-_]?\s*E(\d{1,3})|(\d{1,2})x(\d{1,3})|Season\s*(\d{1,2})\s*[.\-_]?\s*(?:Episode|Ep\.?|E)\s*(\d{1,3})|E(?:pisode|p)?\.?\s*(\d{1,3}))(?=[\s.\-_)]|$)/i;
 // A 4-digit year as its own token, optionally in () or [].
@@ -45,6 +46,12 @@ export function vodMeta(name) {
     s = s.slice(0, last.index) + ' ' + s.slice(last.index + last[0].length);
   }
   return { title: cleanTitle(s), year, season, episode };
+}
+
+// A poster's caption: the clean title without tags, year or country codes ("(US)", "(GB)").
+export function displayTitle(name) {
+  const t = vodMeta(name).title || String(name || '');
+  return t.replace(/\s*\((?:[A-Z]{2}(?:\/[A-Z]{2})?)\)/g, '').replace(/\s*\(\s*\)/g, '').trim() || String(name || '');
 }
 
 export function isVodName(name) {

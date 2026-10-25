@@ -23,10 +23,12 @@ function hlsErrorMessage(data) {
   return `Stream error (${data.details}).`;
 }
 
+const IS_MAC_DESKTOP = /Macintosh/.test(navigator.userAgent) && !(navigator.maxTouchPoints > 1);
 export function externalPlayers(url) {
   const u = encodeURIComponent(url);
   return [
-    { name: 'VLC', href: `vlc-x-callback://x-callback-url/stream?url=${u}` },
+    // VLC for Mac answers no web link (only VLC on iPhone/iPad does): hand it a playlist file instead.
+    IS_MAC_DESKTOP ? { name: 'VLC', file: true, href: '#' } : { name: 'VLC', href: `vlc-x-callback://x-callback-url/stream?url=${u}` },
     { name: 'Infuse', href: `infuse://x-callback-url/play?url=${u}` },
     { name: 'IINA', href: `iina://weblink?url=${u}` },
   ];

@@ -4,7 +4,7 @@ import { Player, externalPlayers } from './player.js';
 import { net, fetchText, isMixed, streamUrl } from './net.js';
 import { Xtream, parseXtreamLink, liveChannels, movieItems, seriesItems } from './xtream.js';
 import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from './epg.js';
-import { groupSeries, vodMeta } from './vod.js';
+import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -692,9 +692,11 @@ function homeHub(pl) {
       if (!e || Array.isArray(e)) { if (Array.isArray(e)) vodCache.delete(vodKey(p, tab)); hub.loading = true; loadVod(p, tab).then(homeRefresh).catch(() => {}); continue; }
       hub.vodLink[tab] ||= `#/p/${p.id}`;
       const what = tab === 'movies' ? 'movies' : 'series';
-      if (e.recent.length) hub.shelves[tab].push({ title: `New ${what}`, key: `h-new-${tab}`, items: e.recent.slice(0, 30) });
-      if (e.top?.length) hub.shelves[tab].push({ title: 'Top rated', key: `h-top-${tab}`, items: e.top.slice(0, 30) });
-      hub.hero.push(...(e.top || []).filter(it => it.logo).slice(0, 4));
+      const withArt = l => (l || []).filter(it => it.logo);
+      if (e.top?.length) hub.shelves[tab].push({ title: 'Popular now', key: `h-top-${tab}`, items: withArt(e.top).slice(0, 30) });
+      const fresh = withArt(e.fresh).length >= 8 ? withArt(e.fresh) : withArt(e.recent);
+      if (fresh.length) hub.shelves[tab].push({ title: withArt(e.fresh).length >= 8 ? 'New releases' : `Recently added ${what}`, key: `h-new-${tab}`, items: fresh.slice(0, 30) });
+      hub.hero.push(...withArt(e.top).slice(0, 4));
     }
   }
   // Because you watched: the newest film or episode with progress, then more from its group.
@@ -735,37 +737,56 @@ function homeHub(pl) {
   for (const tab of ['movies', 'series']) for (const sh of hub.shelves[tab]) shelfItems.set(sh.key, sh.items);
   return hub;
 }
+// "MobLand · S1 E1" instead of "EN - MobLand (2025) (GB) - S01E01 - Stick or Twist".
+function cwTitle(it) {
+  if (it.kind !== 'movie' && it.kind !== 'episode') return it.name;
+  const m = vodMeta(it.name), t = displayTitle(it.name);
+  return m.episode != null ? `${t} · S${m.season || 1} E${m.episode}` : t;
+}
 function homeShelfHtml(sh) {
-  return `<div class="sub-title">${esc(sh.title)}</div><ul class="shelf-row home-shelf">${sh.items.map((it, k) => cardHtml(it, sh.key, k)).join('')}</ul>`;
+  return `<div class="row-head"><h3>${esc(sh.title)}</h3></div><ul class="shelf-row home-shelf">${sh.items.map((it, k) => cardHtml(it, sh.key, k)).join('')}</ul>`;
 }
 function onNowHtml({ c, now }, k) {
   const pct = ((Date.now() - now[0]) / (now[1] - now[0])) * 100;
   const img = now[4]?.img;
   return `<li class="onnow" data-k="${k}" style="--hue:${hueOf(c.name)}">
-    <span class="on-art">${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}</span>
-    <span class="on-text"><b>${esc(now[2])}</b><span class="muted">${esc(c.name)} · ends ${fmtTime(now[1])}</span></span>
+    <span class="on-art">${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}<span class="live-badge">LIVE</span></span>
+    <span class="on-text"><b>${esc(now[2])}</b><span class="muted">${esc(c.name)} · until ${fmtTime(now[1])}</span></span>
     <span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span></li>`;
 }
 let heroTimer = 0;
 function heroHtml(items) {
   clearInterval(heroTimer);
+  const go = (car, i) => {
+    const n = car.querySelectorAll('.hero-slide').length;
+    car.scrollTo({ left: ((i + n) % n) * car.clientWidth, behavior: 'smooth' });
+  };
   heroTimer = setInterval(() => {
     const car = $('.hero-car');
     if (!car) return clearInterval(heroTimer);
-    const n = car.querySelectorAll('.hero-slide').length, i = Math.round(car.scrollLeft / car.clientWidth);
-    car.scrollTo({ left: ((i + 1) % n) * car.clientWidth, behavior: 'smooth' });
-  }, 7000);
-  return `<div class="hero-car">${items.map((it, k) => `<div class="hero-slide" data-shelf="hero" data-k="${k}" style="--hue:${hueOf(it.name)}">
+    if (car.matches(':hover')) return;
+    go(car, Math.round(car.scrollLeft / car.clientWidth) + 1);
+  }, 8000);
+  queueMicrotask(() => {
+    const car = $('.hero-car'), dots = $('.hero-dots');
+    if (!car || !dots) return;
+    const mark = () => { const i = Math.round(car.scrollLeft / car.clientWidth); dots.querySelectorAll('button').forEach((d, k) => d.classList.toggle('on', k === i)); };
+    car.addEventListener('scroll', debounce(mark, 60), { passive: true });
+    dots.addEventListener('click', e => { const d = e.target.closest('[data-dot]'); if (d) { e.stopPropagation(); go(car, +d.dataset.dot); } });
+  });
+  return `<div class="hero-wrap"><div class="hero-car">${items.map((it, k) => `<div class="hero-slide" data-shelf="hero" data-k="${k}" style="--hue:${hueOf(it.name)}">
       <img class="hero-bg" src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
       <div class="hero-body">
-        <span class="poster-img hero-poster"><img src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>
         <div class="hero-text">
-          <span class="muted small-caps">${it.kind === 'series' ? 'Top series' : 'Top movie'}</span>
-          <div class="hero-title">${esc(vodMeta(it.name).title || it.name)}</div>
-          <div class="muted">${[it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : '', it.genre].filter(Boolean).map(esc).join(' · ')}</div>
-          <div class="hero-actions"><button class="btn primary" data-hero-play="${k}">${icon('play')} ${it.kind === 'series' ? 'Episodes' : 'Play'}</button><button class="btn">Details</button></div>
+          <span class="hero-kicker">${icon(it.kind === 'series' ? 'grid' : 'film')} Popular ${it.kind === 'series' ? 'series' : 'movie'}</span>
+          <div class="hero-title">${esc(displayTitle(it.name))}</div>
+          <div class="hero-meta">${[it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : '', it.genre, prettyGroup(it.group)].filter(Boolean).map(x => `<span>${esc(x)}</span>`).join('')}</div>
+          ${it.plot ? `<p class="hero-plot">${esc(it.plot)}</p>` : ''}
+          <div class="hero-actions"><button class="btn primary" data-hero-play="${k}">${icon('play')} ${it.kind === 'series' ? 'Episodes' : 'Play'}</button><button class="btn">More info</button></div>
         </div>
-      </div></div>`).join('')}</div>`;
+        <span class="poster-img hero-poster"><img src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>
+      </div></div>`).join('')}</div>
+    ${items.length > 1 ? `<div class="hero-dots">${items.map((_, k) => `<button data-dot="${k}" class="${k ? '' : 'on'}" aria-label="Slide ${k + 1}"></button>`).join('')}</div>` : ''}</div>`;
 }
 
 // Home tiles fill top-to-bottom, then the next column (1 top-left, 2 under it). At most 4 rows, so the
@@ -789,8 +810,15 @@ function showHome() {
   const watchlist = state.favorites.filter(f => f.kind === 'movie' || f.kind === 'series').slice(-30).reverse();
   shelfItems.set('home-watch', watchlist);
   const hub = homeHub(pl);
+  resumeCardHtml(state.recents[0]);   // sets resumeChannel when the last thing watched was a live channel
+  const resumeLive = resumeChannel ? (() => {
+    const c = resumeChannel, g = guideFor(c), now = g && g.nowNext(c).now;
+    const pct = now ? ((Date.now() - now[0]) / (now[1] - now[0])) * 100 : 0;
+    return `<button class="cw cw-live" data-resume style="--hue:${hueOf(c.name)}"><span class="cw-img">${now?.[4]?.img ? `<img src="${esc(now[4].img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}<span class="live-badge">LIVE</span><span class="cw-play">${icon('play')}</span>${now ? `<span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}</span>
+      <span class="cw-name">${esc(c.name)}</span><span class="muted">${now ? esc(now[2]) : 'Live channel'}</span></button>`;
+  })() : '';
   // Snapshot: playing a channel moves it to the front of state.recents, so tiles must keep their own channel.
-  const recentStrip = state.recents.slice(0, 12);
+  const recentStrip = state.recents.filter(isLiveChannel).slice(0, 14);
   // Browse: the groups the user pinned to Home (in their order); until they pin any, the biggest live groups.
   const pinnedAny = pl.some(p => p.homeGroups?.length);
   const browse = pl.flatMap(p => {
@@ -800,7 +828,10 @@ function showHome() {
       const want = p.homeGroups || [];
       return want.map(n => gs.find(g => g.name === n)).filter(Boolean).map(g => ({ pid: p.id, name: g.name, count: g.count }));
     }
-    return gs.sort((a, b) => b.count - a.count).map(g => ({ pid: p.id, name: g.name, count: g.count }));
+    // Until groups are pinned: your own region's big groups first (US / UK / Canada / English), then the rest.
+    const home = /^(?:US|USA|UK|GB|EN|CA|IE)\b|\b(?:USA|UK|English)\b/i;
+    const mine = gs.filter(g => home.test(g.name));
+    return (mine.length >= 6 ? mine : gs).sort((a, b) => b.count - a.count).map(g => ({ pid: p.id, name: g.name, count: g.count }));
   }).slice(0, pinnedAny ? 40 : 12);
   const browseEdit = pl.length ? `<button class="link" data-edit-groups="${esc(pl[0].id)}">${pinnedAny ? 'Edit' : 'Choose'}</button>` : '';
   view.innerHTML = `
@@ -813,32 +844,28 @@ function showHome() {
     ${serverProxy.needsKey ? `<div class="banner">
       ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
-    ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search channels, movies and series" autocomplete="off" autocorrect="off" spellcheck="false"></label><div id="home-results" class="home-results" hidden></div>` : ''}
+    ${pl.length ? `<div class="home-top">
+      <label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search channels, movies and series" autocomplete="off" autocorrect="off" spellcheck="false"></label>
+      <ul class="lib-row quick">
+        <li class="lib" data-go="#/fav">${icon('star')}<span>Favorites</span><b>${state.favorites.length}</b></li>
+        <li class="lib" data-go="#/recent">${icon('clock')}<span>History</span></li>
+        <li class="lib" data-go="#/multi">${icon('grid')}<span>Multi-view</span></li>
+        ${Object.keys(state.downloads || {}).length ? `<li class="lib" data-go="#/downloads">${icon('film')}<span>Downloads</span><b>${Object.keys(state.downloads).length}</b>${dlActive ? '<i class="lib-dot"></i>' : ''}</li>` : ''}
+        ${pl.map(p => `<li class="lib pl-chip" data-go="#/p/${esc(p.id)}">${icon(p.kind === 'xtream' ? 'tv' : 'list')}<span>${esc(playlistTitle(p))}</span><button class="pl-more" data-menu="${esc(p.id)}" aria-label="Playlist options">${icon('more')}</button></li>`).join('')}
+      </ul></div><div id="home-results" class="home-results" hidden></div>` : ''}
     ${hub.hero.length ? heroHtml(hub.hero) : ''}
-    ${resumeCardHtml(recentStrip[0]) || cw.length ? `<div class="hub-head"><h2>Continue watching</h2></div>
-      <div class="cont-row">${resumeCardHtml(recentStrip[0])}${cw.map((e, i) => `<button class="cw" data-cw="${i}">
-        <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
-        <span class="cw-name">${esc(e.item.name)}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></button>`).join('')}</div>` : ''}
-    ${browse.length || pinnedAny || state.recents.length ? `<div class="hub-head"><h2>Live TV</h2><span class="hub-links">${browseEdit}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>` : ''}
-    ${hub.onNow.length ? `<div class="sub-title">On now</div><ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul>` : ''}
-    ${browse.length || pinnedAny ? `<div class="browse${browse.length > 8 ? ' scrolls' : ''}" style="--rows:${browseRows(browse.length)}">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
-        <span class="bt-name">${esc(prettyGroup(b.name))}</span><span class="muted">${b.count.toLocaleString()}</span></button>`).join('')}</div>` : ''}
-    ${state.recents.length ? `<div class="strip recent-strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
-    ${hub.shelves.movies.length || hub.loading ? `<div class="hub-head"><h2>Movies</h2><span class="hub-links"><a class="link" href="#/movies">Browse all</a></span></div>${hub.shelves.movies.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading movies…</p>'}` : ''}
-    ${hub.shelves.series.length || hub.loading ? `<div class="hub-head"><h2>Series</h2><span class="hub-links"><a class="link" href="#/series">Browse all</a></span></div>${hub.shelves.series.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading series…</p>'}` : ''}
-    ${watchlist.length ? `<div class="section-title">Watchlist</div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul>` : ''}
-    <div class="section-title">Library</div>
-    <ul class="lib-row">
-      <li class="lib" data-go="#/fav">${icon('star')}<span>Favorites</span><b>${state.favorites.length}</b></li>
-      <li class="lib" data-go="#/recent">${icon('clock')}<span>Recently watched</span><b>${state.recents.length}</b></li>
-      ${pl.length ? `<li class="lib" data-go="#/all">${icon('search')}<span>All channels</span></li>` : ''}
-      ${pl.length ? `<li class="lib" data-go="#/multi">${icon('grid')}<span>Multi-view</span></li>` : ''}
-      ${Object.keys(state.downloads || {}).length ? `<li class="lib" data-go="#/downloads">${icon('film')}<span>Downloads</span><b>${Object.keys(state.downloads).length}</b>${dlActive ? '<i class="lib-dot"></i>' : ''}</li>` : ''}
-    </ul>
-    <div class="section-title">Playlists</div>
-    ${pl.length
-      ? `<ul class="cards">${pl.map(p => card(`#/p/${p.id}`, p.kind === 'xtream' ? 'tv' : 'list', playlistTitle(p), playlistSub(p), p.id)).join('')}</ul>`
-      : `<div class="empty">${icon('tv', 'big')}<p><b>No playlists yet</b></p>
+    ${resumeChannel || cw.length ? `<section class="hub-sec"><div class="hub-head"><h2>Continue watching</h2></div>
+      <div class="cont-row">${resumeLive}${cw.map((e, i) => `<button class="cw" data-cw="${i}">
+        <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="cw-play">${icon('play')}</span><span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
+        <span class="cw-name">${esc(cwTitle(e.item))}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></button>`).join('')}</div></section>` : ''}
+    ${browse.length || pinnedAny || state.recents.length ? `<section class="hub-sec"><div class="hub-head"><h2>Live TV</h2><span class="hub-links">${browseEdit}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>
+    ${hub.onNow.length ? `<div class="row-head"><h3>On now</h3></div><ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul>` : ''}
+    ${state.recents.length ? `<div class="row-head"><h3>Your channels</h3></div><div class="strip recent-strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
+    ${browse.length ? `<div class="row-head"><h3>Groups</h3></div><div class="gchips">${browse.map(b => `<button class="gchip" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}"><i></i><span>${esc(prettyGroup(b.name))}</span><b>${b.count.toLocaleString()}</b></button>`).join('')}</div>` : ''}</section>` : ''}
+    ${hub.shelves.movies.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Movies</h2><span class="hub-links"><a class="link" href="#/movies">Browse all</a></span></div>${hub.shelves.movies.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading movies…</p>'}</section>` : ''}
+    ${hub.shelves.series.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Series</h2><span class="hub-links"><a class="link" href="#/series">Browse all</a></span></div>${hub.shelves.series.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading series…</p>'}</section>` : ''}
+    ${watchlist.length ? `<section class="hub-sec"><div class="hub-head"><h2>Watchlist</h2></div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul></section>` : ''}
+    ${pl.length ? '' : `<div class="empty">${icon('tv', 'big')}<p><b>No playlists yet</b></p>
           <p class="muted">Add an Xtream login, an M3U / M3U8 link, or a playlist file.</p>
           <button class="btn primary" id="add-first">Add playlist</button></div>`}`;
 
@@ -1106,7 +1133,7 @@ function catalogueEntry(p, tab, d) {
   const keep = list => (en ? list.filter(it => ok.has(it.group || '')) : list);
   const sorted = en ? [...cats].sort((a, b) => groupRank(a.category_name) - groupRank(b.category_name) || b.count - a.count) : cats;
   return { cats: all, keep, total: en ? cats.reduce((n, c) => n + c.count, 0) : d.total || 0,
-    recent: keep(toItems(p, tab, all, d.recent || [])), top: keep(toItems(p, tab, all, d.top || [])), groups: new Map(), searches: new Map(),
+    recent: keep(toItems(p, tab, all, d.recent || [])), top: keep(toItems(p, tab, all, d.top || [])), fresh: keep(toItems(p, tab, all, d.fresh || [])), groups: new Map(), searches: new Map(),
     groupList: sorted.map(c => ({ name: c.category_name || '', count: c.count, id: c.category_id })) };
 }
 async function requestVod(p, tab, { group, q }) {
@@ -1133,7 +1160,7 @@ async function loadVod(p, tab, { force = false } = {}) {
   if (vodCache.has(key) && !force) return;
   if (!force) {
     const cached = await db.get(`vod:${key}`);
-    if (cached && Date.now() - cached.at < DAY && (canSync() ? cached.overview : cached.items)) {
+    if (cached && Date.now() - cached.at < DAY && (canSync() ? cached.overview?.v === 2 : cached.items)) {
       vodCache.set(key, cached.overview ? catalogueEntry(p, tab, cached.overview) : cached.items);
       if (state.current === p && state.tab === tab) refreshPlaylistView();
       return;
@@ -1196,9 +1223,9 @@ const discoverMode = () => {
 };
 function cardHtml(it, key, k) {
   return `<li class="scard" data-shelf="${esc(key)}" data-k="${k}">
-    <span class="poster-img" data-initials="${initials(it.name)}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
-      ${it.rating ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
-    <span class="poster-name">${esc(it.name)}</span>${it.year ? `<span class="muted">${esc(it.year)}</span>` : ''}</li>`;
+    <span class="poster-img" data-initials="${initials(displayTitle(it.name))}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.scard')?.classList.add('noart');this.remove()">` : ''}
+      ${it.rating && it.rating < 9.5 ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
+    <span class="poster-name">${esc(it.kind === 'movie' || it.kind === 'series' ? displayTitle(it.name) : it.name)}</span>${it.year ? `<span class="muted">${esc(it.year)}</span>` : ''}</li>`;
 }
 function shelfHtml(title, key, items, { total = 0, group = null, pending = false } = {}) {
   shelfItems.set(key, items);
@@ -1955,9 +1982,23 @@ async function deleteChannels(p, ids) {
 }
 
 // ---------- channel actions ----------
+// Hand a stream to another app. On a Mac, VLC gets a one-track .xspf playlist (VLC opens those files) and
+// the link is copied too, for File > Open Network in VLC.
+function openExternal(x, c) {
+  if (!x.file) { location.href = x.href; return; }
+  const xml = s => String(s).replace(/[<>&"']/g, ch => `&#${ch.charCodeAt(0)};`);
+  const body = `<?xml version="1.0" encoding="UTF-8"?>\n<playlist xmlns="http://xspf.org/ns/0/" version="1"><trackList><track><location>${xml(c.url)}</location><title>${xml(c.name || 'Stream')}</title></track></trackList></playlist>\n`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([body], { type: 'application/xspf+xml' }));
+  a.download = `${String(c.name || 'stream').replace(/[\\/:*?"<>|]+/g, ' ').trim().slice(0, 80) || 'stream'}.xspf`;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+  navigator.clipboard?.writeText(c.url).catch(() => {});
+  toast('Click the downloaded file to play it in VLC. The link is copied too (VLC: File > Open Network).', { duration: 9000 });
+}
 function externalItems(c) {
   return [
-    ...externalPlayers(c.url).map(x => ({ label: `Open in ${x.name}`, fn: () => { location.href = x.href; } })),
+    ...externalPlayers(c.url).map(x => ({ label: `Open in ${x.name}`, fn: () => openExternal(x, c) })),
     { label: 'Copy stream link', fn: () => copyText(c.url, 'Link copied') },
   ];
 }
@@ -3301,9 +3342,13 @@ async function settingsSheet() {
       <label class="switch"><span><b>Merge duplicate channels</b><span class="muted">Show each channel once; the copies become backup streams, used automatically if one fails.</span></span><input type="checkbox" name="mergeDupes" ${s.mergeDupes !== false ? 'checked' : ''}></label>
       <label class="switch"><span><b>Continue watching on Home</b><span class="muted">Your last channel at the top of Home, one tap to play.</span></span><input type="checkbox" name="resumeCard" ${s.resumeCard !== false ? 'checked' : ''}></label>
       <div class="section-title">Playback</div>
-      ${isNative ? '' : `<label>Play films &amp; series in<select name="vodPlayer">
-        ${[['app', 'This app'], ['vlc', 'VLC (free; plays every format)'], ['infuse', 'Infuse'], ...(/Macintosh/.test(navigator.userAgent) ? [['iina', 'IINA (Mac, free)']] : [])].map(([v, l]) => `<option value="${v}" ${(s.vodPlayer || 'app') === v ? 'selected' : ''}>${l}</option>`).join('')}
-      </select></label>`}
+      ${isNative ? '' : (() => {
+        const opts = [['app', 'This app (built-in player)'], ['vlc', 'VLC (free; plays every format)'], ['infuse', 'Infuse'], ...(/Macintosh/.test(navigator.userAgent) ? [['iina', 'IINA (Mac, free)']] : [])];
+        const sel = (name, cur) => `<select name="${name}">${opts.map(([v, l]) => `<option value="${v}" ${(cur || 'app') === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+        return `<label>Play films &amp; series in${sel('vodPlayer', s.vodPlayer)}</label>
+          <label>Play live TV in${sel('livePlayer', s.livePlayer)}</label>
+          <p class="muted small">Another player opens the provider's stream itself, untouched. ${/Macintosh/.test(navigator.userAgent) && !isIOS ? 'On a Mac, VLC gets a small playlist file: click it in your downloads and VLC plays the stream.' : ''}</p>`;
+      })()}
       <label>Movies &amp; series languages<select name="vodLanguage">
         ${[['en', 'English only'], ['all', 'All languages']].map(([v, l]) => `<option value="${v}" ${(s.vodLanguage || 'en') === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
@@ -3331,7 +3376,7 @@ async function settingsSheet() {
         const mergeWas = state.settings.mergeDupes !== false, langWas = state.settings.vodLanguage;
         Object.assign(state.settings, {
           ...(f.has('proxy') ? { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')) } : {}),
-          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'),
+          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'), livePlayer: String(f.get('livePlayer') || state.settings.livePlayer || 'app'),
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
           showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on', resumeCard: f.get('resumeCard') === 'on',
         });
@@ -3801,9 +3846,10 @@ function playChannel(list, index) {
   if (!c) return;
   if (isNative && !c.offline) return playNative(list, index, c);
   // "Play films & series in VLC / Infuse / IINA": hand the provider's link straight to that app.
-  if (!isLiveChannel(c) && !c.offline && state.settings.vodPlayer && state.settings.vodPlayer !== 'app') {
-    const ext = externalPlayers(c.url).find(x => x.name.toLowerCase() === state.settings.vodPlayer);
-    if (ext) { toast(`Opening in ${ext.name}…`); location.href = ext.href; return; }
+  const choice = isLiveChannel(c) ? state.settings.livePlayer : state.settings.vodPlayer;
+  if (!c.offline && choice && choice !== 'app' && !/^blob:/.test(c.url)) {
+    const ext = externalPlayers(c.url).find(x => x.name.toLowerCase() === choice);
+    if (ext) { if (!ext.file) toast(`Opening in ${ext.name}…`); openExternal(ext, c); return; }
   }
   trackProgress(true);
   const prev = nowChannel();
@@ -3905,12 +3951,13 @@ function showPlayerError(c, err) {
   box.innerHTML = `<p>${esc(err.message + extra)}</p>
     <div class="player-error-actions">
       ${isNative ? '<button class="btn small primary" data-native>iPhone player</button>' : ''}
-      ${externalPlayers(c.url).map(x => `<a class="btn small" href="${esc(x.href)}">Open in ${x.name}</a>`).join('')}
+      ${externalPlayers(c.url).map((x, i) => `<a class="btn small" href="${esc(x.href)}" data-ext="${i}">Open in ${x.name}</a>`).join('')}
       <button class="btn small" data-copy>Copy link</button>
       <button class="btn small" data-retry>Retry</button>
     </div>`;
   box.hidden = false;
   box.querySelector('[data-copy]').onclick = () => copyText(c.url, 'Link copied');
+  box.querySelectorAll('[data-ext]').forEach(a => { a.onclick = e => { const x = externalPlayers(c.url)[+a.dataset.ext]; if (x?.file) { e.preventDefault(); openExternal(x, c); } }; });
   box.querySelector('[data-native]')?.addEventListener('click', () => openNativePlayer(c));
   box.querySelector('[data-retry]').onclick = () => playChannel(state.playing.list, state.playing.index);
   setStatus("Couldn't play this stream", true);

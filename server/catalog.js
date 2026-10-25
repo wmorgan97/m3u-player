@@ -19,13 +19,17 @@ const TTL = 12 * 3600_000;
 const cache = new Map();   // key -> { at, job: Promise<{ raw, gz }> }
 
 const num = v => (v === null || v === undefined || v === '' ? undefined : Number(v) || undefined);
+// A 9.5-10 rating on a provider listing is almost always one or two votes: treat it as no rating.
+const rate = v => { const r = num(v); return r && r > 0 && r < 9.5 ? Math.round(r * 10) / 10 : undefined; };
 const str = (v, max = 400) => (v ? String(v).slice(0, max) : undefined);
 const slimMovie = s => ({ stream_id: s.stream_id, name: str(s.name, 200), stream_icon: str(s.stream_icon, 300), category_id: s.category_id ?? s.category_ids?.[0],
-  rating: num(s.rating), year: str(s.year, 10), added: num(s.added), container_extension: str(s.container_extension, 8) });
+  rating: rate(s.rating), year: str(s.year, 10), added: num(s.added), container_extension: str(s.container_extension, 8) });
 const slimSeries = s => ({ series_id: s.series_id, name: str(s.name, 200), cover: str(s.cover, 300), category_id: s.category_id ?? s.category_ids?.[0],
-  rating: num(s.rating), releaseDate: str(s.releaseDate || s.release_date, 12), plot: str(s.plot, 240), genre: str(s.genre, 60), added: num(s.last_modified) });
+  rating: rate(s.rating), releaseDate: str(s.releaseDate || s.release_date, 12), plot: str(s.plot, 240), genre: str(s.genre, 60), added: num(s.last_modified) });
 // "4K-TOP - Dune (2021)" and "TOP - Dune (2021)" are the same title for a shelf: keep the first.
-const titleKey = it => String(it.name || '').toLowerCase().replace(/^[^-|]{1,14}[-|]\s*/, '').replace(/[^a-z0-9]+/g, '');
+// Every leading tag goes ("4K-D+ - ", "EN | ", "TOP - "), and country tags like "(US)".
+const titleKey = it => String(it.name || '').replace(/^(?:[A-Za-z0-9+&]{1,5}(?:-[A-Za-z0-9+&]{1,5})*\s*[-|:]\s+)+/, '')
+  .replace(/\((?:[A-Z]{2}(?:\/[A-Z]{2})?)\)/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 const uniq = (list, n) => { const seen = new Set(), out = []; for (const it of list) { const k = titleKey(it); if (k && !seen.has(k)) { seen.add(k); out.push(it); if (out.length >= n) break; } } return out; };
 
 async function api(base, user, pass, action) {
@@ -48,14 +52,31 @@ async function build(server, user, pass, kind) {
   const catList = cats.map(c => ({ category_id: c.category_id, category_name: str(c.category_name, 120), count: byCat.get(String(c.category_id))?.length || 0 })).filter(c => c.count);
   const byAdded = items.some(it => it.added) ? [...items].sort((a, b) => (b.added || 0) - (a.added || 0)) : [...items].reverse();
   const recent = uniq(byAdded, 300);
-  // Top rated, recent-ish: rated 7+, from the last three years (by year/release date, else when added).
-  const nowYear = new Date().getFullYear(), yearAgo = Date.now() / 1000 - 3 * 365 * 86400;
-  const yearOf = it => Number(String(it.year || it.releaseDate || '').slice(0, 4)) || 0;
-  const top = uniq(items.filter(it => (it.rating || 0) >= 7 && (yearOf(it) >= nowYear - 3 || (!yearOf(it) && (it.added || 0) > yearAgo)) && (it.stream_icon || it.cover))
-    .sort((a, b) => (b.rating || 0) - (a.rating || 0) || (b.added || 0) - (a.added || 0)), 120);
+  // Popular now. Listings carry no vote counts, so a rating alone is a poor signal. Instead:
+  //  - the provider's own "Trending / Popular / Top 10 / Box office" groups (strongest),
+  //  - how many versions it carries (4K, HD, per-platform copies: only big titles get several),
+  //  - a sensible rating (5-9.4), and how recent it is.
+  const nowYear = new Date().getFullYear(), now = Date.now() / 1000;
+  const yearOf = it => Number(String(it.year || it.releaseDate || '').slice(0, 4)) || Number((String(it.name || '').match(/\((19|20)\d\d\)/) || [''])[0].slice(1, 5)) || 0;
+  const CURATED = /trend|popular|top ?(10|20|50|100)\b|box ?office|most ?(watched|viewed|popular)|hot ?now|blockbuster/i;
+  const curatedCats = new Set(cats.filter(c => CURATED.test(c.category_name || '')).map(c => String(c.category_id)));
+  const copies = new Map(), curated = new Set();
+  for (const it of items) { const k = titleKey(it); copies.set(k, (copies.get(k) || 0) + 1); if (curatedCats.has(String(it.category_id))) curated.add(k); }
+  const art = it => it.stream_icon || it.cover;
+  const score = it => {
+    const k = titleKey(it), y = yearOf(it), r = it.rating;
+    return (curated.has(k) ? 4 : 0) + Math.min((copies.get(k) || 1) - 1, 4) * 0.9
+      + (r ? (r < 5 ? -2 : (r - 5) * 0.6) : 0)
+      + (y >= nowYear - 1 ? 1.6 : y >= nowYear - 3 ? 0.8 : y && y < nowYear - 8 ? -1 : 0)
+      + ((it.added || 0) > now - 45 * 86400 ? 0.5 : 0);
+  };
+  const top = uniq(items.filter(it => art(it) && (curated.has(titleKey(it)) || yearOf(it) >= nowYear - 4 || (!yearOf(it) && (it.added || 0) > now - 365 * 86400)))
+    .map(it => [score(it), it]).sort((a, b) => b[0] - a[0]).map(x => x[1]), 120);
+  // New releases: this year's and last year's titles, newest added first (not old films the provider just added).
+  const fresh = uniq(byAdded.filter(it => art(it) && yearOf(it) >= nowYear - 1), 120);
   const names = items.map(it => (it.name || '').toLowerCase());
   console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  return { items, names, byCat, overview: JSON.stringify({ at: Date.now(), cats: catList, recent, top, total: items.length }) };
+  return { items, names, byCat, overview: JSON.stringify({ at: Date.now(), v: 2, cats: catList, recent, top, fresh, total: items.length }) };
 }
 
 export async function handleCatalog(req, res, url, send, allowed) {
