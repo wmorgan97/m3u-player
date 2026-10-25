@@ -56,7 +56,9 @@ export class Player {
   // Ways to play a URL, best first. Safari's own HLS player is preferred where
   // it exists (AirPlay, background audio); elsewhere hls.js is more reliable.
   modes(url) {
-    if (PROGRESSIVE.test(url)) return ['direct'];
+    // Our server's /hls?…url=<file> ends with the file's own name (.mkv/.mp4): it is HLS, never a plain file.
+    const isHls = /^\/hls\?/.test(url) || /\.m3u8(\?|#|$)/i.test(url);
+    if (!isHls && PROGRESSIVE.test(url)) return ['direct'];
     const native = !!this.video.canPlayType(HLS_MIME);
     const hlsjs = !!window.Hls?.isSupported();
     const order = native && (IS_SAFARI || this.preferNative || !hlsjs) ? ['native', 'hlsjs'] : ['hlsjs', 'native', 'direct'];
@@ -73,7 +75,9 @@ export class Player {
     // "loads" without ever rendering a frame — so the native attempt never errors and a
     // plain fallback is never reached. When we have a server repackager, use it FIRST for
     // anything that isn't already HLS or a plain media file.
-    const raw = !!tc && !isHls && !PROGRESSIVE.test(url) && !/^blob:/.test(url);
+    // With a server repackager, every non-HLS source goes through it first (browsers can't play .mkv at all,
+    // and it's what gives us conversion, subtitles and the VOD timeline); a downloaded blob plays directly.
+    const raw = !!tc && !isHls && !/^blob:/.test(url);
     const tries = [];
     if (/^blob:/.test(url)) tries.push([url, 'direct']);   // a downloaded file: play it straight from storage
     if (raw) for (const mode of this.modes(tc)) tries.push([tc, mode]);
