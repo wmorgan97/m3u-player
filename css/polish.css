@@ -160,3 +160,6 @@
   .form-actions { flex-wrap: wrap; }
   .form-actions .btn { flex: 1 1 calc(50% - 5px); }
 }
+
+/* Groups sheet: the drag handle owns the touch, so iOS never turns a drag into a page scroll */
+.ghandle { touch-action: none; -webkit-user-select: none; user-select: none; }

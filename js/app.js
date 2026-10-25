@@ -1663,17 +1663,33 @@ function groupsSheet(p, tab, { scroll = 0 } = {}) {
       list.onpointerdown = e => {
         const h = e.target.closest('[data-act="drag"]');
         if (!h) return;
-        drag = { li: h.closest('li') };
+        drag = { li: h.closest('li'), x: e.clientX, y: e.clientY };
         drag.li.classList.add('dragging');
         h.setPointerCapture(e.pointerId);
         e.preventDefault();
+        requestAnimationFrame(autoScroll);
+      };
+      const placeAt = (x, y) => {
+        const over = document.elementFromPoint(x, y)?.closest('.glist > li');
+        if (!over || over === drag.li) return;
+        const r = over.getBoundingClientRect();
+        list.insertBefore(drag.li, y < r.top + r.height / 2 ? over : over.nextSibling);
+      };
+      // Holding a group near the top or bottom edge scrolls the list, faster the closer you get,
+      // so a group can be carried any distance in one drag.
+      const EDGE = 80;
+      const autoScroll = () => {
+        if (!drag) return;
+        const r = el.getBoundingClientRect();
+        const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
+        const v = drag.y < top + EDGE ? -(top + EDGE - drag.y) : drag.y > bottom - EDGE ? drag.y - (bottom - EDGE) : 0;
+        if (v) { el.scrollTop += Math.max(-24, Math.min(24, v / 3)); placeAt(drag.x, drag.y); }
+        requestAnimationFrame(autoScroll);
       };
       list.onpointermove = e => {
         if (!drag) return;
-        const over = document.elementFromPoint(e.clientX, e.clientY)?.closest('.glist > li');
-        if (!over || over === drag.li) return;
-        const r = over.getBoundingClientRect();
-        list.insertBefore(drag.li, e.clientY < r.top + r.height / 2 ? over : over.nextSibling);
+        drag.x = e.clientX; drag.y = e.clientY;
+        placeAt(e.clientX, e.clientY);
       };
       list.onpointerup = list.onpointercancel = async () => {
         if (!drag) return;
