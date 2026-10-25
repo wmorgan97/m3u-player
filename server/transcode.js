@@ -26,6 +26,8 @@ const START_TIMEOUT_MS = 25_000;
 // for 1080p50 sports feeds; copy mode measured 0.9-2.1s cold on this provider. Opt in with TRANSCODE_VIDEO=1.
 const REENCODE = process.env.TRANSCODE_VIDEO === '1';
 const VOD_SEG_S = 4;                     // VOD: fixed 4-second segments, so the whole playlist is known up front
+const ENC_SEG_S = 2;                     // …2-second ones while converting, so the first picture comes sooner
+const HEAD_SEGS = 8;                     // a conversion run starts with this many segments at the fastest preset, then re-runs at normal quality
 const READY_SEGMENTS = REENCODE ? 2 : 1;   // copy-mode segments are keyframe-aligned (2-4s): one is buffer enough
 const START_BEHIND_LIVE_S = REENCODE ? 3 : 4; // start playback this far behind the live edge so there's always buffer in hand
 
@@ -132,23 +134,25 @@ function encodeFilters(v = {}) {
   f.push('format=yuv420p');
   return f.join(',');
 }
-function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0, subs = [], enc = false, height = 0, vinfo = null } = {}) {
+function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0, subs = [], enc = false, height = 0, vinfo = null, segLen = VOD_SEG_S, fast = false } = {}) {
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '2',
     '-rw_timeout', '15000000',                                   // 15s: a dead upstream fails fast instead of hanging
     // Live TS: open fast with a small probe. Files (mkv/mp4): probe properly, or ffmpeg misses the B-frame
     // reorder depth and writes frames with no decode timestamps, which freezes players after half a second.
-    ...(vod ? [] : ['-probesize', '500000', '-analyzeduration', '500000']),
-    ...(vod && fromIdx > 0 ? ['-ss', String(fromIdx * VOD_SEG_S)] : []),
+    ...(vod ? ['-probesize', '10000000', '-analyzeduration', '2000000'] : ['-probesize', '500000', '-analyzeduration', '500000']),
+    ...(vod && fromIdx > 0 ? ['-ss', String(fromIdx * segLen)] : []),
+    ...(vod && fast ? ['-t', String(HEAD_SEGS * segLen)] : []),   // the quick head of a run
     '-fflags', '+genpts+flush_packets', '-i', target,
     '-map', '0:v:0?', '-map', `0:a:${track}?`,
     ...(enc
       // The device can't decode this video (HEVC / 10-bit / AV1): convert to H.264, at most 1080p, with a
       // keyframe at every segment boundary so every segment starts clean.
-      ? ['-c:v', 'libx264', '-preset', height > 1100 ? 'superfast' : 'veryfast', '-profile:v', 'high', '-level', '4.1',
-         '-vf', encodeFilters({ ...(vinfo || {}), height }), '-crf', '23', '-maxrate', '6M', '-bufsize', '12M', '-threads', '4',
-         ...(vod ? ['-force_key_frames', `expr:gte(t,n_forced*${VOD_SEG_S})`] : ['-g', '50', '-keyint_min', '25', '-tune', 'zerolatency']), '-sc_threshold', '0']
+      ? ['-c:v', 'libx264', '-preset', fast ? 'ultrafast' : height > 1000 ? 'superfast' : 'veryfast', '-profile:v', 'high', '-level', '4.1',
+         '-vf', encodeFilters({ ...(vinfo || {}), height }), '-crf', fast ? '26' : '23', '-maxrate', '6M', '-bufsize', '12M', '-threads', '4',
+         ...(fast ? ['-x264-params', 'rc-lookahead=4'] : []),
+         ...(vod ? ['-force_key_frames', `expr:gte(t,n_forced*${segLen})`] : ['-g', '50', '-keyint_min', '25', '-tune', 'zerolatency']), '-sc_threshold', '0']
       : REENCODE
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
          '-g', '25', '-keyint_min', '25', '-sc_threshold', '0', '-crf', '22', '-maxrate', '5M', '-bufsize', '10M', '-threads', '4']
@@ -158,7 +162,7 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
     ...(vod
       // A seek run keeps the file's own timestamps (copyts) so segment N holds time N*4s onwards. The run from
       // the start doesn't: copyts there leaves the first B-frames with negative times, which stalls players.
-      ? [...(fromIdx > 0 ? ['-copyts'] : []), '-f', 'hls', '-hls_time', String(VOD_SEG_S), '-hls_list_size', '0', '-start_number', String(fromIdx),
+      ? [...(fromIdx > 0 ? ['-copyts'] : []), '-f', 'hls', '-hls_time', String(segLen), '-hls_list_size', '0', '-start_number', String(fromIdx),
          '-hls_flags', 'split_by_time+temp_file', '-hls_segment_type', 'mpegts']
       // ~45 minutes of segments stay on disk (delete_segments trims older ones): pause, rewind and
       // jump-back work in the app; the player still starts near the live edge (EXT-X-START).
@@ -171,6 +175,24 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
   ];
 }
 
+// Spawn one ffmpeg run for a session. A conversion run is two-speed: a short head at the fastest preset so
+// the first picture arrives in a few seconds, then (once that head is done) a normal-quality run from where
+// the head stopped. The session always points at the live process.
+function spawnRun(s, fromIdx, { fast = s.enc } = {}) {
+  const opts = { vod: s.vod, fromIdx, audio: s.audio, track: s.track, subs: s.subs || [], enc: s.enc, height: s.height, vinfo: s.vinfo, segLen: s.segLen, fast: s.enc && fast };
+  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, opts), { windowsHide: true });
+  Object.assign(s, { proc, exited: false, errTail: '', startedAt: Date.now(), runStart: fromIdx, runAt: Date.now() });
+  proc.stderr.on('data', d => { s.errTail = (s.errTail + d).slice(-1500); });
+  proc.on('error', () => { if (s.proc === proc) s.exited = true; });
+  proc.on('exit', code => {
+    if (s.proc !== proc) return;                          // superseded by a seek
+    if (opts.fast && code === 0 && sessions.get(s.id) === s) return spawnRun(s, fromIdx + HEAD_SEGS, { fast: false });   // head done: continue at quality
+    s.exited = true;
+  });
+  if (fromIdx || opts.fast) console.log(`[hls] vod run from segment ${fromIdx} (${fromIdx * s.segLen}s)${opts.fast ? ' quick head' : ''}`);
+  return proc;
+}
+
 async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0, enc = false) {
   // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
   const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
@@ -178,27 +200,26 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
   const probe = vod ? await probeFile(target) : null;
   const subs = (probe?.subs || []).filter(s => s.text).map(s => s.i);
   const height = probe?.video?.height || 0;
-  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio, track, subs, enc, height, vinfo: probe?.video }), { windowsHide: true });
-  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: probe?.duration || 0, audio, track, subs, enc, height, vinfo: probe?.video };
+  const session = { id, proc: null, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0,
+    duration: probe?.duration || 0, audio, track, subs, enc, height, vinfo: probe?.video, segLen: enc ? ENC_SEG_S : VOD_SEG_S };
+  sessions.set(id, session);
   if (enc) console.log(`[hls] encoding ${id} (${probe?.video?.codec}${probe?.video?.bit10 ? ' 10-bit' : ''} ${height}p -> h264)`);
   console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
-  proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
-  proc.on('exit', () => { session.exited = true; });
-  proc.on('error', () => { session.exited = true; });
-  sessions.set(id, session);
+  if (vod) spawnRun(session, 0);
+  else {
+    const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod: false, audio, track, enc, height, vinfo: probe?.video }), { windowsHide: true });
+    session.proc = proc;
+    proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
+    proc.on('exit', () => { session.exited = true; });
+    proc.on('error', () => { session.exited = true; });
+  }
   return session;
 }
 
-// VOD: restart the run at segment index n (seek). Existing segments stay; the new run writes seg n, n+1, …
+// VOD: restart at segment index n (seek). Existing segments stay; the new run writes seg n, n+1, …
 function restartRun(s, n) {
-  try { s.proc.kill(); } catch {}
-  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio, track: s.track, subs: s.subs || [], enc: s.enc, height: s.height, vinfo: s.vinfo }), { windowsHide: true });
-  Object.assign(s, { proc, exited: false, errTail: '', startedAt: Date.now(), runStart: n });
-  proc.stderr.on('data', d => { s.errTail = (s.errTail + d).slice(-1500); });
-  proc.on('exit', () => { if (s.proc === proc) s.exited = true; });
-  proc.on('error', () => { if (s.proc === proc) s.exited = true; });
-  s.runAt = Date.now();
-  console.log(`[hls] vod run from segment ${n} (${n * VOD_SEG_S}s)`);
+  try { s.proc?.kill(); } catch {}
+  spawnRun(s, n);
 }
 
 // Highest segment index the current run has finished (from ffmpeg's own playlist).
@@ -212,11 +233,11 @@ async function producedUpTo(s) {
 
 // The whole film as a VOD playlist: N fixed-length segments and an end marker. Segments that don't
 // exist yet are made on request (see the segment branch of handleHls).
-function vodManifest(id, duration) {
-  const n = Math.ceil(duration / VOD_SEG_S);
-  let out = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:${VOD_SEG_S + 1}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
+function vodManifest(id, duration, segLen = VOD_SEG_S) {
+  const n = Math.ceil(duration / segLen);
+  let out = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:${segLen + 1}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
   for (let i = 0; i < n; i++) {
-    const len = i === n - 1 ? Math.max(0.5, duration - i * VOD_SEG_S) : VOD_SEG_S;
+    const len = i === n - 1 ? Math.max(0.5, duration - i * segLen) : segLen;
     out += `#EXTINF:${len.toFixed(3)},\n/hls/${id}/seg${i}.ts\n`;
   }
   return out + '#EXT-X-ENDLIST\n';
@@ -337,7 +358,7 @@ export async function handleHls(req, res, url) {
       const deadline = Date.now() + (s.enc ? 90_000 : 30_000), waitFrom = Date.now();   // converting the first seconds of a 1080p file can take a while
       while (Date.now() < deadline && sessions.get(id) === s) {
         try { st = await fs.stat(f); break; } catch {}
-        if (s.exited && (await producedUpTo(s)) < n) return send(res, 404, 'Segment unavailable');   // run ended before reaching it (past the end of the file)
+        if (s.exited && Date.now() - s.runAt > 3000 && (await producedUpTo(s)) < n) return send(res, 404, 'Segment unavailable');   // run ended before reaching it (past the end of the file)
         await new Promise(r => setTimeout(r, 120));
       }
       if (!st) { console.log(`[hls] vod seg${n} not ready after 30s (run from ${s.runStart}, exited=${s.exited}) ${(s.errTail || '').split('\n').filter(Boolean).pop() || ''}`); return send(res, 504, 'Segment not ready'); }
@@ -419,7 +440,7 @@ export async function handleHls(req, res, url) {
     if (s.duration > 0) {   // the playlist doesn't depend on any segment existing yet (they're made on request)
       console.log(`[hls] vod playlist ${id}`);
       res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
-      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration));
+      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration, s.segLen));
     }
   }
   const ok = await waitForPlaylist(s.dir, START_TIMEOUT_MS, () => sessions.get(id) === s, ready);
@@ -435,7 +456,7 @@ export async function handleHls(req, res, url) {
     if (!s.duration) s.duration = await probeDuration(t.href);
     if (s.duration > 0) {
       res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
-      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration));
+      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration, s.segLen));
     }
     // unknown length (probe failed): fall through and serve ffmpeg's growing playlist as before
   }
