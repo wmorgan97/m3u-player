@@ -101,6 +101,9 @@ async function init() {
     navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
   }
   if (!isNative) await detectServerProxy();
+  // The first screen rendered before we knew the server was there: ask for its guide data now.
+  if (state.current && !location.hash.startsWith('#/guide')) ensureGuide(state.filtered.slice(0, state.rendered));
+  else if (location.hash.startsWith('#/guide') && state.current) ensureGuide(guideScope(state.current));
   if (resumeChannel) ensureGuide([resumeChannel]);
   syncNow();
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); } });
