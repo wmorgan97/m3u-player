@@ -1356,19 +1356,53 @@ function groupsSheet(p, tab) {
   const hidden = new Set(p.hiddenGroups || []);
   const locked = new Set(p.lockedGroups || []);
   const what = tab === 'live' ? 'channel' : tab === 'movies' ? 'movie' : 'show';
+  const shown = groups.length - groups.filter(g => hidden.has(g.name)).length;
+  // Bulk visibility: type a word (e.g. "UK") to filter the list, then keep only those / hide those / show all.
   sheet(`<div class="sheet-title">Groups${tab === 'live' ? '' : ` · ${tab}`}</div>
-    <p class="muted center">Hidden groups disappear from lists. Locked groups need your parental PIN.</p>
-    <ul class="glist">${groups.map((g, i) => `<li>
-      <span class="row-text"><span class="row-name">${locked.has(g.name) ? icon('lock') : ''}${esc(g.name || UNGROUPED)}</span><span class="muted">${plural(g.count, what)}${hidden.has(g.name) ? ' · hidden' : ''}</span></span>
+    <p class="muted center">${shown} of ${groups.length} groups shown. Hidden groups disappear from lists, Browse and the guide.</p>
+    <label class="search gsearch">${icon('search')}<input id="g-q" type="search" placeholder="Filter groups, e.g. UK" autocomplete="off" autocorrect="off" spellcheck="false"></label>
+    <div class="gbulk">
+      <button class="btn small primary" data-bulk="only">Show only these</button>
+      <button class="btn small" data-bulk="hide">Hide these</button>
+      <button class="btn small" data-bulk="show">Show these</button>
+      <button class="btn small" data-bulk="all">Show all</button>
+    </div>
+    <ul class="glist">${groups.map((g, i) => `<li data-gname="${esc((g.name || UNGROUPED).toLowerCase())}" class="${hidden.has(g.name) ? 'is-hidden' : ''}">
+      <button class="icon-btn eye${hidden.has(g.name) ? '' : ' on'}" data-act="eye" data-g="${i}" aria-label="${hidden.has(g.name) ? 'Show group' : 'Hide group'}">${icon(hidden.has(g.name) ? 'eye-off' : 'eye')}</button>
+      <span class="row-text"><span class="row-name">${locked.has(g.name) ? icon('lock') : ''}${esc(prettyGroup(g.name) || UNGROUPED)}</span><span class="muted">${plural(g.count, what)}${hidden.has(g.name) ? ' · hidden' : ''}</span></span>
       <button class="btn small" data-act="more" data-g="${i}">Options</button>
       ${tab === 'live' ? `<button class="icon-btn" data-act="up" data-g="${i}" ${i ? '' : 'disabled'} aria-label="Move up">▲</button><button class="icon-btn" data-act="down" data-g="${i}" ${i < groups.length - 1 ? '' : 'disabled'} aria-label="Move down">▼</button>` : ''}
     </li>`).join('')}</ul>`, {
     onMount: el => {
+      const rows = [...el.querySelectorAll('.glist > li')];
+      const visibleRows = () => rows.filter(li => !li.hidden);
+      el.querySelector('#g-q').oninput = e => {
+        const q = e.target.value.trim().toLowerCase();
+        rows.forEach(li => { li.hidden = !!q && !li.dataset.gname.includes(q); });
+      };
+      const setHidden = async (fn) => {
+        const set = new Set(p.hiddenGroups || []);
+        fn(set);
+        p.hiddenGroups = [...set];
+        await save(p);
+        rerender();
+        groupsSheet(p, tab);
+      };
       el.onclick = async e => {
+        const bulk = e.target.closest('[data-bulk]');
+        if (bulk) {
+          const names = visibleRows().map(li => groups[rows.indexOf(li)].name);
+          const act = bulk.dataset.bulk;
+          if (act === 'all') return setHidden(s => s.clear());
+          if (act === 'only') return setHidden(s => { groups.forEach(g => s.add(g.name)); names.forEach(n => s.delete(n)); });
+          if (act === 'hide') return setHidden(s => names.forEach(n => s.add(n)));
+          if (act === 'show') return setHidden(s => names.forEach(n => s.delete(n)));
+        }
         const b = e.target.closest('[data-act]');
         if (!b) return;
         const i = +b.dataset.g;
         const g = groups[i];
+        if (b.dataset.act === 'eye') return setHidden(s => { if (s.has(g.name)) s.delete(g.name); else s.add(g.name); });
         if (b.dataset.act === 'up' || b.dataset.act === 'down') {
           const order = groups.map(x => x.name);
           const j = b.dataset.act === 'up' ? i - 1 : i + 1;
