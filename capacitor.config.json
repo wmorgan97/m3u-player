@@ -1,0 +1,11 @@
+{
+  "appId": "com.wmorgan97.m3uplayer",
+  "appName": "M3U Player",
+  "webDir": "www",
+  "backgroundColor": "#0e1014",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#0e1014",
+    "limitsNavigationsToAppBoundDomains": false
+  }
+}

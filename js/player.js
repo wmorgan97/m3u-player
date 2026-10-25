@@ -40,6 +40,7 @@ export class Player {
     this.cancel = null;
     this.tsToHls = true;
     this.wrap = url => url;   // e.g. route through the proxy
+    this.preferNative = false; // the iPhone app's web view: use iOS's own HLS player first
     this.onFatal = null;
     video.addEventListener('error', () => { if (this.ready) this.onFatal?.(mediaErrorMessage(video.error)); });
   }
@@ -57,7 +58,7 @@ export class Player {
     if (PROGRESSIVE.test(url)) return ['direct'];
     const native = !!this.video.canPlayType(HLS_MIME);
     const hlsjs = !!window.Hls?.isSupported();
-    const order = native && (IS_SAFARI || !hlsjs) ? ['native', 'hlsjs'] : ['hlsjs', 'native', 'direct'];
+    const order = native && (IS_SAFARI || this.preferNative || !hlsjs) ? ['native', 'hlsjs'] : ['hlsjs', 'native', 'direct'];
     return order.filter(m => (m === 'hlsjs' ? hlsjs : m === 'native' ? native : !native));
   }
 

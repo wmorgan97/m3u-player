@@ -5,6 +5,7 @@ import { net, fetchText, isMixed, streamUrl } from './net.js';
 import { Xtream, parseXtreamLink, liveChannels, movieItems, seriesItems } from './xtream.js';
 import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl } from './epg.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
+import { isNative, nativePlay, nativeShare } from './native.js';
 
 const PAGE = 150;
 const UNGROUPED = 'Ungrouped';
@@ -55,7 +56,8 @@ function fmtDay(t) {
   return diff === 0 ? 'Today' : diff === -1 ? 'Yesterday' : diff === 1 ? 'Tomorrow' : d.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' });
 }
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const isStandalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isStandalone = isNative || matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+if (isNative) document.documentElement.classList.add('native');
 const isLiveChannel = c => !c.kind || c.kind === 'live';
 
 const byId = id => state.playlists.find(p => p.id === id);
@@ -85,8 +87,8 @@ async function init() {
   window.addEventListener('hashchange', route);
   window.addEventListener('resize', debounce(sizeGuide, 100));
   route();
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
-  await detectServerProxy();
+  if (!isNative && 'serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (!isNative) await detectServerProxy();
   await Promise.all(state.playlists.map(p => loadGuide(p.id)));
   rerenderRows();
   backgroundRefresh();
@@ -136,6 +138,7 @@ function applySettings() {
   net.streamProxy = state.settings.streamProxy;
   player.tsToHls = state.settings.tsToHls;
   player.wrap = streamUrl;
+  player.preferNative = isNative;
 }
 
 async function save(p) {
@@ -739,11 +742,14 @@ async function copyText(text, message) {
 }
 
 function shareOrDownload(file, title) {
+  if (isNative) return download(file);
   if (navigator.canShare?.({ files: [file] })) navigator.share({ files: [file], title }).catch(() => {});
   else download(file);
 }
 
 function download(file) {
+  // The app's web view can't download files; hand them to the iOS share sheet instead.
+  if (isNative) return file.text().then(text => nativeShare(file.name, text)).catch(e => toast(e.message || 'Couldn’t share the file'));
   const a = document.createElement('a');
   a.href = URL.createObjectURL(file);
   a.download = file.name;
@@ -1112,6 +1118,7 @@ function showMulti() {
     const pl = new Player(v);
     pl.tsToHls = player.tsToHls;
     pl.wrap = streamUrl;
+    pl.preferNative = isNative;
     return pl;
   });
   multi.tiles.slice(0, multi.layout).forEach((c, i) => startTile(i, c));
@@ -1339,8 +1346,8 @@ function exportMenu(name, channels, header = {}) {
   const fileName = `${name.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'playlist'}.m3u`;
   const file = () => new File([toM3U(channels, header)], fileName, { type: 'audio/x-mpegurl' });
   menu(`Export ${plural(channels.length, 'channel')}`, [
-    navigator.canShare && { label: 'Share… (Save to Files, AirDrop, VLC)', fn: () => shareOrDownload(file(), name) },
-    { label: 'Download .m3u file', fn: () => download(file()) },
+    (isNative || navigator.canShare) && { label: 'Share… (Save to Files, AirDrop, VLC)', fn: () => shareOrDownload(file(), name) },
+    !isNative && { label: 'Download .m3u file', fn: () => download(file()) },
     { label: 'Copy as text', fn: () => copyText(toM3U(channels, header), 'Playlist copied') },
   ]);
 }
@@ -1519,7 +1526,8 @@ async function settingsSheet() {
   } catch {}
   sheet(`<div class="sheet-title">Settings</div>
     <form class="form" id="settings">
-      <div class="section-title">Proxy</div>
+      ${isNative ? `<div class="section-title">Connection</div>
+      <p class="muted">The iPhone app connects to any IPTV server directly, http:// included. No proxy needed.</p>` : `<div class="section-title">Proxy</div>
       ${serverProxy.available
         ? `<p class="muted">Your server’s built-in proxy is ${serverProxy.needsKey ? '<b>waiting for its key</b>' : 'active'}. Leave the address below empty to use it.</p>
            <button type="button" class="btn" id="server-key-2">${serverProxy.needsKey ? 'Enter server key' : 'Change server key'}</button>`
@@ -1527,7 +1535,7 @@ async function settingsSheet() {
       <label>Proxy address<input name="proxy" value="${esc(s.proxy)}" placeholder="https://m3u-proxy.you.workers.dev/?url={url}" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
       <label>Send streams through the proxy<select name="streamProxy">
         ${[['http', 'Only http:// streams (recommended)'], ['all', 'All streams'], ['off', 'Never']].map(([v, l]) => `<option value="${v}" ${s.streamProxy === v ? 'selected' : ''}>${l}</option>`).join('')}
-      </select></label>
+      </select></label>`}
       <div class="section-title">Playback</div>
       <label class="switch"><span><b>Try HLS for .ts links</b><span class="muted">Most IPTV providers also serve each .ts channel as .m3u8, which iPhone can play. Tried first, with the original link as backup.</span></span>
         <input type="checkbox" name="tsToHls" ${s.tsToHls ? 'checked' : ''}></label>
@@ -1668,6 +1676,7 @@ function playerMenu() {
     Number.isFinite(video.duration) && { label: `Speed (${video.playbackRate}×)…`, fn: () => menu('Playback speed', [0.75, 1, 1.25, 1.5, 2].map(r => ({ label: `${video.playbackRate === r ? '✓ ' : ''}${r}×`, fn: () => { video.playbackRate = r; } }))) },
     { label: state.sleepAt ? `Sleep timer (${Math.ceil((state.sleepAt - Date.now()) / MINUTE)} min left)…` : 'Sleep timer…', fn: sleepMenu },
     { label: 'Picture in Picture', fn: () => player.togglePip().catch(e => toast(e.message)) },
+    isNative && { label: 'Play in iPhone player (full screen)', fn: () => openNativePlayer(c) },
     isLiveChannel(c) && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
     { label: favUrls.has(c.url) ? 'Remove from Favorites' : 'Add to Favorites', fn: () => toggleFavorite(c, null).then(highlightStars) },
     ...externalItems(c),
@@ -1727,8 +1736,17 @@ function playChannel(list, index) {
       toast(`Resumed at ${fmtDur(pr.t)}`, { action: 'Start over', fn: () => { video.currentTime = 0; } });
     }
   }).catch(err => {
-    if (nowChannel() === c) showPlayerError(c, err);
+    if (nowChannel() !== c) return;
+    showPlayerError(c, err);
+    // The iPhone's own player handles streams the web view can't (http://, custom headers).
+    if (isNative) { toast('Opening in the iPhone player'); openNativePlayer(c); }
   });
+}
+
+function openNativePlayer(c) {
+  if (nowChannel() === c) stopPlaying();
+  addRecent(c);
+  nativePlay(c).catch(e => toast(e.message || 'Couldn’t open the iPhone player'));
 }
 
 function showPlayerError(c, err) {
@@ -1736,12 +1754,14 @@ function showPlayerError(c, err) {
   const extra = isMixed(c.url) && !net.proxy ? ' This is an http:// stream; set up the free proxy in Settings to play it here.' : '';
   box.innerHTML = `<p>${esc(err.message + extra)}</p>
     <div class="player-error-actions">
+      ${isNative ? '<button class="btn small primary" data-native>iPhone player</button>' : ''}
       ${externalPlayers(c.url).map(x => `<a class="btn small" href="${esc(x.href)}">Open in ${x.name}</a>`).join('')}
       <button class="btn small" data-copy>Copy link</button>
       <button class="btn small" data-retry>Retry</button>
     </div>`;
   box.hidden = false;
   box.querySelector('[data-copy]').onclick = () => copyText(c.url, 'Link copied');
+  box.querySelector('[data-native]')?.addEventListener('click', () => openNativePlayer(c));
   box.querySelector('[data-retry]').onclick = () => playChannel(state.playing.list, state.playing.index);
   setStatus("Couldn't play this stream", true);
 }

@@ -37,6 +37,21 @@ A free IPTV player for iPhone, built as an installable web app (PWA). It has the
 
 It opens full-screen like a native app, starts offline, and iOS keeps its data.
 
+## iPhone app (native)
+
+The same app, packaged as a real iPhone app. It doesn't need a server or proxy: it connects to any IPTV server directly (http:// included), and streams the web view can't play open in the iPhone's own full-screen player (AirPlay, Picture in Picture, custom user-agent/referrer headers). Exports and backups use the iOS share sheet.
+
+**Get the .ipa:** GitHub builds it on every change to the app (Actions → *iOS app* → latest run → *Artifacts* → `M3U-Player-ipa`, a zip containing `M3U-Player.ipa`). Pushing a tag like `v1.0.0` also attaches it to a GitHub release.
+
+**Install it** with [Sideloadly](https://sideloadly.io) (Windows/Mac) or [AltStore](https://altstore.io):
+1. Connect your iPhone to the computer, open Sideloadly, drop in `M3U-Player.ipa`, enter your Apple ID, Start.
+2. On the iPhone: Settings → General → VPN & Device Management → trust your Apple ID. On iOS 16+ also turn on Settings → Privacy & Security → Developer Mode.
+3. With a free Apple ID the app must be re-signed every 7 days (Sideloadly can do this automatically over Wi‑Fi). A paid Apple Developer account ($99/yr) lasts a year.
+
+Your playlists live inside the app. To move them from the web version, use Settings → Back up there and Restore in the app.
+
+Build it yourself on a Mac: `npm ci && npm run ios:sync && npx cap open ios`, then Run in Xcode.
+
 ## Host it on your own VPS (recommended)
 
 One command installs the app, a built-in proxy and automatic HTTPS on a Debian/Ubuntu VPS. No domain needed (it uses a free `<your-ip>.sslip.io` address), and no Cloudflare.
@@ -87,5 +102,7 @@ sw.js                offline cache for the app shell
 server/server.js     self-hosting server: app files + built-in proxy
 deploy/install.sh    one-command VPS install (systemd + Caddy HTTPS)
 proxy/worker.js      optional Cloudflare Worker proxy
+js/native.js         bridge to the native iPhone app (native HTTP, player, share sheet)
+ios/                 native iPhone app (Capacitor); ios/App/App/NativePlayer.swift is the app's own plugin
 vendor/hls.min.js    hls.js (vendored, no build step)
 ```

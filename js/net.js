@@ -2,9 +2,12 @@
 // (if set) when the browser can't reach the server itself: http:// servers
 // on an https:// page, or servers that don't send CORS headers.
 
+import { isNative, nativeGet } from './native.js';
+
 export const net = { proxy: '', streamProxy: 'http' };
 
-export const isMixed = url => globalThis.location?.protocol === 'https:' && /^http:/i.test(url);
+// The native app isn't subject to browser blocking, so nothing counts as mixed content there.
+export const isMixed = url => !isNative && globalThis.location?.protocol === 'https:' && /^http:/i.test(url);
 
 export function viaProxy(url) {
   const p = net.proxy.trim();
@@ -14,7 +17,7 @@ export function viaProxy(url) {
 
 // streamProxy: 'off' | 'http' (only http:// streams on an https:// page) | 'all'
 export function streamUrl(url) {
-  if (!net.proxy.trim() || net.streamProxy === 'off') return url;
+  if (isNative || !net.proxy.trim() || net.streamProxy === 'off') return url;
   return net.streamProxy === 'all' || isMixed(url) ? viaProxy(url) : url;
 }
 
@@ -38,6 +41,16 @@ async function attempt(url, timeout) {
 }
 
 export async function fetchResponse(url, { timeout = 30000 } = {}) {
+  if (isNative) {
+    let res;
+    try {
+      res = await nativeGet(url, timeout);
+    } catch {
+      throw new Error("Couldn't reach the server. Check the address and your internet connection.");
+    }
+    if (!res.ok) throw new HttpError(res.status);
+    return res;
+  }
   let error;
   if (!isMixed(url)) {
     try { return await attempt(url, timeout); } catch (e) { error = e; }

@@ -7,9 +7,16 @@
   "scripts": {
     "start": "node server/server.js",
     "test": "node --test \"tests/**/*.test.js\"",
-    "vendor": "cp node_modules/hls.js/dist/hls.min.js vendor/hls.min.js"
+    "vendor": "cp node_modules/hls.js/dist/hls.min.js vendor/hls.min.js",
+    "build:web": "node scripts/build-web.js",
+    "ios:sync": "npm run build:web && npx cap sync ios"
   },
   "devDependencies": {
+    "@capacitor/cli": "8.5.2",
     "hls.js": "1.6.15"
+  },
+  "dependencies": {
+    "@capacitor/core": "8.5.2",
+    "@capacitor/ios": "8.5.2"
   }
 }
