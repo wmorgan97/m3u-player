@@ -95,6 +95,7 @@ export async function handleGuide(req, res, url, send, allowed) {
   let first = true;
   for (const id of ids) { body += `${first ? '' : ','}${JSON.stringify(id)}:${ix.chans.get(id)}`; first = false; }
   body += '}}';
+  console.log(`[guide] request: ${(q.ids || []).length} ids + ${(q.names || []).length} names -> ${ids.size} channels`);
   const gz = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
   send(res, 200, gz ? gzipSync(body) : body, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(gz ? { 'content-encoding': 'gzip', vary: 'accept-encoding' } : {}) });
 }

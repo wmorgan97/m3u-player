@@ -89,7 +89,12 @@ async function init() {
   window.addEventListener('hashchange', route);
   window.addEventListener('resize', debounce(sizeGuide, 100));
   route();
-  if (!isNative && 'serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (!isNative && 'serviceWorker' in navigator && location.protocol !== 'file:') {
+    // A new version took over: reload once so the phone runs it now, not on the next open (never mid-stream).
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !state.playing && !init.reloaded) { init.reloaded = true; location.reload(); } });
+    navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
+  }
   if (!isNative) await detectServerProxy();
   syncNow();
   document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
