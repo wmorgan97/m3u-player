@@ -520,3 +520,38 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
   .lib-head h2 { font-size: 30px; }
   #view.pl .shelf:has(.gtiles) { display: none; }   /* the sidebar already lists every group */
 }
+
+/* ---------- Main navigation: Home · Live TV · Movies · Series · Guide ---------- */
+.mainnav { display: flex; gap: 4px; }
+.mainnav a { display: flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: 999px; color: var(--muted); text-decoration: none; font-size: 14.5px; font-weight: 600; white-space: nowrap; }
+.mainnav a:hover { color: var(--text); background: var(--surface); }
+.mainnav a.on { color: var(--text); background: var(--surface-2); }
+.mainnav .nv-ico .ico { width: 18px; height: 18px; }
+.mainnav a.on .nv-ico .ico { color: var(--accent); }
+/* phone: a tab bar along the bottom */
+@media (max-width: 899px) {
+  .mainnav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; justify-content: space-around; gap: 0;
+    padding: 6px calc(var(--safe-right) + 6px) calc(var(--safe-bottom) + 6px) calc(var(--safe-left) + 6px);
+    background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-top: 1px solid var(--line); }
+  .mainnav a { flex: 1; flex-direction: column; gap: 3px; padding: 6px 2px; border-radius: 12px; font-size: 10.5px; font-weight: 600; }
+  .mainnav a.on { background: none; color: var(--accent); }
+  .mainnav .nv-ico .ico { width: 22px; height: 22px; }
+  #view { padding-bottom: calc(var(--safe-bottom) + 120px) !important; }
+  body.playing .mainnav { display: none; }
+  .toast { bottom: calc(var(--safe-bottom) + 84px); }
+}
+
+/* ---------- Home: clear section headers ---------- */
+.hub-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 30px 0 12px; }
+.hub-head h2 { margin: 0; font-size: 21px; font-weight: 750; letter-spacing: -.015em; }
+.hub-links { display: flex; gap: 16px; }
+.hub-links .link { font-size: 13.5px; font-weight: 600; color: var(--accent); text-decoration: none; background: none; border: 0; padding: 0; cursor: pointer; }
+.hub-loading { margin: 6px 0 4px; }
+.hero-car + .hub-head { margin-top: 22px; }
+@media (min-width: 900px) {
+  .topbar { gap: 10px; }
+  .topbar h1 { flex: 0 1 auto; }
+  .mainnav { margin: 0 auto 0 28px; }
+  .hub-head h2 { font-size: 26px; }
+  .hub-head { margin-top: 40px; }
+}

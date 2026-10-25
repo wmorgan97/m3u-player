@@ -20,7 +20,7 @@
 
 @media (min-width: 900px) {
   :root { --gutter: 24px; }
-  #view { max-width: 1240px; padding-left: var(--gutter); padding-right: var(--gutter); padding-bottom: 48px; }
+  #view { max-width: 1400px; padding-left: var(--gutter); padding-right: var(--gutter); padding-bottom: 48px; }
   .topbar { padding-left: 16px; padding-right: 16px; }
   .topbar h1 { font-size: 20px; }
   .chips { margin: 0; padding-left: 0; padding-right: 0; }

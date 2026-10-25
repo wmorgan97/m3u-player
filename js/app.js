@@ -96,6 +96,7 @@ async function init() {
   bindPlayer();
   new ResizeObserver(([e]) => document.documentElement.style.setProperty('--chrome-h', `${e.target.offsetHeight}px`)).observe($('.chrome'));
   bindKeys();
+  document.querySelectorAll('#mainnav [data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); });
   window.addEventListener('hashchange', route);
   window.addEventListener('resize', debounce(sizeGuide, 100));
   route();
@@ -106,6 +107,8 @@ async function init() {
     navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
   }
   await detectServerProxy();
+  detectedServer = true;
+  if (!state.current) homeRefresh();   // Home was drawn before the server was known: now fill Movies & Series
   // The first screen rendered before we knew the server was there: ask for its guide data now.
   if (state.current && !location.hash.startsWith('#/guide')) ensureGuide(state.filtered.slice(0, state.rendered));
   else if (location.hash.startsWith('#/guide') && state.current) ensureGuide(guideScope(state.current));
@@ -525,6 +528,7 @@ function route() {
     return;
   }
   if (kind === 'fav' || kind === 'recent' || kind === 'all') return showPlaylist(virtualPlaylist(kind));
+  if (kind === 'live' || kind === 'movies' || kind === 'series' || kind === 'tvguide') return openSection(kind);
   if (kind === 'multi') return showMulti();
   if (kind === 'downloads') return showDownloads();
   showHome();
@@ -542,6 +546,7 @@ function rerender() {
 }
 
 function setTopbar({ title, back = false, actions = [] }) {
+  queueMicrotask(updateNav);
   $('#title').textContent = title;
   $('#title').onclick = back ? null : () => { if (location.hash && location.hash !== '#/') location.hash = '#/'; else scrollTo({ top: 0, behavior: 'smooth' }); };
   $('#title').classList.toggle('home-link', !back);
@@ -650,14 +655,16 @@ async function homeSearch(q) {
 // ---------- Home hub ----------
 // Everything worth watching in one place: a featured carousel, what's on live now, new and top-rated
 // movies and series, and "Because you watched…". Catalogues load in the background and Home refreshes.
+let detectedServer = false;
 const homeRefresh = debounce(() => { if (!state.current && (!location.hash || location.hash === '#/')) { const y = scrollY; showHome(); scrollTo(0, y); } }, 500);
 function homeHub(pl) {
   const hub = { hero: [], onNow: [], shelves: { movies: [], series: [] }, vodLink: {} };
   for (const p of pl.filter(p => p.kind === 'xtream' && p.content !== 'live')) {
     for (const tab of ['movies', 'series']) {
       const e = vodCache.get(vodKey(p, tab));
-      if (!e) { loadVod(p, tab).then(homeRefresh).catch(() => {}); continue; }
-      if (Array.isArray(e)) continue;
+      // Only through your server (the provider's own catalogue is 50-70MB); it may still be connecting.
+      if (!canSync()) { hub.loading = serverProxy.available || !detectedServer; continue; }
+      if (!e || Array.isArray(e)) { if (Array.isArray(e)) vodCache.delete(vodKey(p, tab)); hub.loading = true; loadVod(p, tab).then(homeRefresh).catch(() => {}); continue; }
       hub.vodLink[tab] ||= `#/p/${p.id}`;
       const what = tab === 'movies' ? 'movies' : 'series';
       if (e.recent.length) hub.shelves[tab].push({ title: `New ${what}`, key: `h-new-${tab}`, items: e.recent.slice(0, 30) });
@@ -783,17 +790,17 @@ function showHome() {
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
     ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search channels, movies and series" autocomplete="off" autocorrect="off" spellcheck="false"></label><div id="home-results" class="home-results" hidden></div>` : ''}
     ${hub.hero.length ? heroHtml(hub.hero) : ''}
-    ${resumeCardHtml(recentStrip[0]) || cw.length ? `<div class="section-title">Continue watching</div>
+    ${resumeCardHtml(recentStrip[0]) || cw.length ? `<div class="hub-head"><h2>Continue watching</h2></div>
       <div class="cont-row">${resumeCardHtml(recentStrip[0])}${cw.map((e, i) => `<button class="cw" data-cw="${i}">
         <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
         <span class="cw-name">${esc(e.item.name)}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></button>`).join('')}</div>` : ''}
-    ${browse.length || pinnedAny || state.recents.length ? `<div class="section-title split">Live TV${browseEdit}</div>` : ''}
+    ${browse.length || pinnedAny || state.recents.length ? `<div class="hub-head"><h2>Live TV</h2><span class="hub-links">${browseEdit}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>` : ''}
     ${hub.onNow.length ? `<div class="sub-title">On now</div><ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul>` : ''}
     ${browse.length || pinnedAny ? `<div class="browse${browse.length > 8 ? ' scrolls' : ''}" style="--rows:${browseRows(browse.length)}">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
         <span class="bt-name">${esc(prettyGroup(b.name))}</span><span class="muted">${b.count.toLocaleString()}</span></button>`).join('')}</div>` : ''}
     ${state.recents.length ? `<div class="strip recent-strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
-    ${hub.shelves.movies.length ? `<div class="section-title split">Movies${hub.vodLink.movies ? `<a class="link" href="${hub.vodLink.movies}">Browse all</a>` : ''}</div>${hub.shelves.movies.map(homeShelfHtml).join('')}` : ''}
-    ${hub.shelves.series.length ? `<div class="section-title split">Series${hub.vodLink.series ? `<a class="link" href="${hub.vodLink.series}">Browse all</a>` : ''}</div>${hub.shelves.series.map(homeShelfHtml).join('')}` : ''}
+    ${hub.shelves.movies.length || hub.loading ? `<div class="hub-head"><h2>Movies</h2><span class="hub-links"><a class="link" href="#/movies">Browse all</a></span></div>${hub.shelves.movies.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading movies…</p>'}` : ''}
+    ${hub.shelves.series.length || hub.loading ? `<div class="hub-head"><h2>Series</h2><span class="hub-links"><a class="link" href="#/series">Browse all</a></span></div>${hub.shelves.series.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading series…</p>'}` : ''}
     ${watchlist.length ? `<div class="section-title">Watchlist</div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul>` : ''}
     <div class="section-title">Library</div>
     <ul class="lib-row">
@@ -850,6 +857,23 @@ function showHome() {
 }
 let pendingQuery = '';
 let pendingGroup = null;   // a group to pre-select when the next playlist opens (home "Browse" tiles)
+let pendingTab = null;     // a tab (live / movies / series) to open the next playlist on (main navigation)
+
+// ---------- main navigation: Home · Live TV · Movies · Series · Guide ----------
+const liveSource = () => state.playlists.find(p => p.content !== 'vod' && (m3uKinds(p)?.live.length || (p.kind === 'xtream' && p.channels.length)));
+const vodSource = tab => state.playlists.find(p => p.kind === 'xtream' && p.content !== 'live') || state.playlists.find(p => m3uKinds(p)?.[tab]?.length);
+function openSection(kind) {
+  if (kind === 'tvguide') { const p = liveSource(); return location.replace(p ? `#/guide/${p.id}` : '#/'); }
+  const p = kind === 'live' ? liveSource() : vodSource(kind);
+  if (!p) { toast(kind === 'live' ? 'Add a playlist with live channels first' : `None of your playlists has ${kind}`); return location.replace('#/'); }
+  pendingTab = kind;
+  location.replace(`#/p/${p.id}`);
+}
+function updateNav() {
+  const hash = location.hash || '#/';
+  const on = hash === '#/' ? 'home' : hash.startsWith('#/guide') ? 'guide' : state.current ? (state.tab === 'live' ? 'live' : state.tab) : '';
+  document.querySelectorAll('#mainnav [data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === on));
+}
 
 // ---------- playlist view ----------
 // IPTV providers pad M3U lists with "category header" rows (### NEWS ###, ===== SPORTS =====)
@@ -925,7 +949,8 @@ function showPlaylist(p) {
   const showTabs = vodOn && (p.kind === 'xtream' || p._hasVod);
   // A VOD-only playlist (movies/series from one provider, live from another) opens on Movies, not an empty Live tab.
   const liveEmpty = p.content === 'vod' || (k && !k.live.length);
-  const firstTab = memo?.tab || (liveEmpty ? (!k || k.movies.length ? 'movies' : 'series') : 'live');   // Xtream has no M3U split (k is null)
+  const firstTab = pendingTab || memo?.tab || (liveEmpty ? (!k || k.movies.length ? 'movies' : 'series') : 'live');
+  pendingTab = null;   // Xtream has no M3U split (k is null)
   const tabBtn = (t, label) => `<button data-tab="${t}"${t === firstTab ? ' class="active"' : ''}>${label}</button>`;
   view.innerHTML = `
     ${showTabs ? `<div class="seg" id="seg">
@@ -957,6 +982,7 @@ function showPlaylist(p) {
     state.group = null;
     state.selecting = false;
     $('#seg').querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
+    queueMicrotask(updateNav);
     refreshPlaylistView();
     if (state.tab !== 'live' && p.kind === 'xtream') loadVod(p, state.tab);
   });
@@ -1082,7 +1108,7 @@ async function loadVod(p, tab, { force = false } = {}) {
   if (vodCache.has(key) && !force) return;
   if (!force) {
     const cached = await db.get(`vod:${key}`);
-    if (cached && Date.now() - cached.at < DAY && (cached.items || canSync())) {
+    if (cached && Date.now() - cached.at < DAY && (canSync() ? cached.overview : cached.items)) {
       vodCache.set(key, cached.overview ? catalogueEntry(p, tab, cached.overview) : cached.items);
       if (state.current === p && state.tab === tab) refreshPlaylistView();
       return;
