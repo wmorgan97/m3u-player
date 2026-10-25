@@ -4,6 +4,7 @@ import { Player, externalPlayers } from './player.js';
 import { net, fetchText, isMixed, streamUrl } from './net.js';
 import { Xtream, parseXtreamLink, liveChannels, movieItems, seriesItems } from './xtream.js';
 import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl } from './epg.js';
+import { groupSeries, vodMeta } from './vod.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, nativePlay, nativeShare } from './native.js';
 
@@ -184,7 +185,7 @@ async function save(p) {
   invalidate(p);
   if (p.id === 'fav') { state.favorites = p.channels; syncFavs(); await db.set('favorites', p.channels); }
   else if (p.id === 'recent') { state.recents = p.channels; await db.set('recents', p.channels); }
-  else if (!p.virtual) await db.putPlaylist(p);
+  else if (!p.virtual) { await db.putPlaylist(p); maybeUpdateGuide(p); }   // pinned/hidden groups changed → rescope the guide
 }
 
 async function createPlaylist(name, channels, extra = {}) {
@@ -444,6 +445,8 @@ function m3uKinds(p) {
   if (!p._kinds) {
     const k = { live: [], movies: [], series: [] };
     for (const c of p.channels) { if (!isSeparator(c)) k[channelKind(c)].push(c); }
+    k.series = groupSeries(k.series);            // "Show S01E04" rows become one series with seasons
+    for (const s of k.series) if (s.kind === 'series') s.src = p.id;
     p._kinds = k;
     p._hasVod = (k.movies.length + k.series.length) >= 10;
   }
@@ -657,11 +660,13 @@ function rowHtml(c, i) {
 }
 
 function posterHtml(it, i) {
+  const m = it.kind || it.year !== undefined ? null : vodMeta(it.name);   // plain M3U movie: tidy "Title (2023) HD"
+  const name = m?.title || it.name, year = it.year ?? m?.year;
   return `<li class="poster" data-i="${i}">
     <span class="poster-img" data-initials="${initials(it.name)}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
       ${it.rating ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
-    <span class="poster-name">${esc(it.name)}</span>
-    ${it.year ? `<span class="muted">${esc(it.year)}</span>` : ''}
+    <span class="poster-name">${esc(name)}</span>
+    ${year ? `<span class="muted">${esc(year)}</span>` : ''}
   </li>`;
 }
 
@@ -937,7 +942,7 @@ async function seriesSheet(s) {
   sheet(`<div class="detail" data-id="${esc(s.id)}"><div class="detail-title">${esc(s.name)}</div><p class="muted">Loading episodes…</p></div>`);
   let info;
   try {
-    info = await x.seriesInfo(s.sid);
+    info = s.seasons ? { episodes: s.seasons, info: {} } : await x.seriesInfo(s.sid);
   } catch (err) {
     if ($('#sheet .detail')?.dataset.id === s.id) $('#sheet .detail .muted').textContent = err.message;
     return;
@@ -945,14 +950,14 @@ async function seriesSheet(s) {
   if ($('#sheet .detail')?.dataset.id !== s.id) return;
   const eps = info?.episodes || {};
   const seasons = Object.keys(eps).sort((a, b) => a - b);
-  const episodesOf = season => (eps[season] || []).map(ep => ({
+  const episodesOf = season => (eps[season] || []).map(ep => s.seasons ? { ...ep, src: p.id, duration: '', group: `${s.name} · Season ${season}` } : ({
     id: `e${ep.id}`, kind: 'episode', src: p.id,
     name: ep.title || `${s.name} S${season}E${ep.episode_num}`,
     url: x.episodeUrl(ep.id, ep.container_extension),
     logo: ep.info?.movie_image || s.logo,
     group: `${s.name} · Season ${season}`,
     num: ep.episode_num, duration: ep.info?.duration || '', plot: ep.info?.plot || '',
-  }));
+  })));
   // Start on the season of the most recently watched episode.
   const urls = new Map(seasons.flatMap(se => episodesOf(se).map(e => [e.url, se])));
   const last = Object.values(state.progress).filter(e => urls.has(e.item.url)).sort((a, b) => b.at - a.at)[0];
@@ -1012,6 +1017,31 @@ async function loadGuide(pid) {
   return guides.get(pid);
 }
 
+// Channels worth parsing guide data for: the ones the user can actually see. Hidden groups never
+// count; on huge playlists only the pinned Home groups and favourites do, so the 19k-channel
+// case stays cheap. Programmes are matched by id and name, so the set is what bounds the work.
+const GUIDE_SCOPE_MAX = 6000;
+function guideChannels(p) {
+  const hidden = new Set(p.hiddenGroups || []);
+  const live = (m3uKinds(p)?.live || p.channels).filter(c => !hidden.has(c.group));
+  if (live.length <= GUIDE_SCOPE_MAX) return live;
+  const pinned = new Set(p.homeGroups || []);
+  return live.filter(c => pinned.has(c.group) || favUrls.has(c.url));
+}
+
+// Parse in a Web Worker so the main thread never stalls; falls back inline where module workers are missing.
+function parseEpg(urls, opts) {
+  if (typeof Worker === 'undefined') return loadEpg(urls, opts);
+  return new Promise((resolve, reject) => {
+    let w;
+    try { w = new Worker(new URL('./epg-worker.js', import.meta.url), { type: 'module' }); }
+    catch { return loadEpg(urls, opts).then(resolve, reject); }
+    w.onmessage = e => { w.terminate(); e.data.ok ? resolve(e.data.data) : reject(new Error(e.data.error)); };
+    w.onerror = () => { w.terminate(); loadEpg(urls, opts).then(resolve, reject); };
+    w.postMessage({ urls, from: opts.from, to: opts.to, wanted: { ids: [...opts.wanted.ids], names: [...opts.wanted.names] }, proxy: net.proxy });
+  });
+}
+
 const guideUpdates = new Map();
 function updateGuide(p, { silent = false } = {}) {
   if (guideUpdates.has(p.id)) return guideUpdates.get(p.id);
@@ -1022,9 +1052,11 @@ function updateGuide(p, { silent = false } = {}) {
   }
   if (!silent) toast('Updating TV guide…');
   const maxArchive = Math.min(3, p.channels.reduce((m, c) => Math.max(m, archiveDays(c)), 1));
-  const job = loadEpg(urls, { from: Date.now() - maxArchive * DAY, to: Date.now() + 2 * DAY, wanted: wantedFor(p.channels) })
+  const scope = guideChannels(p);
+  const job = parseEpg(urls, { from: Date.now() - maxArchive * DAY, to: Date.now() + 2 * DAY, wanted: wantedFor(scope) })
     .then(async data => {
       data.at = Date.now();
+      data.scope = scope.length;
       await db.set(`epg:${p.id}`, data);
       const g = new Guide(data);
       guides.set(p.id, g);
@@ -1041,14 +1073,10 @@ function updateGuide(p, { silent = false } = {}) {
   return job;
 }
 
-// Auto-loading the guide parses the whole EPG and matches every channel on the main
-// thread, which freezes the UI on startup for very large playlists. Above this size the
-// guide is not loaded automatically — it can still be loaded by hand from the guide screen.
-const AUTO_GUIDE_MAX = 8000;
+// Reload when the guide is old or when the set of visible/pinned channels it covers has changed.
 function maybeUpdateGuide(p) {
-  if ((p.channels?.length || 0) > AUTO_GUIDE_MAX) return;
   const g = guides.get(p.id);
-  const stale = !g || Date.now() - g.at > 12 * HOUR;
+  const stale = !g || Date.now() - g.at > 12 * HOUR || (g.scope !== undefined && g.scope !== guideChannels(p).length);
   if (stale && epgUrls(p).length && !(Date.now() - (p.epgFailedAt || 0) < HOUR)) updateGuide(p, { silent: true });
 }
 

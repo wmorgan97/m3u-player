@@ -1,0 +1,162 @@
+/* polish.css — loaded after app.css. Only existing tokens; the one tint is --accent at low alpha. */
+:root {
+  --tint: rgba(91, 147, 255, .12);     /* --accent @ 12% */
+  --tint-strong: rgba(91, 147, 255, .22);
+  --ring: 0 0 0 3px rgba(91, 147, 255, .12);
+  --ease: 160ms cubic-bezier(.2, .7, .2, 1);
+}
+
+/* ---------- motion: chips, buttons, rows, cards, tiles (150–200ms, reduced-motion aware) ---------- */
+.chip, .btn, .row, .card, .bt, .rc, .icon-btn, .menu-item, .sched-item, .gprog, .gch, .ep, .poster-img, .seg button, .tab,
+.form input, .form textarea, .form select, .search {
+  transition: background-color var(--ease), color var(--ease), border-color var(--ease), box-shadow var(--ease), filter var(--ease), transform var(--ease), opacity var(--ease);
+}
+.chip:active, .bt:active, .rc:active, .tiles .card:active { transform: scale(.97); }
+.btn:active:not(:disabled), .menu-item:active, .icon-btn:active:not(:disabled) { transform: scale(.98); }
+.row:active, .sched-item:active, .ep:active { transform: translateX(1px); }
+.chip.active { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; }
+  .chip:active, .bt:active, .rc:active, .tiles .card:active, .btn:active:not(:disabled), .menu-item:active, .row:active, .sched-item:active, .ep:active { transform: none; }
+}
+
+/* ---------- TV guide: time header ---------- */
+.guide { border-top: 0; }
+.guide-times {
+  height: 34px; background: rgba(10, 12, 17, .92);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line); box-shadow: 0 1px 0 rgba(0, 0, 0, .35);
+}
+.guide-corner { background: var(--surface); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.guide-corner .btn { padding: 5px 12px; font-size: 12px; font-weight: 700; letter-spacing: .02em; background: var(--accent); color: #fff; border-radius: 999px; }
+.guide-ticks span {
+  top: 0; height: 100%; display: flex; align-items: center; padding-left: 7px;
+  font-size: 11.5px; font-weight: 600; letter-spacing: .03em; font-variant-numeric: tabular-nums; color: var(--muted);
+  border-left: 1px solid var(--line);
+}
+
+/* ---------- TV guide: channel column (sticky) ---------- */
+.grow { height: 62px; border-bottom: 1px solid var(--line); }
+.gch {
+  padding: 0 8px 0 10px; gap: 9px; background: var(--surface); border-right: 1px solid var(--line);
+  box-shadow: 4px 0 10px -4px rgba(0, 0, 0, .5);
+}
+.gch:active { background: var(--surface-2); }
+.gch .logo { width: 36px; height: 36px; border-radius: 9px; }
+.gch span:last-child { font-size: 12.5px; font-weight: 600; line-height: 1.25; color: var(--text); }
+
+/* ---------- TV guide: programme cells, now line ---------- */
+.gprog {
+  top: 5px; bottom: 5px; gap: 2px; padding: 0 10px; border-radius: 9px;
+  background: var(--surface); border: 1px solid var(--line);
+}
+.gprog:active { filter: none; background: var(--surface-2); }
+.gprog b { font-size: 13px; line-height: 1.2; color: var(--text); }
+.gprog span { font-size: 11px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.gprog.live { background: var(--tint-strong); border-color: rgba(91, 147, 255, .45); box-shadow: inset 3px 0 0 var(--accent); }
+.gprog.live b { color: #fff; }
+.gprog.live span { color: rgba(242, 244, 248, .75); }
+.gprog.past { opacity: .5; }
+.guide-now { width: 2px; background: var(--danger); box-shadow: 0 0 8px rgba(255, 90, 95, .7); z-index: 2; }
+.guide-now::before { content: ""; position: absolute; top: 34px; left: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
+
+/* ---------- schedule sheet (programme list for one channel) ---------- */
+.sched { margin: 0 -4px; }
+.sched-day {
+  top: -10px; margin: 0; padding: 14px 8px 6px; background: var(--surface);
+  font-size: 11.5px; font-weight: 700; letter-spacing: .08em; color: var(--muted);
+}
+.sched-day:first-child { padding-top: 4px; }
+.sched-item { gap: 13px; padding: 12px 8px; border-top: 1px solid var(--line); border-radius: 0; }
+.sched-item .row-name { font-size: 15.5px; }
+.sched-item .clamp { margin-top: 2px; font-size: 13px; line-height: 1.3; }
+.sched-item.live { background: var(--tint); border-radius: 12px; border-top-color: transparent; box-shadow: inset 3px 0 0 var(--accent); }
+.sched-item.live + .sched-item { border-top-color: transparent; }
+.sched-item:active { background: var(--surface-2); }
+.sched-time { width: 50px; font-size: 14px; color: var(--muted); padding-top: 2px; }
+.sched-item.live .sched-time { color: var(--accent); }
+.sched .tag { margin-top: 3px; }
+
+/* ---------- bottom sheet & menu ---------- */
+.sheet { padding-top: 10px; border-radius: 20px 20px 0 0; box-shadow: 0 -12px 40px rgba(0, 0, 0, .55); border-top: 1px solid var(--line); }
+.sheet-grip { margin-bottom: 14px; background: var(--surface-2); }
+.sheet-title { margin-bottom: 16px; font-size: 17px; letter-spacing: -.01em; }
+.sheet > p.muted, .sheet .form > p.muted { font-size: 13.5px; line-height: 1.4; }
+.menu { gap: 0; border-radius: 14px; background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+.menu-item { padding: 14px 16px; min-height: 48px; border-radius: 0; font-size: 16px; }
+.menu-item + .menu-item:not(.cancel) { border-top: 1px solid var(--line); }
+.menu-item:active { background: var(--surface-2); }
+.menu-item.danger:active { background: rgba(255, 90, 95, .12); }
+.menu-item.cancel { margin-top: 0; border-top: 1px solid var(--line); background: var(--surface); color: var(--muted); }
+.menu-item.cancel:active { color: var(--text); }
+.confirm-text { line-height: 1.4; }
+.tabs { margin-bottom: 16px; }
+.tab { padding: 9px 4px; }
+
+/* ---------- forms & buttons: 44px targets, focus rings, danger states ---------- */
+.btn { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; padding: 10px 16px; border: 1px solid transparent; }
+.btn.small { min-height: 34px; padding: 6px 12px; }
+.btn:not(.primary):not(.danger-fill) { border-color: var(--line); }
+.btn:active:not(:disabled) { filter: brightness(1.12); }
+.btn.primary:active:not(:disabled) { filter: brightness(1.08); }
+.btn.danger { border-color: rgba(255, 90, 95, .35); }
+.btn.danger:active:not(:disabled) { background: rgba(255, 90, 95, .14); filter: none; }
+.btn:focus-visible, .chip:focus-visible, .icon-btn:focus-visible, .menu-item:focus-visible, .gprog:focus-visible, .gch:focus-visible, .tab:focus-visible, .seg button:focus-visible {
+  outline: none; box-shadow: var(--ring), 0 0 0 1px var(--accent);
+}
+.btn.primary:focus-visible { box-shadow: var(--ring), 0 0 0 1px #fff; }
+.form { gap: 14px; }
+.form label { gap: 7px; font-size: 13px; letter-spacing: .01em; }
+.form input:not([type=checkbox]), .form textarea, .form select { min-height: 44px; padding: 10px 13px; border-radius: 11px; }
+.form select { -webkit-appearance: none; appearance: none; padding-right: 36px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 19px) 50%, calc(100% - 14px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.form input:focus, .form textarea:focus, .form select:focus { border-color: var(--accent); box-shadow: var(--ring); }
+.form input[aria-invalid="true"], .form input.invalid, .form .error-field { border-color: var(--danger); }
+.form input[aria-invalid="true"]:focus, .form input.invalid:focus { box-shadow: 0 0 0 3px rgba(255, 90, 95, .14); }
+.form input::placeholder, .form textarea::placeholder { color: rgba(138, 147, 166, .6); }
+.form .switch { min-height: 44px; padding: 10px 12px; border-radius: 12px; background: var(--bg); border: 1px solid var(--line); }
+.switch > span { gap: 3px; }
+.switch > span b { font-weight: 600; font-size: 15px; }
+.switch > span .muted { font-size: 12.5px; line-height: 1.35; white-space: normal; }
+.switch input { width: 24px; height: 24px; }
+.switch input:focus-visible { outline: none; box-shadow: var(--ring); border-radius: 6px; }
+.form-actions { gap: 10px; margin-top: 6px; }
+.form-actions .btn { flex: 1 1 0; min-width: 0; }
+.file-btn { display: inline-flex; align-items: center; justify-content: center; }
+
+/* ---------- settings sheet: typography & section rhythm ---------- */
+.sheet .section-title { margin: 26px 2px 10px; font-size: 11.5px; letter-spacing: .09em; }
+.sheet .section-title:first-child, .sheet .form > .section-title:first-child { margin-top: 2px; }
+.sheet .form .section-title + p.muted, .sheet .section-title + p.muted { margin: -2px 2px 4px; }
+.sheet p.muted { font-size: 13.5px; line-height: 1.45; color: var(--muted); }
+.sheet p.muted b { color: var(--text); font-weight: 600; }
+.sheet .form-actions + .form-actions { margin-top: 0; }
+.sheet .form-actions .btn.danger { flex: 1 1 0; }
+.sheet .form > .btn { align-self: flex-start; }
+.sheet::-webkit-scrollbar { display: none; }
+
+/* ---------- toast: glassy, rounded, safe-area aware ---------- */
+.toast {
+  top: calc(var(--safe-top) + 62px);
+  left: max(16px, var(--safe-left)); right: max(16px, var(--safe-right)); transform: none;
+  width: max-content; max-width: calc(100% - 32px - var(--safe-left) - var(--safe-right)); margin: 0 auto;
+  padding: 12px 18px; border-radius: 16px;
+  background: rgba(31, 35, 46, .78);
+  -webkit-backdrop-filter: saturate(160%) blur(20px); backdrop-filter: saturate(160%) blur(20px);
+  border: 1px solid rgba(255, 255, 255, .08);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, .5), inset 0 1px 0 rgba(255, 255, 255, .05);
+  font-size: 14.5px; font-weight: 500; line-height: 1.3;
+  animation: toast-in 180ms cubic-bezier(.2, .8, .2, 1);
+}
+.toast button { padding: 6px 10px; margin: -6px -8px -6px 0; border-radius: 10px; }
+.toast button:active { background: var(--tint); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-8px) scale(.97); } }
+
+/* ---------- misc small screens: keep everything inside 375px ---------- */
+.gbulk .btn, .detail-actions .btn { min-height: 40px; }
+.center-actions .btn { flex: 1 1 auto; }
+@media (max-width: 400px) {
+  .form-actions { flex-wrap: wrap; }
+  .form-actions .btn { flex: 1 1 calc(50% - 5px); }
+}

@@ -134,10 +134,11 @@ export async function loadEpg(urls, options) {
 }
 
 export class Guide {
-  constructor({ programmes = {}, names = {}, at = 0 }) {
+  constructor({ programmes = {}, names = {}, at = 0, scope }) {
     this.programmes = programmes;
     this.names = names;
     this.at = at;
+    this.scope = scope;
     this.keys = new WeakMap();
   }
 
