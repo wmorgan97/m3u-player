@@ -216,3 +216,6 @@
 /* Toast for a job in progress: small spinner, stays until the result toast replaces it */
 .toast .spin { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--text) 25%, transparent); border-top-color: var(--accent); animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Long-press to move a channel: no iOS text-selection or callout on rows */
+#list .row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }

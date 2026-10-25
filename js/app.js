@@ -828,7 +828,7 @@ function onListClick(e) {
   const c = state.filtered[i];
   if (!c) return;
   if (el.classList.contains('poster')) return c.kind === 'series' ? seriesSheet(c) : movieSheet(c);
-  if (state.reordering) return;
+  if (state.reordering || suppressClick) { suppressClick = false; return; }
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (state.selecting) {
     if (state.selected.has(c.id)) state.selected.delete(c.id); else state.selected.add(c.id);
@@ -876,7 +876,7 @@ function toggleReordering() {
   state.selecting = false;
   updateTopbar();
   applyFilter({ keep: true });
-  if (state.reordering) toast('Drag ⠿ to move channels. Tap Done when finished.');
+  if (state.reordering) toast('Drag ⠿ to move channels. Tip: you can also long-press any channel.');
 }
 // Puts the group's channels in `ordered` order, keeping the group's slots in the playlist; backup copies
 // of a merged channel travel with it.
@@ -900,45 +900,69 @@ async function moveInGroup(c, toTop) {
   rerender();
   toast(toTop ? 'Moved to top of group' : 'Moved to bottom of group', { action: 'Undo', fn: async () => { p.channels = before; await save(p); rerender(); } });
 }
-// Drag rows by their handle; holding near the top/bottom edge scrolls the page.
+// Move channels within a group: drag the ⠿ handle in Reorder mode, or long-press any row (TiviMate-style).
+// While dragging, holding near the top or bottom edge scrolls the page, and the row follows.
+let drag = null, press = null;
 function bindRowDrag() {
   const list = $('#list');
-  let drag = null;
   const placeAt = (x, y) => {
     const over = document.elementFromPoint(x, y)?.closest('#list .row');
     if (!over || over === drag.li) return;
     const r = over.getBoundingClientRect();
-    list.insertBefore(drag.li, y < r.top + r.height / 2 ? over : over.nextSibling);
+    over.parentNode.insertBefore(drag.li, y < r.top + r.height / 2 ? over : over.nextSibling);
   };
+  const visibleTop = () => Math.max($('.chrome').getBoundingClientRect().bottom, $('.filters')?.getBoundingClientRect().bottom || 0);
   const autoScroll = () => {
     if (!drag) return;
-    const top = $('.chrome').offsetHeight + ($('.filters')?.offsetHeight || 0), EDGE = 90;
+    const top = visibleTop(), EDGE = 100;
     const v = drag.y < top + EDGE ? -(top + EDGE - drag.y) : drag.y > innerHeight - EDGE ? drag.y - (innerHeight - EDGE) : 0;
-    if (v) { scrollBy(0, Math.max(-28, Math.min(28, v / 2.5))); if (v > 0) renderMore(); placeAt(drag.x, Math.min(Math.max(drag.y, top + 6), innerHeight - 6)); }
-    requestAnimationFrame(autoScroll);
+    if (v && (v > 0 || scrollY > 0)) {
+      scrollBy(0, Math.max(-30, Math.min(30, v / 2.5)));
+      if (v > 0) renderMore();
+      placeAt(innerWidth / 2, Math.min(Math.max(drag.y, top + 8), innerHeight - 8));   // finger may be over the search bar: use the nearest row
+    }
+    setTimeout(autoScroll, 16);
+  };
+  const start = (li, e) => {
+    drag = { li, x: e.clientX, y: e.clientY };
+    li.classList.add('dragging');
+    try { li.setPointerCapture(e.pointerId); } catch {}
+    navigator.vibrate?.(10);
+    setTimeout(autoScroll, 16);
   };
   list.addEventListener('pointerdown', e => {
-    const h = state.reordering && e.target.closest('.rhandle');
-    if (!h) return;
-    drag = { li: h.closest('.row'), x: e.clientX, y: e.clientY };
-    drag.li.classList.add('dragging');
-    h.setPointerCapture(e.pointerId);
-    e.preventDefault();
-    requestAnimationFrame(autoScroll);
+    const li = e.target.closest('.row');
+    if (!li || !canReorder() || state.selecting) return;
+    if (state.reordering && e.target.closest('.rhandle')) { e.preventDefault(); return start(li, e); }
+    if (e.target.closest('button')) return;
+    // Long-press (0.45s without moving) picks the row up.
+    press = { li, x: e.clientX, y: e.clientY, timer: setTimeout(() => { press = null; suppressClick = true; start(li, e); }, 450) };
   });
-  list.addEventListener('pointermove', e => { if (drag) { drag.x = e.clientX; drag.y = e.clientY; placeAt(e.clientX, e.clientY); } });
+  // iOS: once a row is picked up, the finger moves the row, not the page.
+  list.addEventListener('touchmove', e => { if (drag) e.preventDefault(); }, { passive: false });
+  bindRowDrag.placeAt = placeAt;
+  if (bindRowDrag.bound) return;
+  bindRowDrag.bound = true;
+  // Window-level (added once), so the drag keeps working when the finger leaves the list (over the search bar, above it).
+  addEventListener('pointermove', e => {
+    if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 8) { clearTimeout(press.timer); press = null; }   // it's a scroll
+    if (drag) { drag.x = e.clientX; drag.y = e.clientY; bindRowDrag.placeAt(innerWidth / 2, e.clientY); }
+  });
   const drop = async () => {
+    if (press) { clearTimeout(press.timer); press = null; }
     if (!drag) return;
     drag.li.classList.remove('dragging');
     drag = null;
     const p = state.current;
-    const ordered = [...list.querySelectorAll('.row')].map(r => state.filtered[+r.dataset.i]).concat(state.filtered.slice(state.rendered));
-    await reorderGroup(p, state.group, ordered);
+    const ordered = [...$('#list').querySelectorAll('.row')].map(r => state.filtered[+r.dataset.i]).concat(state.filtered.slice(state.rendered));
+    const before = await reorderGroup(p, state.group, ordered);
     applyFilter({ keep: true });
+    if (!state.reordering) toast('Channel moved', { action: 'Undo', fn: async () => { p.channels = before; await save(p); rerender(); } });
   };
-  list.addEventListener('pointerup', drop);
-  list.addEventListener('pointercancel', drop);
+  addEventListener('pointerup', drop);
+  addEventListener('pointercancel', drop);
 }
+let suppressClick = false;   // the click that ends a long-press drag must not play the channel
 
 function toggleSelecting() {
   state.selecting = !state.selecting;
@@ -1856,7 +1880,7 @@ function groupsSheet(p, tab, { scroll = 0, q = '' } = {}) {
         drag.li.classList.add('dragging');
         h.setPointerCapture(e.pointerId);
         e.preventDefault();
-        requestAnimationFrame(autoScroll);
+        setTimeout(autoScroll, 16);
       };
       const placeAt = (x, y) => {
         const over = document.elementFromPoint(x, y)?.closest('.glist > li');
@@ -1877,7 +1901,7 @@ function groupsSheet(p, tab, { scroll = 0, q = '' } = {}) {
           // The finger may be over the sheet's header (or above the sheet): place against the nearest visible row.
           placeAt(drag.x, Math.min(Math.max(drag.y, Math.max(top, lr.top) + 6), Math.min(bottom, lr.bottom) - 6));
         }
-        requestAnimationFrame(autoScroll);
+        setTimeout(autoScroll, 16);
       };
       list.onpointermove = e => {
         if (!drag) return;
