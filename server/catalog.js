@@ -4,8 +4,11 @@
 // (typically a few MB -> under 1MB on the wire). Credentials are used for the upstream call only
 // and never logged or stored.
 //
-//   POST /vod?key=<PROXY_KEY>   body: { server, user, pass, kind: 'movies' | 'series' }
-//   ->  { cats: [{ category_id, category_name }], items: [slim provider records] }
+//   POST /vod?key=<PROXY_KEY>   body: { server, user, pass, kind: 'movies' | 'series', group?, q?, force? }
+//   overview (no group/q) -> { cats: [{ category_id, category_name, count }], recent: [...300 newest], total }
+//   group: <category_id>    -> { items: [that category's titles] }
+//   q: 'text'               -> { items: [up to 400 matching titles] }
+// The app never downloads the whole catalogue: a group is a few hundred titles, search is server-side.
 
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
@@ -36,14 +39,14 @@ async function build(server, user, pass, kind) {
   const [cats, list] = kind === 'movies'
     ? await Promise.all([api(server, user, pass, 'get_vod_categories'), api(server, user, pass, 'get_vod_streams')])
     : await Promise.all([api(server, user, pass, 'get_series_categories'), api(server, user, pass, 'get_series')]);
-  const raw = JSON.stringify({
-    at: Date.now(),
-    cats: cats.map(c => ({ category_id: c.category_id, category_name: str(c.category_name, 120) })),
-    items: list.map(kind === 'movies' ? slimMovie : slimSeries),
-  });
-  const gz = gzipSync(raw);
-  console.log(`[vod] ${kind}: ${list.length} titles, ${cats.length} categories, ${(raw.length / 1e6).toFixed(1)}MB -> ${(gz.length / 1e6).toFixed(1)}MB gz, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  return { raw, gz };
+  const items = list.map(kind === 'movies' ? slimMovie : slimSeries);
+  const byCat = new Map();
+  for (const it of items) { const k = String(it.category_id ?? ''); if (!byCat.has(k)) byCat.set(k, []); byCat.get(k).push(it); }
+  const catList = cats.map(c => ({ category_id: c.category_id, category_name: str(c.category_name, 120), count: byCat.get(String(c.category_id))?.length || 0 })).filter(c => c.count);
+  const recent = kind === 'movies' ? [...items].sort((a, b) => (b.added || 0) - (a.added || 0)).slice(0, 300) : items.slice(-300).reverse();
+  const names = items.map(it => (it.name || '').toLowerCase());
+  console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  return { items, names, byCat, overview: JSON.stringify({ at: Date.now(), cats: catList, recent, total: items.length }) };
 }
 
 export async function handleCatalog(req, res, url, send, allowed) {
@@ -57,7 +60,7 @@ export async function handleCatalog(req, res, url, send, allowed) {
   if (!allowed(base) || !q.user) return send(res, 400, 'Server address not allowed');
   const key = createHash('sha256').update(`${base.origin}|${q.user}|${q.pass || ''}|${kind}`).digest('hex');
   let hit = cache.get(key);
-  if (!hit || Date.now() - hit.at > TTL) {
+  if (!hit || Date.now() - hit.at > TTL || q.force) {
     hit = { at: Date.now(), job: build(base.origin, q.user, q.pass || '', kind) };
     cache.set(key, hit);
     hit.job.catch(() => cache.delete(key));
@@ -65,6 +68,14 @@ export async function handleCatalog(req, res, url, send, allowed) {
   }
   let data;
   try { data = await hit.job; } catch (e) { return send(res, 502, `Movies & series: ${e.message}`); }
+  let body;
+  if (q.q) {
+    const t = String(q.q).toLowerCase().slice(0, 80), out = [];
+    for (let i = 0; i < data.names.length && out.length < 400; i++) if (data.names[i].includes(t)) out.push(data.items[i]);
+    body = JSON.stringify({ items: out });
+  } else if (q.group !== undefined && q.group !== null) {
+    body = JSON.stringify({ items: data.byCat.get(String(q.group)) || [] });
+  } else body = data.overview;
   const gz = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
-  send(res, 200, gz ? data.gz : data.raw, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(gz ? { 'content-encoding': 'gzip', vary: 'accept-encoding' } : {}) });
+  send(res, 200, gz ? gzipSync(body) : body, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(gz ? { 'content-encoding': 'gzip', vary: 'accept-encoding' } : {}) });
 }

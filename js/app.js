@@ -37,7 +37,8 @@ const state = {
 const favUrls = new Set();
 const syncFavs = () => { favUrls.clear(); for (const c of state.favorites) favUrls.add(c.url); };
 const guides = new Map();    // playlist id -> Guide
-const vodCache = new Map();  // `${playlistId}:${tab}` -> items
+const vodCache = new Map();  // `${playlistId}:${tab}` -> items[] (direct from provider) or a server-backed catalogue (see loadVod)
+const vodPending = new Set();  // catalogue requests in flight: `${key}|g:<group>` / `${key}|q:<text>`
 const xtClients = new Map(); // playlist id -> Xtream
 
 const view = $('#view');
@@ -696,10 +697,55 @@ const vodKey = (p, tab) => `${p.id}:${tab}`;
 
 function currentItems() {
   const p = state.current;
-  if (p.kind === 'xtream') return state.tab === 'live' ? p.channels : vodCache.get(vodKey(p, state.tab)) || [];
+  if (p.kind === 'xtream') {
+    if (state.tab === 'live') return p.channels;
+    const entry = vodCache.get(vodKey(p, state.tab));
+    if (!entry) return [];
+    if (Array.isArray(entry)) return entry;
+    // Server-backed catalogue: a group or a search is fetched when first shown; "All" is the newest titles.
+    if (state.query && !/^\d+$/.test(state.query)) return entry.searches.get(state.query) || (requestVod(p, state.tab, { q: state.query }), []);
+    if (state.group !== null) return entry.groups.get(state.group) || (requestVod(p, state.tab, { group: state.group }), []);
+    return entry.recent;
+  }
   const k = m3uKinds(p);                       // M3U: split by inferred kind, separators already removed
   if (k) return k[state.tab] || k.live;
   return p.channels;
+}
+
+// ---- server-backed catalogue (server/catalog.js) ----
+async function vodApi(p, tab, extra = {}) {
+  const x = xtOf(p);
+  const res = await fetch(serverApi('vod'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ server: x.server, user: x.user, pass: x.pass, kind: tab, ...extra }) });
+  if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
+  return res.json();
+}
+const toItems = (p, tab, cats, list) => {
+  const x = xtOf(p);
+  const items = tab === 'movies' ? movieItems(x, cats, list) : seriesItems(cats, list);
+  items.forEach(it => { it.src = p.id; });
+  return items;
+};
+function catalogueEntry(p, tab, d) {
+  const cats = d.cats || [];
+  return { cats, total: d.total || 0, recent: toItems(p, tab, cats, d.recent || []), groups: new Map(), searches: new Map(),
+    groupList: cats.map(c => ({ name: c.category_name || '', count: c.count, id: c.category_id })) };
+}
+async function requestVod(p, tab, { group, q }) {
+  const key = vodKey(p, tab), entry = vodCache.get(key);
+  const tag = `${key}|${q !== undefined ? 'q:' + q : 'g:' + group}`;
+  if (!entry || Array.isArray(entry) || vodPending.has(tag)) return;
+  vodPending.add(tag);
+  try {
+    const cat = q === undefined ? entry.cats.find(c => (c.category_name || '') === group) : null;
+    const d = await vodApi(p, tab, q !== undefined ? { q } : { group: cat?.category_id ?? '' });
+    const items = toItems(p, tab, entry.cats, d.items || []);
+    if (q !== undefined) entry.searches.set(q, items); else entry.groups.set(group, items);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    vodPending.delete(tag);
+    if (state.current === p && state.tab === tab) applyFilter({ keep: true });
+  }
 }
 
 async function loadVod(p, tab, { force = false } = {}) {
@@ -707,8 +753,8 @@ async function loadVod(p, tab, { force = false } = {}) {
   if (vodCache.has(key) && !force) return;
   if (!force) {
     const cached = await db.get(`vod:${key}`);
-    if (cached && Date.now() - cached.at < DAY) {
-      vodCache.set(key, cached.items);
+    if (cached && Date.now() - cached.at < DAY && (cached.items || canSync())) {
+      vodCache.set(key, cached.overview ? catalogueEntry(p, tab, cached.overview) : cached.items);
       if (state.current === p && state.tab === tab) refreshPlaylistView();
       return;
     }
@@ -717,18 +763,18 @@ async function loadVod(p, tab, { force = false } = {}) {
   try {
     // With the VPS: the server fetches the provider's 50-70MB catalogue, slims and caches it, and the
     // phone gets a small gzipped list (server/catalog.js). Without it, straight from the provider.
-    let cats, list;
     if (canSync()) {
-      const res = await fetch(serverApi('vod'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ server: x.server, user: x.user, pass: x.pass, kind: tab }) });
-      if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
-      ({ cats, items: list } = await res.json());
+      const d = await vodApi(p, tab, force ? { force: 1 } : {});
+      const entry = catalogueEntry(p, tab, d);
+      vodCache.set(key, entry);
+      db.set(`vod:${key}`, { at: Date.now(), overview: d }).catch(() => {});
     } else {
-      [cats, list] = tab === 'movies' ? await Promise.all([x.categories('vod'), x.vodStreams()]) : await Promise.all([x.categories('series'), x.seriesList()]);
+      const [cats, list] = tab === 'movies' ? await Promise.all([x.categories('vod'), x.vodStreams()]) : await Promise.all([x.categories('series'), x.seriesList()]);
+      const items = tab === 'movies' ? movieItems(x, cats, list) : seriesItems(cats, list);
+      items.forEach(it => { it.src = p.id; });
+      vodCache.set(key, items);
+      db.set(`vod:${key}`, { at: Date.now(), items }).catch(() => {});
     }
-    const items = tab === 'movies' ? movieItems(x, cats, list) : seriesItems(cats, list);
-    items.forEach(it => { it.src = p.id; });
-    vodCache.set(key, items);
-    db.set(`vod:${key}`, { at: Date.now(), items }).catch(() => {});
     if (state.current === p && state.tab === tab) refreshPlaylistView();
   } catch (err) {
     if (state.current === p && state.tab === tab) $('#list').innerHTML = `<li class="empty small">${esc(err.message)}</li>`;
@@ -737,10 +783,11 @@ async function loadVod(p, tab, { force = false } = {}) {
 
 function renderChips() {
   const p = state.current;
-  const groups = cachedGroups(p, currentItems(), p.kind === 'xtream' ? 'x:' + state.tab : state.tab).filter(g => !p.hiddenGroups?.includes(g.name));
+  const entry = p.kind === 'xtream' && state.tab !== 'live' ? vodCache.get(vodKey(p, state.tab)) : null;
+  const groups = (entry && !Array.isArray(entry) ? entry.groupList : cachedGroups(p, currentItems(), p.kind === 'xtream' ? 'x:' + state.tab : state.tab)).filter(g => !p.hiddenGroups?.includes(g.name));
   if (state.group !== null && !groups.some(g => g.name === state.group)) state.group = null;
   const locked = g => !p.virtual && p.lockedGroups?.includes(g) && !state.unlocked;
-  const visibleCount = groups.filter(g => !locked(g.name)).reduce((n, g) => n + g.count, 0);
+  const visibleCount = entry && !Array.isArray(entry) ? entry.total : groups.filter(g => !locked(g.name)).reduce((n, g) => n + g.count, 0);
   const chip = (label, n, active, attr, lock) =>
     `<button class="chip ${active ? 'active' : ''}" ${attr}>${lock ? icon('lock') : ''}${esc(label)}<span>${lock ? '' : n.toLocaleString()}</span></button>`;
   const showGroups = groups.length > 1 || (groups[0] && groups[0].name);
@@ -766,7 +813,9 @@ function applyFilter({ keep = false } = {}) {
     return c.name.toLowerCase().includes(q) || g.toLowerCase().includes(q);
   });
   const what = state.tab === 'movies' ? 'movie' : state.tab === 'series' ? 'series' : p.id === 'fav' ? 'item' : 'channel';
-  $('#q').placeholder = `Search ${what === 'series' ? `${items.length.toLocaleString()} series` : plural(items.length, what)}`;
+  const entry = p.kind === 'xtream' && state.tab !== 'live' ? vodCache.get(vodKey(p, state.tab)) : null;
+  const count = entry && !Array.isArray(entry) ? entry.total : items.length;
+  $('#q').placeholder = `Search ${what === 'series' ? `${count.toLocaleString()} series` : plural(count, what)}`;
   const list = $('#list');
   list.classList.toggle('grid', state.tab !== 'live' && state.current.kind === 'xtream');
   list.innerHTML = '';
@@ -776,7 +825,7 @@ function applyFilter({ keep = false } = {}) {
     while (state.rendered < Math.min(keepRows, state.filtered.length)) renderMore();
     if (keep) scrollTo(0, keepY);
   } else {
-    const loading = state.tab !== 'live' && !vodCache.has(vodKey(p, state.tab));
+    const loading = state.tab !== 'live' && (!vodCache.has(vodKey(p, state.tab)) || [...vodPending].some(t => t.startsWith(vodKey(p, state.tab) + '|')));
     const msg = loading ? `Loading ${state.tab}…`
       : items.length ? 'No matches.'
       : p.id === 'fav' ? 'Tap the star on any channel or movie to add it here.'
@@ -1996,7 +2045,7 @@ function accountSheet(p) {
 
 function groupsSheet(p, tab, { scroll = 0, q = '' } = {}) {
   const items = tab === 'live' ? p.channels : vodCache.get(vodKey(p, tab)) || [];
-  const groups = groupsOf(items);
+  const groups = Array.isArray(items) ? groupsOf(items) : items.groupList;
   const hidden = new Set(p.hiddenGroups || []);
   const locked = new Set(p.lockedGroups || []);
   const what = tab === 'live' ? 'channel' : tab === 'movies' ? 'movie' : 'show';
