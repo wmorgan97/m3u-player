@@ -91,3 +91,10 @@
   .epg-row .row-name { font-size: 14px; }
   .epg-row .clamp { font-size: 12.5px; }
 }
+
+}
+@media (min-width: 1100px) {
+  .epg-cur.has-img { display: grid; grid-template-columns: 180px 1fr; grid-template-rows: auto auto auto auto; column-gap: 16px; }
+  .epg-cur-img { grid-row: 1 / 5; width: 180px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 12px; background: var(--surface-2); }
+  .epg-cur-head .pill { padding: 2px 8px; font-size: 11px; }
+}

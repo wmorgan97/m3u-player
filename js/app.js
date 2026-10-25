@@ -803,8 +803,9 @@ function renderEpgPanel() {
   const earlier = archiveDays(c) ? list.slice(Math.max(0, (cur ? i : i < 0 ? list.length : i) - 6), cur ? i : i < 0 ? list.length : i).reverse() : [];
   const row = (p, k, cls = '') => `<li class="epg-row ${cls}" data-k="${k}"><span class="epg-time">${fmtTime(p[0])}</span><span class="row-text"><span class="row-name">${esc(p[2])}</span>${p[3] ? `<span class="muted clamp">${esc(p[3])}</span>` : ''}</span>${cls === 'past' ? `<span class="tag">${icon('play')}</span>` : ''}</li>`;
   el.innerHTML = `
-    ${cur ? `<div class="epg-cur" data-k="${i}">
-      <div class="epg-cur-head"><span class="tag live">ON NOW</span><span class="muted">${fmtRange(cur)}</span></div>
+    ${cur ? `<div class="epg-cur${cur[4]?.img ? ' has-img' : ''}" data-k="${i}">
+      ${cur[4]?.img ? `<img class="epg-cur-img" src="${esc(cur[4].img)}" alt="" referrerpolicy="no-referrer" loading="lazy" onerror="this.remove()">` : ''}
+      <div class="epg-cur-head"><span class="tag live">ON NOW</span><span class="muted">${fmtRange(cur)}</span>${cur[4]?.new ? '<span class="pill new">NEW</span>' : ''}${cur[4]?.s ? `<span class="pill">S${cur[4].s} E${cur[4].e}</span>` : ''}</div>
       <div class="epg-cur-title">${esc(cur[2])}</div>
       <span class="bar"><i style="width:${(((now - cur[0]) / (cur[1] - cur[0])) * 100).toFixed(1)}%"></i></span>
       ${cur[3] ? `<p class="epg-cur-desc">${esc(cur[3])}</p>` : ''}
