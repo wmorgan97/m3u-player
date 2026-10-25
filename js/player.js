@@ -67,13 +67,19 @@ export class Player {
   async play(url) {
     const token = ++this.token;
     let lastError;
+    const tc = this.transcode?.(url);
+    const isHls = /\.m3u8(\?|#|$)/i.test(url);
+    // A raw MPEG-TS stream (the usual IPTV case) doesn't decode in Safari, and it often
+    // "loads" without ever rendering a frame — so the native attempt never errors and a
+    // plain fallback is never reached. When we have a server repackager, use it FIRST for
+    // anything that isn't already HLS or a plain media file.
+    const raw = !!tc && !isHls && !PROGRESSIVE.test(url);
     const tries = [];
+    if (raw) for (const mode of this.modes(tc)) tries.push([tc, mode]);
     for (const candidate of this.candidates(url)) {
       for (const mode of this.modes(candidate)) tries.push([candidate, mode]);
     }
-    // Last resort: have our server repackage the raw stream into HLS so Safari can play it.
-    const tc = this.transcode?.(url);
-    if (tc) for (const mode of this.modes(tc)) tries.push([tc, mode]);
+    if (!raw && tc) for (const mode of this.modes(tc)) tries.push([tc, mode]);
     for (const [candidate, mode] of tries) {
       try {
         await this.attempt(candidate, mode);

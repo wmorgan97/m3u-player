@@ -56,10 +56,11 @@ async function startSession(id, target) {
   const args = [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2',
-    '-fflags', '+genpts', '-i', target,
+    '-probesize', '1000000', '-analyzeduration', '1000000',   // open the input fast (don't over-probe a known TS)
+    '-fflags', '+genpts+nobuffer', '-i', target,
     '-map', '0:v:0?', '-map', '0:a:0?',
     '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
-    '-f', 'hls', '-hls_time', '2', '-hls_list_size', '6',
+    '-f', 'hls', '-hls_time', '1', '-hls_list_size', '10',     // 1s segments start quicker
     '-hls_flags', 'delete_segments+append_list+omit_endlist', '-hls_segment_type', 'mpegts',
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
   ];
@@ -128,6 +129,7 @@ export async function handleHls(req, res, url) {
   if (!ALLOW_PRIVATE && isPrivateHost(t.hostname)) return send(res, 403, 'Private addresses are blocked');
 
   const id = sessionId(t.href);
+  console.log(`[hls] start ${id} ${t.href.slice(0, 120)}`);
   let s = sessions.get(id);
   if (s && s.exited) { stopSession(id); s = null; }
   if (!s) {
@@ -139,9 +141,20 @@ export async function handleHls(req, res, url) {
   const ok = await waitForPlaylist(s.dir, START_TIMEOUT_MS);
   if (!ok) {
     const tail = (s.errTail || '').split('\n').filter(Boolean).pop() || 'the stream did not start';
+    console.log(`[hls] FAIL ${id}: ${tail}`);
     stopSession(id);
     return send(res, 502, `Could not start stream: ${tail}`);
   }
-  res.writeHead(302, { location: `/hls/${id}/index.m3u8`, 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
-  res.end();
+  console.log(`[hls] ready ${id}`);
+  let manifest;
+  try { manifest = await fs.readFile(join(s.dir, 'index.m3u8'), 'utf8'); }
+  catch { return send(res, 502, 'Stream not ready'); }
+  // Serve the live playlist directly — iOS's native player doesn't reliably follow a redirect —
+  // with each segment path made absolute to this session.
+  const body = manifest.split('\n').map(line => {
+    const t = line.trim();
+    return (!t || t.startsWith('#')) ? line : `/hls/${id}/${t}`;
+  }).join('\n');
+  res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
+  res.end(req.method === 'HEAD' ? undefined : body);
 }
