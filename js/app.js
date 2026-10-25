@@ -768,7 +768,37 @@ function renderMore() {
 }
 
 // Fill in what's on for rows already on screen, touching only that line (no rebuild, no flicker, taps keep working).
+// Under the docked player (wide screens): what's on now with its description, then what's coming up;
+// earlier programmes are listed when the channel has catch-up. Tap any programme for details.
+function renderEpgPanel() {
+  const el = $('#epg-panel');
+  if (!el) return;
+  const c = nowChannel();
+  const g = c && isLiveChannel(c) && guideFor(c);
+  const list = g ? g.list(c) : [];
+  if (!list.length) { el.hidden = true; el.innerHTML = ''; return; }
+  const now = Date.now();
+  const i = list.findIndex(p => p[1] > now);
+  const cur = i >= 0 && list[i][0] <= now ? list[i] : null;
+  const upcoming = list.slice(cur ? i + 1 : Math.max(i, 0), (cur ? i + 1 : Math.max(i, 0)) + 8);
+  const earlier = archiveDays(c) ? list.slice(Math.max(0, (cur ? i : i < 0 ? list.length : i) - 6), cur ? i : i < 0 ? list.length : i).reverse() : [];
+  const row = (p, k, cls = '') => `<li class="epg-row ${cls}" data-k="${k}"><span class="epg-time">${fmtTime(p[0])}</span><span class="row-text"><span class="row-name">${esc(p[2])}</span>${p[3] ? `<span class="muted clamp">${esc(p[3])}</span>` : ''}</span>${cls === 'past' ? `<span class="tag">${icon('play')}</span>` : ''}</li>`;
+  el.innerHTML = `
+    ${cur ? `<div class="epg-cur" data-k="${i}">
+      <div class="epg-cur-head"><span class="tag live">ON NOW</span><span class="muted">${fmtRange(cur)}</span></div>
+      <div class="epg-cur-title">${esc(cur[2])}</div>
+      <span class="bar"><i style="width:${(((now - cur[0]) / (cur[1] - cur[0])) * 100).toFixed(1)}%"></i></span>
+      ${cur[3] ? `<p class="epg-cur-desc">${esc(cur[3])}</p>` : ''}
+    </div>` : ''}
+    ${upcoming.length ? `<div class="section-title">Up next</div><ul class="epg-list">${upcoming.map(p => row(p, list.indexOf(p))).join('')}</ul>` : ''}
+    ${earlier.length ? `<div class="section-title">Earlier · catch-up</div><ul class="epg-list">${earlier.map(p => row(p, list.indexOf(p), 'past')).join('')}</ul>` : ''}`;
+  el.hidden = false;
+  el.onclick = e => { const k = e.target.closest('[data-k]'); if (k) programmeSheet(c, list[+k.dataset.k]); };
+}
+setInterval(renderEpgPanel, 60_000);
+
 function updateRowsInPlace() {
+  renderEpgPanel();
   document.querySelectorAll('#list .row, #ov-list .row').forEach(r => {
     const c = r.dataset.k !== undefined ? ovShown[+r.dataset.k] : state.filtered[+r.dataset.i];
     const sub = r.querySelector('.row-sub');
@@ -2751,6 +2781,8 @@ function playChannel(list, index) {
   showTuning(c);
   highlightPlaying();
   addRecent(c);
+  ensureGuide([c]);
+  renderEpgPanel();
   tuneFrom = prev;
   try {
     if ('mediaSession' in navigator) {
@@ -2822,6 +2854,7 @@ function showPlayerError(c, err) {
 function stopPlaying() {
   trackProgress(true);
   hideControls();
+  const panel = $('#epg-panel'); if (panel) { panel.hidden = true; panel.innerHTML = ''; }
   const c = nowChannel();
   if (c) unwarm(streamOf(c));   // free the provider connection now, not after the idle timeout
   player.stop();
