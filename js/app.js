@@ -350,14 +350,41 @@ function showHome() {
 let pendingQuery = '';
 
 // ---------- playlist view ----------
+// IPTV providers pad M3U lists with "category header" rows (### NEWS ###, ===== SPORTS =====)
+// that have no real stream. Hide them. And tidy raw group names ("UK | SPORT" -> "UK · SPORT").
+const SEP_RE = /^\s*[#*=_~·•▬—–-]{2,}|[#*=_~·•▬—–-]{2,}\s*$/;
+const isSeparator = c => !c || SEP_RE.test(c.name || '') || !/[a-z0-9]/i.test(c.name || '');
+const prettyGroup = name => String(name || '').replace(/\s*[|/►▶]\s*/g, ' · ').replace(/\s+/g, ' ').trim();
+// Infer whether an M3U channel is live TV, a movie, or a series episode from its group name.
+function channelKind(c) {
+  const g = (c.group || '').toLowerCase();
+  if (/\b(series|seasons?|episodes?|tv shows?|shows)\b/.test(g)) return 'series';
+  if (/\b(movies?|vod|films?|cinema)\b/.test(g)) return 'movies';
+  return 'live';
+}
+// Split an M3U playlist's channels into live/movies/series once, caching on the playlist.
+function m3uKinds(p) {
+  if (p.kind === 'xtream' || p.virtual) return null;
+  if (!p._kinds) {
+    const k = { live: [], movies: [], series: [] };
+    for (const c of p.channels) { if (!isSeparator(c)) k[channelKind(c)].push(c); }
+    p._kinds = k;
+    p._hasVod = (k.movies.length + k.series.length) >= 10;
+  }
+  return p._kinds;
+}
+
 function showPlaylist(p) {
   state.current = p;
   state.tab = 'live';
   state.group = null;
   state.query = pendingQuery.toLowerCase();
+  const k = m3uKinds(p);
+  const showTabs = p.kind === 'xtream' || p._hasVod;
+  const tabBtn = (t, label) => `<button data-tab="${t}"${t === 'live' ? ' class="active"' : ''}>${label}</button>`;
   view.innerHTML = `
-    ${p.kind === 'xtream' ? `<div class="seg" id="seg">
-      <button data-tab="live" class="active">Live TV</button><button data-tab="movies">Movies</button><button data-tab="series">Series</button></div>` : ''}
+    ${showTabs ? `<div class="seg" id="seg">
+      ${tabBtn('live', 'Live TV')}${(p.kind === 'xtream' || k?.movies.length) ? tabBtn('movies', 'Movies') : ''}${(p.kind === 'xtream' || k?.series.length) ? tabBtn('series', 'Series') : ''}</div>` : ''}
     <div class="filters">
       <label class="search">${icon('search')}<input id="q" type="search" placeholder="Search" autocomplete="off" autocorrect="off" spellcheck="false" value="${esc(pendingQuery)}"></label>
       <div class="chips" id="chips"></div>
@@ -383,7 +410,7 @@ function showPlaylist(p) {
     state.selecting = false;
     $('#seg').querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
     refreshPlaylistView();
-    if (state.tab !== 'live') loadVod(p, state.tab);
+    if (state.tab !== 'live' && p.kind === 'xtream') loadVod(p, state.tab);
   });
   $('#list').onclick = onListClick;
   observer.observe($('#sentinel'));
@@ -416,7 +443,10 @@ const vodKey = (p, tab) => `${p.id}:${tab}`;
 
 function currentItems() {
   const p = state.current;
-  return state.tab === 'live' ? p.channels : vodCache.get(vodKey(p, state.tab)) || [];
+  if (p.kind === 'xtream') return state.tab === 'live' ? p.channels : vodCache.get(vodKey(p, state.tab)) || [];
+  const k = m3uKinds(p);                       // M3U: split by inferred kind, separators already removed
+  if (k) return k[state.tab] || k.live;
+  return p.channels;
 }
 
 async function loadVod(p, tab, { force = false } = {}) {
@@ -455,7 +485,7 @@ function renderChips() {
   const showGroups = groups.length > 1 || (groups[0] && groups[0].name);
   $('#chips').hidden = !showGroups;
   $('#chips').innerHTML = chip('All', visibleCount, state.group === null, 'data-all') +
-    (showGroups ? groups.map(g => chip(g.name || UNGROUPED, g.count, state.group === g.name,
+    (showGroups ? groups.map(g => chip(g.name ? prettyGroup(g.name) : UNGROUPED, g.count, state.group === g.name,
       `data-group="${esc(g.name)}" ${locked(g.name) ? 'data-locked="1"' : ''}`, locked(g.name))).join('') : '');
 }
 
@@ -471,7 +501,7 @@ function applyFilter() {
   const what = state.tab === 'movies' ? 'movie' : state.tab === 'series' ? 'series' : p.id === 'fav' ? 'item' : 'channel';
   $('#q').placeholder = `Search ${what === 'series' ? `${items.length.toLocaleString()} series` : plural(items.length, what)}`;
   const list = $('#list');
-  list.classList.toggle('grid', state.tab !== 'live');
+  list.classList.toggle('grid', state.tab !== 'live' && state.current.kind === 'xtream');
   list.innerHTML = '';
   state.rendered = 0;
   if (state.filtered.length) renderMore();
@@ -492,7 +522,7 @@ function renderMore() {
   const list = $('#list');
   if (!list || state.rendered >= state.filtered.length) return;
   const end = Math.min(state.rendered + PAGE, state.filtered.length);
-  const html = state.tab === 'live' ? rowHtml : posterHtml;
+  const html = (state.tab === 'live' || state.current?.kind !== 'xtream') ? rowHtml : posterHtml;
   list.insertAdjacentHTML('beforeend', state.filtered.slice(state.rendered, end).map((c, k) => html(c, state.rendered + k)).join(''));
   state.rendered = end;
 }
@@ -534,7 +564,7 @@ function rowHtml(c, i) {
   const selected = state.selected.has(c.id);
   const playing = nowChannel()?.url === c.url;
   const epg = nowLine(c);
-  const sub = epg || (c.group ? `<span class="muted">${esc(c.group)}</span>` : '');
+  const sub = epg || (!state.group && c.group ? `<span class="muted">${esc(prettyGroup(c.group))}</span>` : '');
   return `<li class="row${selected ? ' selected' : ''}${playing ? ' playing' : ''}" data-i="${i}">
     ${state.selecting ? `<span class="check">${selected ? icon('check') : ''}</span>` : ''}
     ${logoHtml(c)}
