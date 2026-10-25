@@ -915,7 +915,8 @@ function showPlaylist(p) {
   state.current = p;
   state.tab = 'live';
   const memo = !pendingGroup && !pendingQuery ? viewMemo.get(location.hash) : null;
-  state.group = pendingGroup ?? memo?.group ?? null; pendingGroup = null;
+  // A remembered group only comes back for Live TV; Movies and Series always open on their front page.
+  state.group = pendingGroup ?? (memo && (memo.tab || 'live') === 'live' ? memo.group : null) ?? null; pendingGroup = null;
   state.query = pendingQuery ? pendingQuery.toLowerCase() : memo?.query || '';
   if (memo && !pendingQuery) pendingQuery = memo.query || '';
   const k = m3uKinds(p);
