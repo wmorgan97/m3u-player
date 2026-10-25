@@ -1,0 +1,15 @@
+{
+  "name": "m3u-player",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Installable web app (PWA) for playing and organising M3U / M3U8 IPTV playlists on iPhone.",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.js",
+    "test": "node --test \"tests/**/*.test.js\"",
+    "vendor": "cp node_modules/hls.js/dist/hls.min.js vendor/hls.min.js"
+  },
+  "devDependencies": {
+    "hls.js": "1.6.15"
+  }
+}
