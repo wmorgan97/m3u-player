@@ -28,7 +28,7 @@ html, body {
   -webkit-tap-highlight-color: transparent;
   -webkit-text-size-adjust: 100%;
 }
-body { min-height: 100dvh; overflow-x: hidden; }
+body { min-height: 100dvh; overflow-x: hidden; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 button:disabled { opacity: .35; cursor: default; }
 code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
@@ -138,7 +138,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 .empty.small { padding: 40px 16px; color: var(--muted); list-style: none; }
 
 /* ---------- filters ---------- */
-.filters { padding-top: 4px; }
+.filters { position: sticky; top: calc(var(--safe-top) + 50px); z-index: 10; margin: 0 -12px; padding: 4px 12px 2px; background: linear-gradient(var(--bg) 85%, transparent); }
 .search { display: flex; align-items: center; gap: 8px; padding: 0 13px; border-radius: 13px; background: var(--surface); border: 1px solid var(--line); color: var(--muted); }
 .search:focus-within { border-color: rgba(91, 147, 255, .55); box-shadow: 0 0 0 3px rgba(91, 147, 255, .12); }
 .search .ico { width: 18px; height: 18px; }

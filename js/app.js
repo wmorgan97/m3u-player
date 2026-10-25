@@ -169,8 +169,17 @@ function applySettings() {
   player.transcode = transcodeUrl;
 }
 
+// groupsOf() walks every channel; cache the result per playlist+tab and drop it when the playlist changes.
+function cachedGroups(p, items, key) {
+  if (!p || p.virtual) return groupsOf(items);
+  p._groupCache ??= {};
+  return p._groupCache[key] ??= groupsOf(items);
+}
+const invalidate = p => { if (p) { delete p._groupCache; delete p._kinds; delete p._hasVod; } };
+
 async function save(p) {
   p.updatedAt = Date.now();
+  invalidate(p);
   if (p.id === 'fav') { state.favorites = p.channels; syncFavs(); await db.set('favorites', p.channels); }
   else if (p.id === 'recent') { state.recents = p.channels; await db.set('recents', p.channels); }
   else if (!p.virtual) await db.putPlaylist(p);
@@ -307,7 +316,7 @@ function playlistSub(p) {
     const exp = Number(p.userInfo?.exp_date);
     if (exp) parts.push(`expires ${new Date(exp * 1000).toLocaleDateString()}`);
   } else {
-    parts.push(plural(groupsOf(p.channels).length, 'group'));
+    parts.push(plural(cachedGroups(p, p.channels, 'all').length, 'group'));
   }
   if (guides.get(p.id)?.channelCount) parts.push('TV guide');
   return parts.join(' · ');
@@ -330,7 +339,7 @@ function showHome() {
   const pinnedAny = pl.some(p => p.homeGroups?.length);
   const browse = pl.flatMap(p => {
     const k = m3uKinds(p);
-    const gs = groupsOf(k ? k.live : p.channels).filter(g => g.name && visibleGroup(p, g.name));
+    const gs = cachedGroups(p, k ? k.live : p.channels, k ? 'live' : 'all').filter(g => g.name && visibleGroup(p, g.name));
     if (pinnedAny) {
       const want = p.homeGroups || [];
       return want.map(n => gs.find(g => g.name === n)).filter(Boolean).map(g => ({ pid: p.id, name: g.name, count: g.count }));
@@ -458,7 +467,7 @@ function showPlaylist(p) {
     <div id="sentinel" class="sentinel"></div>
     <div class="selbar" id="selbar" hidden></div>`;
   pendingQuery = '';
-  $('#q').oninput = debounce(e => { state.query = e.target.value.trim().toLowerCase(); applyFilter(); }, 150);
+  $('#q').oninput = debounce(e => { state.query = e.target.value.trim().toLowerCase(); requestAnimationFrame(applyFilter); }, 120);
   $('#chips').onclick = async e => {
     const b = e.target.closest('.chip');
     if (!b) return;
@@ -543,7 +552,7 @@ async function loadVod(p, tab, { force = false } = {}) {
 
 function renderChips() {
   const p = state.current;
-  const groups = groupsOf(currentItems()).filter(g => !p.hiddenGroups?.includes(g.name));
+  const groups = cachedGroups(p, currentItems(), p.kind === 'xtream' ? 'x:' + state.tab : state.tab).filter(g => !p.hiddenGroups?.includes(g.name));
   if (state.group !== null && !groups.some(g => g.name === state.group)) state.group = null;
   const locked = g => !p.virtual && p.lockedGroups?.includes(g) && !state.unlocked;
   const visibleCount = groups.filter(g => !locked(g.name)).reduce((n, g) => n + g.count, 0);
@@ -554,6 +563,7 @@ function renderChips() {
   $('#chips').innerHTML = chip('All', visibleCount, state.group === null, 'data-all') +
     (showGroups ? groups.map(g => chip(g.name ? prettyGroup(g.name) : UNGROUPED, g.count, state.group === g.name,
       `data-group="${esc(g.name)}" ${locked(g.name) ? 'data-locked="1"' : ''}`, locked(g.name))).join('') : '');
+  $('#chips .chip.active')?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
 }
 
 function applyFilter() {
@@ -1859,7 +1869,25 @@ function bindPlayer() {
     const pl = state.playing;
     if (pl && nowChannel()?.kind === 'episode' && pl.index < pl.list.length - 1) { toast('Playing next episode'); step(1); }
   });
-  player.onFatal = msg => setStatus(msg, true);
+  // One silent retry on a mid-stream fault (provider blip, segment timeout) before showing the error.
+  player.onFatal = msg => {
+    const c = nowChannel();
+    if (c && !retried.has(c.url)) { retried.add(c.url); setStatus('Reconnecting…'); setTimeout(() => { if (nowChannel() === c) playChannel(state.playing.list, state.playing.index); }, 1200); return; }
+    setStatus(msg, true);
+  };
+  // Stall watchdog: live video whose clock hasn't advanced for 12s while it should be playing -> reload the stream.
+  let lastT = 0, lastTick = Date.now();
+  setInterval(() => {
+    if (!state.playing || video.paused || document.hidden) { lastT = video.currentTime; lastTick = Date.now(); return; }
+    if (video.currentTime !== lastT) { lastT = video.currentTime; lastTick = Date.now(); return; }
+    if (Date.now() - lastTick > 12_000) { lastTick = Date.now(); setStatus('Reconnecting…'); playChannel(state.playing.list, state.playing.index); }
+  }, 3000);
+  // Back from the background after a while: a live stream will be dead, so restart it instead of spinning.
+  let hiddenAt = 0;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { hiddenAt = Date.now(); return; }
+    if (state.playing && hiddenAt && Date.now() - hiddenAt > 45_000 && player.isLive) playChannel(state.playing.list, state.playing.index);
+  });
   $('#prev').innerHTML = icon('prev');
   $('#next').innerHTML = icon('next');
   $('#now-more').innerHTML = icon('more');
@@ -1928,6 +1956,7 @@ function step(delta) {
   if (i >= 0 && i < pl.list.length) playChannel(pl.list, i);
 }
 
+const retried = new Set();   // channels that already got their one silent retry
 function playChannel(list, index) {
   const c = list[index];
   if (!c) return;
@@ -1953,6 +1982,7 @@ function playChannel(list, index) {
   player.play(c.url).then(ok => {
     if (!ok) return;
     setStatus('');
+    setTimeout(() => { if (nowChannel() === c && !video.paused && video.currentTime > 2) retried.delete(c.url); }, 15_000);   // healthy again: allow a future retry
     const pr = state.progress[c.url];
     if (pr && !pr.done && pr.t > 30 && Number.isFinite(video.duration)) {
       video.currentTime = pr.t;
@@ -1960,6 +1990,7 @@ function playChannel(list, index) {
     }
   }).catch(err => {
     if (nowChannel() !== c) return;
+    if (!retried.has(c.url)) { retried.add(c.url); setStatus('Retrying…'); setTimeout(() => { if (nowChannel() === c) playChannel(list, index); }, 1500); return; }
     showPlayerError(c, err);
     // The iPhone's own player handles streams the web view can't (http://, custom headers).
     if (isNative) { toast('Opening in the iPhone player'); openNativePlayer(c); }

@@ -7,7 +7,7 @@
 //   GET /hls/<id>/<file>                    -> the generated playlist / segments
 
 import { spawn } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { promises as fs, createReadStream, rmSync, mkdirSync } from 'node:fs';
 import { join, sep, extname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isIP } from 'node:net';
@@ -27,7 +27,8 @@ const TYPES = {
   '.ts': 'video/mp2t', '.m4s': 'video/iso.segment', '.mp4': 'video/mp4',
 };
 
-const sessions = new Map(); // id -> { proc, dir, lastAccess, exited, errTail }
+const sessions = new Map(); // id -> { proc, dir, lastAccess, exited, errTail, startedAt }
+try { rmSync(ROOT, { recursive: true, force: true }); mkdirSync(ROOT, { recursive: true }); } catch {}
 
 function isPrivateHost(hostname) {
   const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
@@ -52,12 +53,13 @@ function send(res, status, body, headers = {}) {
 }
 
 async function startSession(id, target) {
-  const dir = join(ROOT, id);
+  // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
+  const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
   await fs.mkdir(dir, { recursive: true });
-  for (const f of await fs.readdir(dir).catch(() => [])) await fs.rm(join(dir, f), { force: true }).catch(() => {});
   const args = [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
-    '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2',
+    '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '2',
+    '-rw_timeout', '15000000',                                   // 15s: a dead upstream fails fast instead of hanging
     '-probesize', '500000', '-analyzeduration', '500000',     // open the input fast (don't over-probe a known TS)
     '-fflags', '+genpts+flush_packets', '-i', target,
     '-map', '0:v:0?', '-map', '0:a:0?',
@@ -68,7 +70,8 @@ async function startSession(id, target) {
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
   ];
   const proc = spawn(FFMPEG, args, { windowsHide: true });
-  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '' };
+  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now() };
+  console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
   proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
   proc.on('exit', () => { session.exited = true; });
   proc.on('error', () => { session.exited = true; });
@@ -114,11 +117,11 @@ export async function handleHls(req, res, url) {
     s.lastAccess = Date.now();
     const f = join(s.dir, name);
     if (!f.startsWith(s.dir + sep)) return send(res, 400, 'Bad path');
-    try {
-      const data = await fs.readFile(f);
-      res.writeHead(200, { 'content-type': TYPES[extname(name)] || 'application/octet-stream', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
-      return res.end(req.method === 'HEAD' ? undefined : data);
-    } catch { return send(res, 404, 'Not ready'); }
+    let st;
+    try { st = await fs.stat(f); } catch { return send(res, 404, 'Not ready'); }
+    res.writeHead(200, { 'content-type': TYPES[extname(name)] || 'application/octet-stream', 'content-length': st.size, 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
+    if (req.method === 'HEAD') return res.end();
+    return createReadStream(f).on('error', () => res.destroy()).pipe(res);
   }
 
   // start (or reuse) a transcode and serve its playlist. /hls/warm just starts it (pre-warm) and returns.
@@ -139,8 +142,14 @@ export async function handleHls(req, res, url) {
   if (!ALLOW_PRIVATE && isPrivateHost(t.hostname)) return send(res, 403, 'Private addresses are blocked');
 
   const id = sessionId(t.href);
-  console.log(`[hls] start ${id} ${t.href.slice(0, 120)}`);
   let s = sessions.get(id);
+  if (s && !s.exited && !warm) {
+    // Stalled: ffmpeg alive but the playlist hasn't been touched for a while -> upstream froze. Restart it.
+    try {
+      const m = await fs.stat(join(s.dir, 'index.m3u8'));
+      if (Date.now() - m.mtimeMs > 12_000 && Date.now() - s.startedAt > 20_000) { console.log(`[hls] stalled ${id}, restarting`); s.exited = true; }
+    } catch {}
+  }
   if (s && s.exited) { stopSession(id); s = null; }
   if (!s) {
     if (sessions.size >= MAX_SESSIONS) {
