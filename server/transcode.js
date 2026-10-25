@@ -97,7 +97,7 @@ async function startSession(id, target, vod = false, start = 0) {
     '-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_init_time', '1',
     // Live: a rolling window. VOD (movies, episodes, catch-up): keep every segment and close the playlist
     // at the end, so the player gets a seekable timeline with a real duration instead of a "live" stream.
-    ...(vod ? ['-hls_list_size', '0', '-hls_playlist_type', 'event', '-hls_flags', 'append_list+independent_segments', '-copyts', '-start_at_zero']
+    ...(vod ? ['-hls_list_size', '0', '-hls_playlist_type', 'event', '-hls_flags', 'append_list+independent_segments']
             : ['-hls_list_size', '1000', '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments']),
     '-hls_segment_type', 'mpegts',
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
