@@ -1,21 +1,27 @@
-// Server-side TV guide. Provider XMLTV files are 20MB+ gzipped, too heavy to download and parse
-// on a phone while it is also streaming video. The server fetches and parses the guide instead,
-// keeps only the channels the app asks for, and returns a small JSON (usually well under 1MB).
+// Server-side TV guide. Provider XMLTV files are 20MB+ gzipped (hundreds of MB of XML), far too
+// heavy for a phone that is also streaming video. The server downloads and indexes the whole guide
+// (every few hours, kept in memory), and the app asks only for the channels it is showing:
 //
-//   POST /guide?key=<PROXY_KEY>   body: { urls, ids, names }  ->  { programmes, names, at }
+//   POST /guide?key=<PROXY_KEY>   body: { urls, ids, names }  ->  { at, names, programmes }
 //
-// Results are cached for 6 hours per (guide urls, channel set), so a reload is instant.
+// ids are lower-case tvg-ids, names are normalised channel names (see normName in js/epg.js).
 
-import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { XmltvParser } from '../js/epg.js';
 import { readBody } from './sync.js';
 
 const PROXY_KEY = process.env.PROXY_KEY || '';
-const TTL = 6 * 3600_000, DAY = 86400_000;
-const cache = new Map();   // hash -> { at, job }
+const HOUR = 3600_000;
+const REFRESH = 6 * HOUR;
+const DIR = fileURLToPath(new URL('../data/', import.meta.url));
+const URLS_FILE = join(DIR, 'guide-urls.json');
+const indexes = new Map();   // urls key -> { at, chans: Map(id -> JSON string), names, job }
 
 async function feedUrl(parser, url) {
-  const res = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(120_000) });
+  const res = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(180_000) });
   if (!res.ok) throw new Error(`Guide server replied ${res.status}`);
   const reader = res.body.getReader();
   const first = await reader.read();
@@ -28,20 +34,47 @@ async function feedUrl(parser, url) {
   for await (const text of body.pipeThrough(new TextDecoderStream())) parser.feed(text);
 }
 
-async function build(urls, ids, names) {
+async function build(urls) {
   const t0 = Date.now();
-  const parser = new XmltvParser({ from: Date.now() - 3 * DAY, to: Date.now() + 2 * DAY, wanted: { ids: new Set(ids), names: new Set(names) } });
+  const parser = new XmltvParser({ from: Date.now() - 26 * HOUR, to: Date.now() + 40 * HOUR });
   let ok = 0, lastError;
   for (const u of urls) { try { await feedUrl(parser, u); ok++; } catch (e) { lastError = e; } }
   if (!ok) throw lastError;
   const data = parser.finish();
-  // Only send names for channels we kept: the full display-name map is most of a big guide.
-  const keep = new Set(Object.keys(data.programmes));
-  data.names = Object.fromEntries(Object.entries(data.names).filter(([, id]) => keep.has(id)));
-  data.at = Date.now();
-  console.log(`[guide] ${keep.size} channels in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  return JSON.stringify(data);
+  // Store each channel's programmes as ready-made JSON (short descriptions): cheap to hold and to send.
+  const chans = new Map();
+  for (const [id, list] of Object.entries(data.programmes)) chans.set(id, JSON.stringify(list.map(p => [p[0], p[1], p[2], p[3].slice(0, 220)])));
+  console.log(`[guide] indexed ${chans.size} channels in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  return { at: Date.now(), chans, names: data.names };
 }
+
+function indexFor(urls) {
+  const key = urls.join('\n');
+  let ix = indexes.get(key);
+  if (!ix) { ix = { at: 0, chans: null, names: {}, job: null }; indexes.set(key, ix); }
+  if (!ix.job && Date.now() - ix.at > REFRESH) {
+    ix.job = build(urls)
+      .then(r => Object.assign(ix, r))
+      .catch(e => { console.error('[guide] build failed:', e.message); if (!ix.chans) indexes.delete(key); throw e; })
+      .finally(() => { ix.job = null; });
+    ix.job.catch(() => {});
+  }
+  return ix;
+}
+
+async function remember(urls) {
+  try {
+    const known = JSON.parse(await fs.readFile(URLS_FILE, 'utf8').catch(() => '[]'));
+    if (known.some(k => k.join('\n') === urls.join('\n'))) return;
+    await fs.mkdir(DIR, { recursive: true });
+    await fs.writeFile(URLS_FILE, JSON.stringify([urls, ...known].slice(0, 5)));
+  } catch {}
+}
+
+// Build the guides the app has used before as soon as the server starts, and keep them fresh,
+// so the first request of the day is instant.
+fs.readFile(URLS_FILE, 'utf8').then(t => JSON.parse(t).forEach(indexFor)).catch(() => {});
+setInterval(() => { for (const key of indexes.keys()) indexFor(key.split('\n')); }, HOUR).unref();
 
 export async function handleGuide(req, res, url, send, allowed) {
   if (PROXY_KEY && url.searchParams.get('key') !== PROXY_KEY) return send(res, 403, 'Wrong or missing key');
@@ -50,19 +83,18 @@ export async function handleGuide(req, res, url, send, allowed) {
   try { q = JSON.parse(await readBody(req)); } catch { return send(res, 400, 'Bad body'); }
   const urls = (q.urls || []).filter(u => { try { return allowed(new URL(u)); } catch { return false; } });
   if (!urls.length) return send(res, 400, 'No usable guide link');
-  const ids = [...new Set((q.ids || []).map(String))].sort();
-  const names = [...new Set((q.names || []).map(String))].sort();
-  const key = createHash('sha1').update(JSON.stringify([urls, ids, names])).digest('hex');
-  let hit = cache.get(key);
-  if (!hit || Date.now() - hit.at > TTL) {
-    hit = { at: Date.now(), job: build(urls, ids, names) };
-    cache.set(key, hit);
-    hit.job.catch(() => cache.delete(key));
-    for (const [k, v] of cache) if (Date.now() - v.at > TTL) cache.delete(k);
+  remember(urls);
+  const ix = indexFor(urls);
+  if (!ix.chans) {
+    try { await ix.job; } catch (e) { return send(res, 502, `TV guide: ${e.message}`); }
   }
-  try {
-    send(res, 200, await hit.job, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-  } catch (e) {
-    send(res, 502, `TV guide: ${e.message}`);
-  }
+  const names = {}, ids = new Set();
+  for (const id of q.ids || []) if (ix.chans.has(id)) ids.add(id);
+  for (const n of q.names || []) { const id = ix.names[n]; if (id && ix.chans.has(id)) { names[n] = id; ids.add(id); } }
+  let body = `{"at":${ix.at},"names":${JSON.stringify(names)},"programmes":{`;
+  let first = true;
+  for (const id of ids) { body += `${first ? '' : ','}${JSON.stringify(id)}:${ix.chans.get(id)}`; first = false; }
+  body += '}}';
+  const gz = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+  send(res, 200, gz ? gzipSync(body) : body, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(gz ? { 'content-encoding': 'gzip', vary: 'accept-encoding' } : {}) });
 }

@@ -3,7 +3,7 @@ import { db } from './db.js';
 import { Player, externalPlayers } from './player.js';
 import { net, fetchText, isMixed, streamUrl } from './net.js';
 import { Xtream, parseXtreamLink, liveChannels, movieItems, seriesItems } from './xtream.js';
-import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl } from './epg.js';
+import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from './epg.js';
 import { groupSeries, vodMeta } from './vod.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, nativePlay, nativeShare } from './native.js';
@@ -655,8 +655,10 @@ function renderMore() {
   if (!list || state.rendered >= state.filtered.length) return;
   const end = Math.min(state.rendered + PAGE, state.filtered.length);
   const html = (state.tab === 'live' || state.current?.kind !== 'xtream') ? rowHtml : posterHtml;
-  list.insertAdjacentHTML('beforeend', state.filtered.slice(state.rendered, end).map((c, k) => html(c, state.rendered + k)).join(''));
+  const shown = state.filtered.slice(state.rendered, end);
+  list.insertAdjacentHTML('beforeend', shown.map((c, k) => html(c, state.rendered + k)).join(''));
   state.rendered = end;
+  if (state.tab === 'live') ensureGuide(shown);
 }
 
 function rerenderRows() {
@@ -1102,8 +1104,81 @@ function parseEpgLocally(urls, opts) {
   });
 }
 
+// ---- on-demand guide (VPS server) ----
+// The server keeps the whole provider guide indexed; the app asks for the channels it is showing
+// (the rows on screen, the guide grid) in small batches and merges them into one Guide per playlist.
+const GUIDE_FRESH = 3 * HOUR;
+const guideAsked = new Map();   // playlist id -> Set of channel keys requested this session
+const guideQueue = new Map();   // playlist id -> channels waiting for the next batch
+let guideFlush = null;
+const chanKey = c => (c.tvgId || '').toLowerCase() || normName(c.tvgName || c.name);
+
+function ensureGuide(channels) {
+  if (!canSync()) return;
+  for (const c of channels) {
+    if (!isLiveChannel(c)) continue;
+    const p = playlistOf(c);
+    if (!p || p.virtual || !epgUrls(p).length) continue;
+    const g = guides.get(p.id);
+    if (g && Date.now() - g.at < GUIDE_FRESH && g.key(c)) continue;
+    const k = chanKey(c);
+    let asked = guideAsked.get(p.id);
+    if (!asked) guideAsked.set(p.id, asked = new Set());
+    if (!k || asked.has(k)) continue;
+    asked.add(k);
+    let q = guideQueue.get(p.id);
+    if (!q) guideQueue.set(p.id, q = []);
+    q.push(c);
+  }
+  if (guideQueue.size && !guideFlush) guideFlush = new Promise(r => setTimeout(r, 120)).then(flushGuide).finally(() => { guideFlush = null; if (guideQueue.size) ensureGuide([]); });
+  return guideFlush;
+}
+
+async function flushGuide() {
+  for (const [pid, list] of [...guideQueue]) {
+    guideQueue.delete(pid);
+    const p = byId(pid);
+    if (!p) continue;
+    for (let i = 0; i < list.length; i += 600) {
+      const w = wantedFor(list.slice(i, i + 600));
+      try {
+        const res = await fetch(serverApi('guide'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ urls: epgUrls(p), ids: [...w.ids], names: [...w.names] }) });
+        if (!res.ok) throw new Error(await res.text());
+        mergeGuide(p, await res.json());
+      } catch {
+        list.slice(i).forEach(c => guideAsked.get(pid)?.delete(chanKey(c)));   // try again next time they're shown
+        refreshAfterGuide(pid);   // never leave the guide screen on "Loading…"
+        break;
+      }
+    }
+  }
+}
+
+const persistGuide = debounce(pid => { const g = guides.get(pid); if (g) db.set(`epg:${pid}`, { programmes: g.programmes, names: g.names, at: g.at }).catch(() => {}); }, 2000);
+const refreshAfterGuide = debounce(pid => {
+  if (location.hash === `#/guide/${pid}`) return showGuide(byId(pid));
+  if (state.current && !$('#guide')) rerenderRows();
+}, 250);
+function mergeGuide(p, d) {
+  let g = guides.get(p.id);
+  if (!g) guides.set(p.id, g = new Guide({ at: d.at }));
+  Object.assign(g.programmes, d.programmes);
+  Object.assign(g.names, d.names);
+  g.at = d.at;
+  g.keys = new WeakMap();
+  persistGuide(p.id);
+  refreshAfterGuide(p.id);
+}
+
 const guideUpdates = new Map();
 function updateGuide(p, { silent = false } = {}) {
+  if (canSync() && epgUrls(p).length) {   // the server already has the latest guide: just re-ask for what's on screen
+    guideAsked.delete(p.id);
+    const g = guides.get(p.id);
+    if (g) g.at = 0;
+    if (!silent) toast('Updating TV guide…');
+    return ensureGuide(location.hash === `#/guide/${p.id}` ? guideScope(p) : state.filtered) || Promise.resolve();
+  }
   if (guideUpdates.has(p.id)) return guideUpdates.get(p.id);
   const urls = epgUrls(p);
   if (!urls.length) {
@@ -1137,7 +1212,8 @@ function updateGuide(p, { silent = false } = {}) {
 // the video for bandwidth on a phone. Above this size the guide only loads when asked, from the guide screen.
 const AUTO_GUIDE_MAX = 8000;
 function maybeUpdateGuide(p) {
-  if ((p.channels?.length || 0) > AUTO_GUIDE_MAX && !canSync()) return;   // the server makes big guides small
+  if (canSync()) return;   // on-demand: rows fetch their own guide data as they appear
+  if ((p.channels?.length || 0) > AUTO_GUIDE_MAX) return;
   const g = guides.get(p.id);
   const stale = !g || Date.now() - g.at > 12 * HOUR;
   if (stale && epgUrls(p).length && !(Date.now() - (p.epgFailedAt || 0) < HOUR)) updateGuide(p, { silent: true });
@@ -1222,14 +1298,28 @@ const PX_PER_MIN = 4;
 const CH_W = 132;
 let guideState = null;
 
+// Channels the guide grid covers: visible live channels, pinned Home groups first, capped so the grid stays fast.
+const GUIDE_GRID_MAX = 2500;
+function guideScope(p) {
+  const live = (m3uKinds(p)?.live || p.channels).filter(c => isLiveChannel(c) && visibleGroup(p, c.group || ''));
+  const pinned = new Set(p.homeGroups || []);
+  return (pinned.size ? [...live.filter(c => pinned.has(c.group)), ...live.filter(c => !pinned.has(c.group))] : live).slice(0, GUIDE_GRID_MAX);
+}
+
 function showGuide(p) {
   state.current = p;
   state.tab = 'live';
   setTopbar({ title: `${playlistTitle(p)} · Guide`, back: `#/p/${p.id}`, actions: [
     { icon: 'refresh', label: 'Update guide', fn: () => updateGuide(p) },
   ] });
+  const scope = guideScope(p);
+  const pending = ensureGuide(scope);
   const g = guides.get(p.id);
-  const channels = g ? p.channels.filter(c => visibleGroup(p, c.group || '') && g.list(c).length) : [];
+  const channels = g ? scope.filter(c => g.list(c).length) : [];
+  if (!channels.length && pending) {
+    view.innerHTML = `<div class="empty">${icon('guide', 'big')}<p><b>Loading TV guide…</b></p><p class="muted">Getting what’s on for your channels.</p></div>`;
+    return;
+  }
   if (!channels.length) {
     view.innerHTML = `<div class="empty">${icon('guide', 'big')}<p><b>No TV guide yet</b></p>
       <p class="muted">${epgUrls(p).length ? 'Load the guide from your provider.' : 'This playlist doesn’t include a guide link. Add an XMLTV (EPG) link.'}</p>
