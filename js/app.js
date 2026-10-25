@@ -309,6 +309,11 @@ function showHome() {
   try { dismissed = localStorage.getItem('install-tip') === 'off'; } catch {}
   const pl = state.playlists;
   const cw = continueWatching();
+  // Browse: the biggest live categories across playlists, tap to open that group directly.
+  const browse = pl.flatMap(p => {
+    const k = m3uKinds(p);
+    return groupsOf(k ? k.live : p.channels).filter(g => g.name && visibleGroup(p, g.name)).map(g => ({ pid: p.id, name: g.name, count: g.count }));
+  }).sort((a, b) => b.count - a.count).slice(0, 12);
   view.innerHTML = `
     ${isIOS && !isStandalone && !dismissed ? `<div class="banner">
       ${icon('share')}<span><b>Install on your iPhone:</b> tap Share, then “Add to Home Screen”. It opens full-screen and iOS keeps your playlists safe.</span>
@@ -317,13 +322,18 @@ function showHome() {
       ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
     ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search all channels" autocomplete="off" autocorrect="off" spellcheck="false"></label>` : ''}
+    ${state.recents.length ? `<div class="section-title">Jump back in</div>
+      <div class="strip">${state.recents.slice(0, 12).map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
+    ${browse.length ? `<div class="section-title">Browse</div>
+      <div class="browse">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
+        <span class="bt-name">${esc(prettyGroup(b.name))}</span><span class="muted">${b.count.toLocaleString()}</span></button>`).join('')}</div>` : ''}
     ${cw.length ? `<div class="section-title">Continue watching</div>
       <div class="strip">${cw.map((e, i) => `<button class="cw" data-cw="${i}">
         <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}</span>
         <span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span>
         <span class="cw-name">${esc(e.item.name)}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></button>`).join('')}</div>` : ''}
     <div class="section-title">Library</div>
-    <ul class="cards">
+    <ul class="cards tiles">
       ${card('#/fav', 'star', 'Favorites', plural(state.favorites.length, 'item'))}
       ${card('#/recent', 'clock', 'Recently watched', plural(state.recents.length, 'item'))}
       ${pl.length ? card('#/all', 'search', 'All channels', 'Every playlist in one list') : ''}
@@ -350,11 +360,16 @@ function showHome() {
     if (m) return playlistMenu(byId(m.dataset.menu));
     const c = e.target.closest('[data-cw]');
     if (c) { const entry = cw[+c.dataset.cw]; return playChannel([entry.item], 0); }
+    const r = e.target.closest('[data-recent]');
+    if (r) return playChannel(state.recents, +r.dataset.recent);
+    const b = e.target.closest('[data-browse]');
+    if (b) { pendingGroup = b.dataset.group; location.hash = `#/p/${b.dataset.browse}`; return; }
     const go = e.target.closest('[data-go]');
     if (go) location.hash = go.dataset.go;
   };
 }
 let pendingQuery = '';
+let pendingGroup = null;   // a group to pre-select when the next playlist opens (home "Browse" tiles)
 
 // ---------- playlist view ----------
 // IPTV providers pad M3U lists with "category header" rows (### NEWS ###, ===== SPORTS =====)
@@ -385,7 +400,7 @@ function m3uKinds(p) {
 function showPlaylist(p) {
   state.current = p;
   state.tab = 'live';
-  state.group = null;
+  state.group = pendingGroup; pendingGroup = null;
   state.query = pendingQuery.toLowerCase();
   const k = m3uKinds(p);
   const showTabs = p.kind === 'xtream' || p._hasVod;
@@ -437,7 +452,7 @@ function updateTopbar() {
   const p = state.current;
   const live = state.tab === 'live';
   setTopbar({
-    title: p.name,
+    title: playlistTitle(p),
     back: '#/',
     actions: [
       live && !p.virtual && { icon: 'guide', label: 'TV guide', fn: () => { location.hash = `#/guide/${p.id}`; } },
@@ -547,8 +562,10 @@ function initials(name) {
   return esc(String(name).split(/\s+/).map(w => (w.match(/[\p{L}\p{N}]/u) || [''])[0]).join('').slice(0, 2).toUpperCase() || '?');
 }
 
+// A stable per-channel hue so logo-less channels get a distinct coloured tile, not grey.
+const hueOf = s => { let h = 7; for (const ch of String(s || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h % 360; };
 function logoHtml(c, extra = '') {
-  return `<span class="logo" ${extra} data-initials="${initials(c.name)}">${c.logo
+  return `<span class="logo" ${extra} style="--hue:${hueOf(c.name)}" data-initials="${initials(c.name)}">${c.logo
     ? `<img src="${esc(c.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>`;
 }
 
@@ -1060,7 +1077,7 @@ let guideState = null;
 function showGuide(p) {
   state.current = p;
   state.tab = 'live';
-  setTopbar({ title: `${p.name} · Guide`, back: `#/p/${p.id}`, actions: [
+  setTopbar({ title: `${playlistTitle(p)} · Guide`, back: `#/p/${p.id}`, actions: [
     { icon: 'refresh', label: 'Update guide', fn: () => updateGuide(p) },
   ] });
   const g = guides.get(p.id);

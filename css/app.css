@@ -1,11 +1,11 @@
 :root {
-  --bg: #0e1014;
-  --surface: #171a21;
-  --surface-2: #222631;
-  --line: #2a2f3a;
-  --text: #eef0f4;
-  --muted: #8d95a5;
-  --accent: #4f8cff;
+  --bg: #0a0c11;
+  --surface: #14171f;
+  --surface-2: #1f232e;
+  --line: #262b37;
+  --text: #f2f4f8;
+  --muted: #8a93a6;
+  --accent: #5b93ff;
   --danger: #ff5a5f;
   --star: #ffc53d;
   --radius: 14px;
@@ -47,7 +47,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
   backdrop-filter: saturate(180%) blur(18px);
   border-bottom: 1px solid var(--line);
 }
-.topbar h1 { flex: 1; min-width: 0; margin: 0 0 0 6px; font-size: 18px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar h1 { flex: 1; min-width: 0; margin: 0 0 0 6px; font-size: 22px; font-weight: 700; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .actions { display: flex; }
 .icon-btn { display: inline-grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; flex: none; }
 .icon-btn:active:not(:disabled) { background: var(--surface-2); }
@@ -67,11 +67,11 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 .player-error-actions a { color: var(--text); text-decoration: none; }
 .player-bar {
   display: flex; align-items: center; gap: 2px;
-  padding: 6px calc(var(--safe-right) + 6px) 6px calc(var(--safe-left) + 12px);
-  background: var(--surface);
+  padding: 8px calc(var(--safe-right) + 6px) 8px calc(var(--safe-left) + 12px);
+  background: linear-gradient(180deg, #171a22, var(--surface)); border-bottom: 1px solid var(--line);
 }
-.now { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
-.now .logo { width: 36px; height: 36px; border-radius: 8px; }
+.now { flex: 1; min-width: 0; display: flex; align-items: center; gap: 11px; }
+.now .logo { width: 40px; height: 40px; border-radius: 10px; }
 .now-text { min-width: 0; }
 #now-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #now-status { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -95,6 +95,37 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 .card-ico { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 11px; background: rgba(79, 140, 255, .14); color: var(--accent); flex: none; }
 .card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .card-title { font-weight: 600; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Library as a tile grid — a TV-app home, not a settings list */
+.cards.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; background: none; border: 0; border-radius: 0; overflow: visible; }
+.cards.tiles > li + li { border-top: 0; }
+.tiles .card {
+  flex-direction: column; align-items: flex-start; gap: 12px; padding: 14px; min-width: 0;
+  border-radius: var(--radius); background: linear-gradient(160deg, var(--surface-2), var(--surface)); border: 1px solid var(--line);
+}
+.tiles .card-text { width: 100%; }
+.tiles .card:active { filter: brightness(1.15); }
+.tiles .card-ico { width: 42px; height: 42px; border-radius: 12px; background: rgba(91, 147, 255, .18); }
+.tiles .card-title { font-size: 15px; }
+.tiles .card-text .muted { font-size: 12.5px; }
+
+/* Browse — category tiles on the home screen, each opens that group directly */
+.browse { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.bt {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 13px 13px; text-align: left;
+  border-radius: 13px; --hue: 220; color: var(--text);
+  background: linear-gradient(135deg, hsl(var(--hue) 40% 23%), hsl(calc(var(--hue) + 30) 38% 13%));
+  border: 1px solid rgba(255, 255, 255, .06);
+}
+.bt:active { filter: brightness(1.15); }
+.bt-name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bt .muted { flex: none; font-size: 12px; color: rgba(255, 255, 255, .6); }
+
+/* "Jump back in" — recent channels as logo tiles */
+.rc { flex: none; width: 84px; display: flex; flex-direction: column; align-items: center; gap: 7px; text-align: center; }
+.rc .logo { width: 72px; height: 72px; border-radius: 18px; }
+.rc .logo::before { font-size: 20px; }
+.rc-name { width: 100%; font-size: 12px; font-weight: 500; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-text .muted { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .empty { text-align: center; padding: 48px 16px; }
@@ -104,33 +135,40 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 
 /* ---------- filters ---------- */
 .filters { padding-top: 4px; }
-.search { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-radius: 12px; background: var(--surface); color: var(--muted); }
+.search { display: flex; align-items: center; gap: 8px; padding: 0 13px; border-radius: 13px; background: var(--surface); border: 1px solid var(--line); color: var(--muted); }
+.search:focus-within { border-color: rgba(91, 147, 255, .55); box-shadow: 0 0 0 3px rgba(91, 147, 255, .12); }
 .search .ico { width: 18px; height: 18px; }
 .search input { flex: 1; min-width: 0; padding: 11px 0; border: 0; outline: none; background: none; color: var(--text); font: inherit; font-size: 16px; }
 .search input::-webkit-search-cancel-button { filter: invert(.6); }
 .chips { display: flex; gap: 8px; margin: 0 -12px; padding: 10px 12px 4px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
 .chips::-webkit-scrollbar { display: none; }
-.chip { flex: none; padding: 7px 12px; border-radius: 999px; background: var(--surface); font-size: 14px; white-space: nowrap; }
+.chip { flex: none; padding: 7px 13px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-size: 14px; font-weight: 500; white-space: nowrap; }
 .chip span { margin-left: 6px; font-size: 12px; color: var(--muted); }
-.chip.active { background: var(--accent); color: #fff; }
+.chip.active { background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 2px 10px rgba(91, 147, 255, .35); }
 .chip.active span { color: rgba(255, 255, 255, .75); }
 
 /* ---------- channel list ---------- */
 .list { list-style: none; margin: 6px 0 0; padding: 0; }
 .row {
-  display: flex; align-items: center; gap: 12px; padding: 8px 2px 8px 8px; border-radius: 12px; cursor: pointer;
-  content-visibility: auto; contain-intrinsic-size: auto 60px;
+  display: flex; align-items: center; gap: 13px; padding: 9px 2px 9px 8px; border-radius: 14px; cursor: pointer;
+  content-visibility: auto; contain-intrinsic-size: auto 66px;
 }
 .row:active { background: var(--surface); }
 .row.playing { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); }
 .row.playing .row-name { color: var(--accent); }
 .row.selected { background: rgba(79, 140, 255, .14); }
 .row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.row-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row-name { font-weight: 560; font-size: 15.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row-text .muted { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.logo { position: relative; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 10px; background: var(--surface-2); overflow: hidden; flex: none; }
-.logo::before { content: attr(data-initials); font-size: 14px; font-weight: 700; color: var(--muted); }
-.logo img { position: absolute; inset: 0; width: 100%; height: 100%; padding: 4px; object-fit: contain; background: var(--surface-2); }
+/* Channel tile: a coloured gradient keyed to the channel (--hue) when there's no logo, so lists never look grey */
+.logo {
+  position: relative; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 12px; overflow: hidden; flex: none;
+  --hue: 220;
+  background: linear-gradient(145deg, hsl(var(--hue) 42% 30%), hsl(calc(var(--hue) + 35) 40% 17%));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .05);
+}
+.logo::before { content: attr(data-initials); font-size: 14px; font-weight: 700; letter-spacing: .02em; color: hsl(var(--hue) 70% 86%); }
+.logo img { position: absolute; inset: 0; width: 100%; height: 100%; padding: 5px; object-fit: contain; background: #161920; }
 .star { color: var(--muted); }
 .star.on { color: var(--star); }
 .star.on .ico { fill: currentColor; }
