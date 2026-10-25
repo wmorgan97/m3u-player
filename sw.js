@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens offline. Streams, logos and
 // playlist downloads (other origins) always go straight to the network.
 
-const CACHE = 'm3u-player-v35';
+const CACHE = 'm3u-player-v36';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/polish.css',
   'js/app.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/epg-worker.js', 'js/vod.js', 'js/native.js', 'vendor/hls.min.js',
@@ -18,21 +18,26 @@ self.addEventListener('activate', e => {
     .then(() => self.clients.claim()));
 });
 
-// Stale-while-revalidate: serve from cache, refresh it in the background.
+// Network first, cache as the offline fallback: a phone must never stay stuck on an old (or
+// broken) copy of the app. A slow network falls back to the cache after 4 seconds.
 self.addEventListener('fetch', e => {
   const req = e.request;
   const url = new URL(req.url);
-  // Only the app's own files; never the proxy or the live transcode endpoints
-  // (those are per-stream and must always hit the network, not the cache).
+  // Only the app's own files; never the proxy, transcode, sync or guide endpoints.
   if (req.method !== 'GET' || url.origin !== location.origin
-      || url.pathname.endsWith('/proxy') || url.pathname === '/hls' || url.pathname.startsWith('/hls/')) return;
+      || url.pathname.endsWith('/proxy') || url.pathname === '/hls' || url.pathname.startsWith('/hls/')
+      || url.pathname === '/sync' || url.pathname === '/guide') return;
   e.respondWith(caches.open(CACHE).then(async cache => {
-    const hit = await cache.match(req, { ignoreSearch: true });
-    const fresh = fetch(req).then(res => {
+    const fresh = fetch(req, { cache: 'no-store' }).then(res => {
       if (res.ok) cache.put(req, res.clone());
       return res;
-    }).catch(() => hit);
-    if (hit) { e.waitUntil(fresh); return hit; }
-    return fresh;
+    });
+    const timeout = new Promise(r => setTimeout(r, 4000));
+    try {
+      const res = await Promise.race([fresh, timeout]);
+      if (res) return res;
+    } catch {}
+    const hit = await cache.match(req, { ignoreSearch: true });
+    return hit || fresh;
   }));
 });
