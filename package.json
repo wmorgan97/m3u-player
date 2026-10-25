@@ -5,7 +5,7 @@
   "description": "Installable web app (PWA) for playing and organising M3U / M3U8 IPTV playlists on iPhone.",
   "type": "module",
   "scripts": {
-    "start": "node scripts/serve.js",
+    "start": "node server/server.js",
     "test": "node --test \"tests/**/*.test.js\"",
     "vendor": "cp node_modules/hls.js/dist/hls.min.js vendor/hls.min.js"
   },

@@ -37,19 +37,25 @@ A free IPTV player for iPhone, built as an installable web app (PWA). It has the
 
 It opens full-screen like a native app, starts offline, and iOS keeps its data.
 
-## The free proxy (recommended)
+## Host it on your own VPS (recommended)
 
-Browsers block https:// web apps from talking to http:// servers, and many IPTV servers don't allow web apps at all. Most Xtream providers use http://, so you'll need this for Xtream logins, TV guides and http streams.
+One command installs the app, a built-in proxy and automatic HTTPS on a Debian/Ubuntu VPS. No domain needed (it uses a free `<your-ip>.sslip.io` address), and no Cloudflare.
 
-[`proxy/`](proxy/README.md) has a tiny Cloudflare Worker you can deploy for free in about 5 minutes (copy and paste, no coding). Then enter its address in **Settings → Proxy**.
+```sh
+git clone https://github.com/wmorgan97/m3u-player.git
+sudo bash m3u-player/deploy/install.sh            # or: ... install.sh tv.yourdomain.com
+```
 
-Without it, M3U files with https:// streams still work fully.
+It prints your app address and a **server key**. Open the address in Safari on your iPhone, Add to Home Screen, open the app and enter the key once.
 
-## Hosting
+- The built-in proxy is what lets http:// IPTV providers, Xtream logins and TV guides work in a web app. It only works with your key, so nobody else can use your VPS as a proxy.
+- If nginx/Apache already uses ports 80/443, the installer leaves them alone and tells you what to point at `127.0.0.1:8787`.
+- Update: `cd m3u-player && git pull && sudo systemctl restart m3u-player`
+- If the repo is private, `git clone` asks for your GitHub username and a [personal access token](https://github.com/settings/tokens) as the password.
 
-`.github/workflows/pages.yml` runs the tests and deploys to **GitHub Pages** on every push to `main`. One-time setup: repo **Settings → Pages → Source: GitHub Actions**. Pages on a private repo needs a paid GitHub plan; otherwise make the repo public (it holds no secrets).
+**Do I need the server after installing?** The app itself runs from your phone's storage once it's on the Home Screen, and all your data stays on the phone. The server is used for app updates and as the proxy for http:// providers. If your provider is https:// and allows web apps, the app works without it.
 
-Any static host works too (Netlify, Cloudflare Pages, Vercel): serve the repo root. There's no build step.
+**Alternatives:** GitHub Pages or any static host (`.github/workflows/pages.yml` can deploy to Pages: enable Settings → Pages → Source: GitHub Actions and set the Actions variable `DEPLOY_PAGES` to `true`), plus the free [Cloudflare Worker proxy](proxy/README.md) entered under Settings → Proxy.
 
 ## What a web app can't do
 
@@ -60,8 +66,8 @@ Any static host works too (Netlify, Cloudflare Pages, Vercel): serve the repo ro
 ## Development
 
 ```sh
-npm start        # serves on http://localhost:8080
-npm test         # unit tests: M3U parser, XMLTV guide, Xtream API mapping
+npm start        # app + proxy on http://localhost:8080 (server/server.js, no dependencies)
+npm test         # unit tests: M3U parser, XMLTV guide, Xtream API, server/proxy
 ```
 
 Open the LAN address on your phone to test on a real device. To update hls.js: bump it in `package.json`, `npm install`, `npm run vendor`.
@@ -78,6 +84,8 @@ js/net.js            fetch with proxy fallback
 js/db.js             IndexedDB storage
 js/ui.js             sheets, menus, forms, toasts, icons
 sw.js                offline cache for the app shell
+server/server.js     self-hosting server: app files + built-in proxy
+deploy/install.sh    one-command VPS install (systemd + Caddy HTTPS)
 proxy/worker.js      optional Cloudflare Worker proxy
 vendor/hls.min.js    hls.js (vendored, no build step)
 ```

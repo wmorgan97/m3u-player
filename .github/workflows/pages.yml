@@ -1,4 +1,4 @@
-name: Test and deploy to GitHub Pages
+name: Test (and optionally deploy to GitHub Pages)
 
 on:
   push:
@@ -25,8 +25,10 @@ jobs:
           node-version: 22
       - run: npm test
 
+  # Opt-in: set the repository variable DEPLOY_PAGES to "true" (Settings → Secrets and
+  # variables → Actions → Variables) and enable Settings → Pages → Source: GitHub Actions.
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && vars.DEPLOY_PAGES == 'true'
     needs: test
     runs-on: ubuntu-latest
     environment:

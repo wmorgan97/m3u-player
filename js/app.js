@@ -86,13 +86,53 @@ async function init() {
   window.addEventListener('resize', debounce(sizeGuide, 100));
   route();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  await detectServerProxy();
   await Promise.all(state.playlists.map(p => loadGuide(p.id)));
   rerenderRows();
   backgroundRefresh();
 }
 
+// The VPS server (server/server.js) has a built-in proxy at ./proxy, used automatically.
+const serverProxy = { available: false, needsKey: false, base: '' };
+const serverProxyUrl = () => `${serverProxy.base}?${state.settings.serverKey ? `key=${encodeURIComponent(state.settings.serverKey)}&` : ''}url={url}`;
+
+async function checkServerProxy(key = state.settings.serverKey) {
+  const base = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}proxy`;
+  const res = await fetch(`${base}${key ? `?key=${encodeURIComponent(key)}` : ''}`, { cache: 'no-store' });
+  const info = res.ok && /json/.test(res.headers.get('content-type') || '') ? await res.json() : null;
+  return info?.m3uProxy ? { base, ...info } : null;
+}
+
+async function detectServerProxy() {
+  if (location.protocol === 'file:') return;
+  try {
+    const info = await checkServerProxy();
+    if (!info) return;
+    Object.assign(serverProxy, { available: true, base: info.base, needsKey: info.keyRequired && !info.keyValid });
+    applySettings();
+    if (!state.current && serverProxy.needsKey) showHome();
+  } catch {}
+}
+
+async function enterServerKey() {
+  const v = await formSheet({
+    title: 'Server key',
+    fields: [{ name: 'key', label: 'Shown at the end of the server install', value: state.settings.serverKey || '', required: true }],
+    submit: 'Connect',
+  });
+  if (!v) return;
+  const info = await checkServerProxy(v.key).catch(() => null);
+  if (!info?.keyValid) { toast('That key didn’t work. Check it and try again.'); return; }
+  state.settings.serverKey = v.key;
+  serverProxy.needsKey = false;
+  await db.set('settings', state.settings);
+  applySettings();
+  toast('Connected to your server');
+  rerender();
+}
+
 function applySettings() {
-  net.proxy = state.settings.proxy;
+  net.proxy = state.settings.proxy || (serverProxy.available && !serverProxy.needsKey ? serverProxyUrl() : '');
   net.streamProxy = state.settings.streamProxy;
   player.tsToHls = state.settings.tsToHls;
   player.wrap = streamUrl;
@@ -252,6 +292,9 @@ function showHome() {
     ${isIOS && !isStandalone && !dismissed ? `<div class="banner">
       ${icon('share')}<span><b>Install on your iPhone:</b> tap Share, then “Add to Home Screen”. It opens full-screen and iOS keeps your playlists safe.</span>
       <button class="icon-btn" id="tip-close" aria-label="Dismiss">${icon('close')}</button></div>` : ''}
+    ${serverProxy.needsKey ? `<div class="banner">
+      ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
+      <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
     ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search all channels" autocomplete="off" autocorrect="off" spellcheck="false"></label>` : ''}
     ${cw.length ? `<div class="section-title">Continue watching</div>
       <div class="strip">${cw.map((e, i) => `<button class="cw" data-cw="${i}">
@@ -273,6 +316,7 @@ function showHome() {
           <button class="btn primary" id="add-first">Add playlist</button></div>`}`;
 
   $('#add-first')?.addEventListener('click', addPlaylistSheet);
+  $('#server-key')?.addEventListener('click', enterServerKey);
   $('#tip-close')?.addEventListener('click', () => {
     try { localStorage.setItem('install-tip', 'off'); } catch {}
     $('.banner').remove();
@@ -1476,7 +1520,10 @@ async function settingsSheet() {
   sheet(`<div class="sheet-title">Settings</div>
     <form class="form" id="settings">
       <div class="section-title">Proxy</div>
-      <p class="muted">Lets the app reach http:// IPTV servers and servers that block web apps. Set up your own free one in 5 minutes: <a href="https://github.com/wmorgan97/m3u-player/blob/main/proxy/README.md" target="_blank" rel="noopener">instructions</a>.</p>
+      ${serverProxy.available
+        ? `<p class="muted">Your server’s built-in proxy is ${serverProxy.needsKey ? '<b>waiting for its key</b>' : 'active'}. Leave the address below empty to use it.</p>
+           <button type="button" class="btn" id="server-key-2">${serverProxy.needsKey ? 'Enter server key' : 'Change server key'}</button>`
+        : `<p class="muted">Lets the app reach http:// IPTV servers and servers that block web apps. Host the app on your own server (it has a proxy built in) or set up a free one: <a href="https://github.com/wmorgan97/m3u-player/blob/main/proxy/README.md" target="_blank" rel="noopener">instructions</a>.</p>`}
       <label>Proxy address<input name="proxy" value="${esc(s.proxy)}" placeholder="https://m3u-proxy.you.workers.dev/?url={url}" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
       <label>Send streams through the proxy<select name="streamProxy">
         ${[['http', 'Only http:// streams (recommended)'], ['all', 'All streams'], ['off', 'Never']].map(([v, l]) => `<option value="${v}" ${s.streamProxy === v ? 'selected' : ''}>${l}</option>`).join('')}
@@ -1494,6 +1541,7 @@ async function settingsSheet() {
     <div class="form-actions"><button class="btn" id="backup">Back up</button><label class="btn file-btn">Restore<input type="file" id="restore" accept=".json,application/json" hidden></label></div>
     <div class="form-actions"><button class="btn danger" id="wipe">Erase all data</button></div>`, {
     onMount: el => {
+      el.querySelector('#server-key-2')?.addEventListener('click', enterServerKey);
       el.querySelector('form').onsubmit = async e => {
         e.preventDefault();
         const f = new FormData(e.target);
