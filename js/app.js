@@ -1159,6 +1159,7 @@ async function runDownload(meta) {
     const res = await fetch(`${serverApi('download')}&q=${meta.q}&url=${encodeURIComponent(meta.orig)}`, { signal: ctrl.signal, cache: 'no-store' });
     if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
     meta.duration = Number(res.headers.get('x-duration')) || 0;
+    meta.estimate = Number(res.headers.get('x-estimate')) || 0;
     const reader = res.body.getReader();
     let buf = [], size = 0, lastSave = 0;
     for (;;) {
@@ -1188,21 +1189,81 @@ async function offlineBlob(meta) {
   return new Blob(parts.filter(Boolean), { type: 'video/mp4' });
 }
 async function playOffline(meta) {
+  if (meta.disk) return playDiskFile(meta);
   const url = URL.createObjectURL(await offlineBlob(meta));
   playChannel([{ id: meta.id, kind: meta.kind, name: meta.name, logo: meta.logo, group: meta.group, year: meta.year, url, pkey: meta.orig, offline: true, src: meta.src }], 0);
 }
 async function deleteDownload(meta) {
   if (dlActive?.id === meta.id) dlActive.ctrl.abort();
   for (let i = 0; i < meta.parts; i++) await db.del(`dlc:${meta.id}:${i}`).catch(() => {});
+  if (meta.disk) await db.del(`dlh:${meta.id}`).catch(() => {});   // the file itself stays on disk
   delete state.downloads[meta.id];
   await db.set('downloads', state.downloads);
 }
 function downloadMenu(item) {
-  menu(`Download ${item.name}`, [
-    { label: 'Standard (720p, ~1 GB per 2 hours)', fn: () => startDownload(item, '720') },
-    { label: 'High (1080p, ~2.5 GB per 2 hours)', fn: () => startDownload(item, '1080') },
-    { label: 'Original quality (biggest)', fn: () => startDownload(item, 'orig') },
+  const disk = !!window.showSaveFilePicker;   // Chrome/Edge on a computer: save straight to a file you choose
+  const pick = (q, label) => ({ label, fn: () => (disk ? saveToDisk(item, q) : startDownload(item, q)) });
+  menu(`${disk ? 'Save to disk' : 'Download'}: ${item.name}`, [
+    pick('720', 'Standard (720p, ~1 GB per 2 hours)'),
+    pick('1080', 'High (1080p, ~2.5 GB per 2 hours)'),
+    pick('orig', 'Original quality (biggest)'),
+    disk && { label: 'Keep inside the app instead (browser storage)', fn: () => menu('Quality', [
+      { label: 'Standard (720p)', fn: () => startDownload(item, '720') }, { label: 'High (1080p)', fn: () => startDownload(item, '1080') }, { label: 'Original', fn: () => startDownload(item, 'orig') }]) },
   ]);
+}
+// Computer: the MP4 streams from the server straight into a file on the hard drive (no storage cap, plays in
+// anything). The file handle is kept so the Downloads page can play it later without asking again.
+async function saveToDisk(item, q) {
+  if (!canSync()) return toast('Downloads need your server connection');
+  if (dlActive) return toast('One download at a time: wait for the current one to finish');
+  const safe = item.name.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+  let handle;
+  try { handle = await showSaveFilePicker({ suggestedName: `${safe}.mp4`, types: [{ description: 'MP4 video', accept: { 'video/mp4': ['.mp4'] } }] }); } catch { return; }
+  const id = `dl-${uid()}`;
+  const meta = { id, name: item.name, logo: item.logo || '', group: item.group || '', year: item.year || '', kind: item.kind === 'episode' ? 'episode' : 'movie', q, bytes: 0, parts: 0, done: false, at: Date.now(), orig: item.url, src: item.src, disk: true, file: handle.name };
+  state.downloads[id] = meta;
+  await db.set('downloads', state.downloads);
+  try { await db.set(`dlh:${id}`, handle); } catch {}
+  toast(`Saving ${handle.name}`, { action: 'View', fn: () => { location.hash = '#/downloads'; } });
+  const ctrl = new AbortController();
+  dlActive = { id, ctrl };
+  let writable;
+  try {
+    writable = await handle.createWritable();
+    const res = await fetch(`${serverApi('download')}&q=${q}&url=${encodeURIComponent(item.url)}`, { signal: ctrl.signal, cache: 'no-store' });
+    if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
+    meta.duration = Number(res.headers.get('x-duration')) || 0;
+    meta.estimate = Number(res.headers.get('x-estimate')) || 0;
+    const reader = res.body.getReader();
+    let lastSave = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await writable.write(value);
+      meta.bytes += value.length;
+      if (Date.now() - lastSave > 3000) { lastSave = Date.now(); db.set('downloads', state.downloads).catch(() => {}); refreshDownloadsUi(); }
+    }
+    await writable.close();
+    if (meta.bytes < 1e6) throw new Error('The server sent no video (the file may be unavailable)');
+    meta.done = true;
+  } catch (e) {
+    meta.error = e.name === 'AbortError' ? 'Cancelled' : (e.message || 'Failed');
+    try { await writable?.abort(); } catch {}
+  }
+  dlActive = null;
+  await db.set('downloads', state.downloads);
+  refreshDownloadsUi();
+  toast(meta.done ? `Saved ${handle.name} (${fmtBytes(meta.bytes)})` : `Save stopped: ${meta.error}`);
+}
+async function playDiskFile(meta) {
+  const handle = await db.get(`dlh:${meta.id}`).catch(() => null);
+  if (!handle) return toast('That file can’t be reopened from here. Open it from Finder instead.');
+  try {
+    if ((await handle.queryPermission({ mode: 'read' })) !== 'granted' && (await handle.requestPermission({ mode: 'read' })) !== 'granted') return toast('Permission to read the file was refused');
+    const file = await handle.getFile();
+    const url = URL.createObjectURL(file);
+    playChannel([{ id: meta.id, kind: meta.kind, name: meta.name, logo: meta.logo, group: meta.group, year: meta.year, url, pkey: meta.orig, offline: true, src: meta.src }], 0);
+  } catch { toast('That file isn’t there any more (moved or deleted?)'); }
 }
 function refreshDownloadsUi() { if (location.hash === '#/downloads') showDownloads(); }
 async function showDownloads() {
@@ -1212,12 +1273,12 @@ async function showDownloads() {
   let space = '';
   try { const e = await navigator.storage?.estimate?.(); if (e?.quota) space = `${fmtBytes(e.usage || 0)} used of ${fmtBytes(e.quota)} available on this device`; } catch {}
   view.innerHTML = `
-    <p class="muted">${esc(space || 'Downloaded titles play without a connection.')}</p>
+    <p class="muted">${esc(space || 'Downloaded titles play without a connection.')}${window.showSaveFilePicker ? ' On this computer, downloads go straight to a file you choose.' : ''}</p>
     ${list.length ? `<ul class="cards">${list.map(m => `<li class="card dl" data-dl="${m.id}">
       <span class="hs-poster">${m.logo ? `<img src="${esc(m.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
       <span class="card-text"><span class="card-title">${esc(m.name)}</span>
-        <span class="muted">${m.done ? `${fmtBytes(m.bytes)} · ${m.q === 'orig' ? 'Original' : m.q + 'p'}${m.duration ? ` · ${fmtDur(m.duration)}` : ''}` : m.error ? `Stopped: ${esc(m.error)} · ${fmtBytes(m.bytes)} saved` : `Downloading… ${fmtBytes(m.bytes)}${m.duration ? '' : ''}`}</span>
-        ${!m.done && !m.error ? '<span class="bar dl-bar"><i class="indeterminate"></i></span>' : ''}</span>
+        <span class="muted">${m.done ? `${m.disk ? `On disk: ${esc(m.file)} · ` : ''}${fmtBytes(m.bytes)} · ${m.q === 'orig' ? 'Original' : m.q + 'p'}${m.duration ? ` · ${fmtDur(m.duration)}` : ''}` : m.error ? `Stopped: ${esc(m.error)} · ${fmtBytes(m.bytes)} saved` : `${m.disk ? 'Saving to disk' : 'Downloading'}… ${fmtBytes(m.bytes)}${m.estimate ? ` of about ${fmtBytes(m.estimate)} (${Math.min(99, Math.round((m.bytes / m.estimate) * 100))}%)` : ''}`}</span>
+        ${!m.done && !m.error ? `<span class="bar dl-bar">${m.estimate ? `<i style="width:${Math.min(99, (m.bytes / m.estimate) * 100).toFixed(1)}%"></i>` : '<i class="indeterminate"></i>'}</span>` : ''}</span>
       ${m.done ? `<button class="btn primary small" data-act="play">${icon('play')} Play</button>` : m.error ? '<button class="btn small" data-act="retry">Retry</button>' : '<button class="btn small" data-act="cancel">Cancel</button>'}
       <button class="icon-btn" data-act="delete" aria-label="Delete">${icon('close')}</button>
     </li>`).join('')}</ul>`
@@ -1230,7 +1291,7 @@ async function showDownloads() {
     if (act === 'play' || (!act && m.done)) return playOffline(m);
     if (act === 'cancel' && dlActive?.id === m.id) return dlActive.ctrl.abort();
     if (act === 'retry') { if (dlActive) return toast('One download at a time'); m.bytes = 0; m.parts = 0; runDownload(m); return showDownloads(); }
-    if (act === 'delete') { if (!await confirmDialog(`Delete the download of “${m.name}”?`, 'Delete', true)) return; await deleteDownload(m); showDownloads(); }
+    if (act === 'delete') { if (!await confirmDialog(m.disk ? `Remove “${m.name}” from this list? The file on your disk is kept.` : `Delete the download of “${m.name}”?`, m.disk ? 'Remove' : 'Delete', true)) return; await deleteDownload(m); showDownloads(); }
   };
 }
 

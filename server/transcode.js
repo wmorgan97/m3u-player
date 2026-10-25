@@ -71,7 +71,7 @@ function probeFile(target) {
   if (probes.has(target)) return probes.get(target);
   const job = new Promise(resolve => {
     execFile(FFPROBE, ['-v', 'error', '-user_agent', 'Mozilla/5.0', '-show_entries',
-      'format=duration:stream=index,codec_type,codec_name,width,height,color_transfer,profile,pix_fmt,field_order,channels:stream_tags=language,title', '-of', 'json', target],
+      'format=duration,bit_rate:stream=index,codec_type,codec_name,width,height,color_transfer,profile,pix_fmt,field_order,channels:stream_tags=language,title', '-of', 'json', target],
       { timeout: 25_000, windowsHide: true, maxBuffer: 4 << 20 }, (err, out) => {
         if (err) return resolve({ duration: 0, audio: [], subs: [] });
         let j; try { j = JSON.parse(out); } catch { return resolve({ duration: 0, audio: [], subs: [] }); }
@@ -82,7 +82,7 @@ function probeFile(target) {
         const audio = streams.filter(x => x.codec_type === 'audio').map(x => ({ i: ai++, label: name(x) || `Audio ${ai}`, lang: x.tags?.language || '', codec: x.codec_name, channels: x.channels || 0 }));
         const TEXT = new Set(['subrip', 'srt', 'ass', 'ssa', 'webvtt', 'mov_text', 'text']);
         const subs = streams.filter(x => x.codec_type === 'subtitle').map(x => ({ i: si++, label: name(x) || `Subtitles ${si}`, lang: x.tags?.language || '', codec: x.codec_name, text: TEXT.has(x.codec_name) }));
-        resolve({ duration: Number(j.format?.duration) || 0, audio, subs,
+        resolve({ duration: Number(j.format?.duration) || 0, bitrate: Number(j.format?.bit_rate) || 0, audio, subs,
           video: v ? { codec: v.codec_name, width: v.width, height: v.height, profile: v.profile || '', pix: v.pix_fmt || '', bit10: /p10|p12|10le|12le/.test(v.pix_fmt || '') || /10/.test(v.profile || ''),
             chroma444: /422|444/.test(v.pix_fmt || ''), interlaced: /^(tt|bb|tb|bt)$/.test(v.field_order || ''), hdr: /smpte2084|arib-std-b67/.test(v.color_transfer || '') } : null });
       });
@@ -274,7 +274,10 @@ export async function handleDownload(req, res, url, send, allowed) {
   if (!probe.duration) return send(res, 502, 'Could not read the file');
   const v = probe.video || {};
   const copy = q === 'orig' && v.codec === 'h264' && !v.bit10 && !v.chroma444 && !v.interlaced;
-  const target = q === 'orig' ? (v.height || 0) : Math.min(Number(q), v.height || Number(q));
+  const target = q === 'orig' ? Math.min(v.height || 1080, 1080) : Math.min(Number(q), v.height || Number(q));   // a converted "original" stops at 1080p
+  // Rough final size so the app can draw a real progress bar: the file's own bitrate when copying, else the encoder's.
+  const kbps = copy ? (probe.bitrate / 1000 || 5000) : (q === '720' ? 2600 : target >= 1080 ? 5200 : 2600) + 128;
+  const estimate = Math.round(probe.duration * kbps * 125);
   await closeOthers(null, t.hostname);          // one provider connection: a download takes it
   downloads.get(t.hostname)?.proc.kill();
   const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2',
@@ -289,7 +292,7 @@ export async function handleDownload(req, res, url, send, allowed) {
   console.log(`[dl] start ${t.href.slice(0, 80)} q=${q} ${copy ? 'copy' : 'encode'} ${v.codec} ${v.height}p`);
   let errTail = '';
   proc.stderr.on('data', d => { errTail = (errTail + d).slice(-800); });
-  res.writeHead(200, { 'content-type': 'video/mp4', 'access-control-allow-origin': '*', 'cache-control': 'no-store', 'x-duration': String(probe.duration), 'x-mode': copy ? 'copy' : 'encode' });
+  res.writeHead(200, { 'content-type': 'video/mp4', 'access-control-allow-origin': '*', 'cache-control': 'no-store', 'x-duration': String(probe.duration), 'x-mode': copy ? 'copy' : 'encode', 'x-estimate': String(estimate), 'access-control-expose-headers': 'x-duration, x-mode, x-estimate' });
   proc.stdout.pipe(res);
   proc.on('exit', code => { if (downloads.get(t.hostname)?.proc === proc) downloads.delete(t.hostname); if (code && !res.writableEnded) console.log(`[dl] failed: ${errTail.split('\n').filter(Boolean).pop() || code}`); res.end(); });
   res.on('close', () => { try { proc.kill(); } catch {} });
