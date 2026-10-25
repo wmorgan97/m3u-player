@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens offline. Streams, logos and
 // playlist downloads (other origins) always go straight to the network.
 
-const CACHE = 'm3u-player-v63';
+const CACHE = 'm3u-player-v64';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/polish.css', 'css/desktop.css',
   'js/app.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/epg-worker.js', 'js/vod.js', 'js/native.js', 'vendor/hls.min.js',
@@ -26,7 +26,7 @@ self.addEventListener('fetch', e => {
   // Only the app's own files; never the proxy, transcode, sync or guide endpoints.
   if (req.method !== 'GET' || url.origin !== location.origin
       || url.pathname.endsWith('/proxy') || url.pathname === '/hls' || url.pathname.startsWith('/hls/')
-      || url.pathname === '/sync' || url.pathname === '/guide') return;
+      || url.pathname === '/sync' || url.pathname === '/guide' || url.pathname === '/vod') return;
   e.respondWith(caches.open(CACHE).then(async cache => {
     const fresh = fetch(req, { cache: 'no-store' }).then(res => {
       if (res.ok) cache.put(req, res.clone());

@@ -714,9 +714,17 @@ async function loadVod(p, tab, { force = false } = {}) {
   }
   const x = xtOf(p);
   try {
-    const items = tab === 'movies'
-      ? movieItems(x, await x.categories('vod'), await x.vodStreams())
-      : seriesItems(await x.categories('series'), await x.seriesList());
+    // With the VPS: the server fetches the provider's 50-70MB catalogue, slims and caches it, and the
+    // phone gets a small gzipped list (server/catalog.js). Without it, straight from the provider.
+    let cats, list;
+    if (canSync()) {
+      const res = await fetch(serverApi('vod'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ server: x.server, user: x.user, pass: x.pass, kind: tab }) });
+      if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
+      ({ cats, items: list } = await res.json());
+    } else {
+      [cats, list] = tab === 'movies' ? await Promise.all([x.categories('vod'), x.vodStreams()]) : await Promise.all([x.categories('series'), x.seriesList()]);
+    }
+    const items = tab === 'movies' ? movieItems(x, cats, list) : seriesItems(cats, list);
     items.forEach(it => { it.src = p.id; });
     vodCache.set(key, items);
     db.set(`vod:${key}`, { at: Date.now(), items }).catch(() => {});
