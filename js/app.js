@@ -589,10 +589,13 @@ function showPlaylist(p) {
   if (memo && !pendingQuery) pendingQuery = memo.query || '';
   const k = m3uKinds(p);
   const showTabs = p.kind === 'xtream' || p._hasVod;
-  const tabBtn = (t, label) => `<button data-tab="${t}"${t === 'live' ? ' class="active"' : ''}>${label}</button>`;
+  // A VOD-only playlist (movies/series from one provider, live from another) opens on Movies, not an empty Live tab.
+  const liveEmpty = k && !k.live.length;
+  const firstTab = memo?.tab || (liveEmpty ? (k.movies.length ? 'movies' : 'series') : 'live');
+  const tabBtn = (t, label) => `<button data-tab="${t}"${t === firstTab ? ' class="active"' : ''}>${label}</button>`;
   view.innerHTML = `
     ${showTabs ? `<div class="seg" id="seg">
-      ${tabBtn('live', 'Live TV')}${(p.kind === 'xtream' || k?.movies.length) ? tabBtn('movies', 'Movies') : ''}${(p.kind === 'xtream' || k?.series.length) ? tabBtn('series', 'Series') : ''}</div>` : ''}
+      ${(p.kind === 'xtream' || !liveEmpty) ? tabBtn('live', 'Live TV') : ''}${(p.kind === 'xtream' || k?.movies.length) ? tabBtn('movies', 'Movies') : ''}${(p.kind === 'xtream' || k?.series.length) ? tabBtn('series', 'Series') : ''}</div>` : ''}
     <div class="filters">
       <label class="search">${icon('search')}<input id="q" type="search" placeholder="Search" autocomplete="off" autocorrect="off" spellcheck="false" value="${esc(pendingQuery)}"></label>
       <div class="chips" id="chips"></div>
@@ -630,7 +633,7 @@ function showPlaylist(p) {
   // current stream on a mere scroll-touch
   $('#list').onpointerup = e => { const el = e.target.closest('.row'); if (el && !state.selecting) warm(state.filtered[+el.dataset.i]?.url); };
   observer.observe($('#sentinel'));
-  if (memo?.tab && memo.tab !== 'live' && $(`#seg [data-tab="${memo.tab}"]`)) $(`#seg [data-tab="${memo.tab}"]`).click();
+  if (firstTab !== 'live' && $(`#seg [data-tab="${firstTab}"]`)) { state.tab = firstTab; refreshPlaylistView(); if (p.kind === 'xtream') loadVod(p, firstTab); }
   else refreshPlaylistView();
   if (memo) { while (state.rendered < Math.min(memo.rendered || 0, state.filtered.length)) renderMore(); requestAnimationFrame(() => scrollTo(0, memo.y)); }
   else window.scrollTo(0, 0);
