@@ -149,6 +149,8 @@ function warm(url) {
   const tc = url && transcodeUrl(url);
   if (!tc || /\.m3u8(\?|#|$)/i.test(url)) return;
   if (Date.now() - (warmed.get(url) || 0) < 20_000) return;
+  const cur = nowChannel();
+  if (cur && cur.url !== url) unwarm(cur.url);   // providers allow one connection: free it before opening the next
   warmed.set(url, Date.now());
   fetch(tc.replace('/hls?', '/hls/warm?'), { keepalive: true }).catch(() => {});
 }
@@ -487,8 +489,9 @@ function showPlaylist(p) {
     if (state.tab !== 'live' && p.kind === 'xtream') loadVod(p, state.tab);
   });
   $('#list').onclick = onListClick;
-  // start the transcoder on touch-down, ~150-300ms before the tap registers
-  $('#list').onpointerdown = e => { const el = e.target.closest('.row'); if (el) warm(state.filtered[+el.dataset.i]?.url); };
+  // start the transcoder on the confirmed tap (pointerup lands just before click), without killing the
+  // current stream on a mere scroll-touch
+  $('#list').onpointerup = e => { const el = e.target.closest('.row'); if (el && !state.selecting) warm(state.filtered[+el.dataset.i]?.url); };
   observer.observe($('#sentinel'));
   refreshPlaylistView();
   window.scrollTo(0, 0);
@@ -1861,7 +1864,7 @@ function trackProgress(force = false) {
 
 function bindPlayer() {
   video.addEventListener('waiting', () => { if (state.playing) setStatus('Buffering…'); });
-  video.addEventListener('playing', () => setStatus(''));
+  video.addEventListener('playing', () => { setStatus(''); hideTuning(); });
   video.addEventListener('timeupdate', () => trackProgress());
   video.addEventListener('pause', () => trackProgress(true));
   video.addEventListener('ended', () => {
@@ -1957,6 +1960,13 @@ function step(delta) {
 }
 
 const retried = new Set();   // channels that already got their one silent retry
+// Set-top-box style banner while a channel starts: instant feedback, and no black screen.
+function showTuning(c) {
+  const el = $('#tuning'); if (!el) return;
+  el.innerHTML = `${logoHtml(c)}<span class="tuning-name">${esc(c.name)}</span><span class="muted">${esc(prettyGroup(c.group) || '')}</span>`;
+  el.hidden = false; el.classList.remove('out');
+}
+function hideTuning() { const el = $('#tuning'); if (el && !el.hidden) { el.classList.add('out'); setTimeout(() => { el.hidden = true; }, 320); } }
 function playChannel(list, index) {
   const c = list[index];
   if (!c) return;
@@ -1970,15 +1980,25 @@ function playChannel(list, index) {
   $('#next').disabled = index === list.length - 1;
   if (location.hash.startsWith('#/guide')) sizeGuide();
   setStatus('Connecting…');
+  showTuning(c);
   highlightPlaying();
   addRecent(c);
-  const prev = nowChannel();
-  if (prev && prev.url !== c.url) unwarm(prev.url);   // free the provider slot immediately
+  tuneFrom = nowChannel();
   try {
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({ title: c.name, artist: c.group || 'M3U Player', artwork: c.logo ? [{ src: c.logo }] : [] });
     }
   } catch {}
+  clearTimeout(tuneTimer);
+  const settleMs = Date.now() - lastTune < 600 ? 350 : 0;   // rapid skipping: wait for the user to settle
+  lastTune = Date.now();
+  tuneTimer = setTimeout(() => tune(c, list, index), settleMs);
+}
+let tuneTimer = 0, lastTune = 0, tuneFrom = null;
+function tune(c, list, index) {
+  if (nowChannel() !== c) return;
+  if (tuneFrom && tuneFrom.url !== c.url) unwarm(tuneFrom.url);   // free the single provider slot right before connecting
+  tuneFrom = null;
   player.play(c.url).then(ok => {
     if (!ok) return;
     setStatus('');

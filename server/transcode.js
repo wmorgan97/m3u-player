@@ -19,8 +19,11 @@ const ROOT = join(tmpdir(), 'm3u-hls');
 const IDLE_MS = 20_000;        // kill ffmpeg this long after the last segment fetch
 const MAX_SESSIONS = 3;        // concurrent transcodes: IPTV accounts allow few provider connections
 const START_TIMEOUT_MS = 25_000;
-const READY_SEGMENTS = 1;      // one complete segment: segments are keyframe-aligned (2-4s), which is buffer enough to start
-const START_BEHIND_LIVE_S = 4; // start playback this far behind the live edge so there's always buffer in hand
+// Re-encoding forces a keyframe every second (fast starts on huge-GOP sources) but costs ~4 cores and is SLOWER
+// for 1080p50 sports feeds; copy mode measured 0.9-2.1s cold on this provider. Opt in with TRANSCODE_VIDEO=1.
+const REENCODE = process.env.TRANSCODE_VIDEO === '1';
+const READY_SEGMENTS = REENCODE ? 2 : 1;   // copy-mode segments are keyframe-aligned (2-4s): one is buffer enough
+const START_BEHIND_LIVE_S = REENCODE ? 3 : 4; // start playback this far behind the live edge so there's always buffer in hand
 
 const TYPES = {
   '.m3u8': 'application/vnd.apple.mpegurl',
@@ -63,9 +66,13 @@ async function startSession(id, target) {
     '-probesize', '500000', '-analyzeduration', '500000',     // open the input fast (don't over-probe a known TS)
     '-fflags', '+genpts+flush_packets', '-i', target,
     '-map', '0:v:0?', '-map', '0:a:0?',
-    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+    ...(REENCODE
+      ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
+         '-g', '25', '-keyint_min', '25', '-sc_threshold', '0', '-crf', '22', '-maxrate', '5M', '-bufsize', '10M', '-threads', '4']
+      : ['-c:v', 'copy']),
+    '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
     '-flush_packets', '1', '-muxdelay', '0',
-    '-f', 'hls', '-hls_time', '2', '-hls_list_size', '8',      // 2s segments: stable buffer, still a quick start
+    '-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_list_size', '12',
     '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments', '-hls_segment_type', 'mpegts',
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
   ];
@@ -81,10 +88,18 @@ async function startSession(id, target) {
 
 function stopSession(id) {
   const s = sessions.get(id);
-  if (!s) return;
+  if (!s) return Promise.resolve();
   sessions.delete(id);
+  const exited = s.exited ? Promise.resolve() : new Promise(r => { s.proc.once('exit', r); setTimeout(r, 1500); });
   try { s.proc.kill(); } catch {}
-  fs.rm(s.dir, { recursive: true, force: true }).catch(() => {});
+  exited.then(() => fs.rm(s.dir, { recursive: true, force: true }).catch(() => {}));
+  return exited;
+}
+// Providers allow one connection: before opening a new stream, close every other one and WAIT for the
+// processes to exit so the old connection is really gone (rapid channel skipping otherwise trips rate limits).
+async function closeOthers(keepId) {
+  const others = [...sessions.keys()].filter(k => k !== keepId);
+  if (others.length) { await Promise.all(others.map(stopSession)); await new Promise(r => setTimeout(r, 120)); }
 }
 
 setInterval(() => {
@@ -92,10 +107,11 @@ setInterval(() => {
   for (const [id, s] of sessions) if (now - s.lastAccess > IDLE_MS) stopSession(id);
 }, 10_000).unref();
 
-async function waitForPlaylist(dir, timeout) {
+async function waitForPlaylist(dir, timeout, alive = () => true) {
   const file = join(dir, 'index.m3u8');
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
+    if (!alive()) return false;   // the user moved on to another channel
     try {
       const t = await fs.readFile(file, 'utf8');
       if ((t.match(/\.ts/g) || []).length >= READY_SEGMENTS) return true;
@@ -152,18 +168,14 @@ export async function handleHls(req, res, url) {
   }
   if (s && s.exited) { stopSession(id); s = null; }
   if (!s) {
-    if (sessions.size >= MAX_SESSIONS) {
-      if (warm) return send(res, 204, '');
-      // evict the least recently used session that isn't being watched, so a tap always wins over a pre-warm
-      const lru = [...sessions.entries()].sort((a, b) => a[1].lastAccess - b[1].lastAccess)[0];
-      if (lru) stopSession(lru[0]); else return send(res, 503, 'Too many streams in progress — stop one and retry');
-    }
+    await closeOthers(id);           // one provider connection at a time, and never two in flight
     s = await startSession(id, t.href);
   }
   s.lastAccess = Date.now();
   if (warm) return send(res, 204, '');
 
-  const ok = await waitForPlaylist(s.dir, START_TIMEOUT_MS);
+  const ok = await waitForPlaylist(s.dir, START_TIMEOUT_MS, () => sessions.get(id) === s);
+  if (sessions.get(id) !== s) return send(res, 409, 'Superseded by another channel');
   if (!ok) {
     const tail = (s.errTail || '').split('\n').filter(Boolean).pop() || 'the stream did not start';
     console.log(`[hls] FAIL ${id}: ${tail}`);
