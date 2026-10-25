@@ -1,0 +1,67 @@
+/* Desktop and large tablets (fine pointer, wide screen). Phone stays the primary layout; this
+   file only widens and re-flows it: the player docks beside the list, grids get more columns,
+   rows get hover states, and the whole thing stops being a stretched phone page. */
+
+@media (hover: hover) and (pointer: fine) {
+  .row:hover, .card:hover, .menu-item:hover, .sched-item:hover, .ep:hover { background: var(--surface); }
+  .row.playing:hover { background: var(--surface-2); }
+  .chip:hover:not(.active), .btn:hover:not(:disabled), .icon-btn:hover:not(:disabled) { background: var(--surface-2); }
+  .bt:hover, .rc:hover .logo, .tiles .card:hover { filter: brightness(1.12); }
+  .gprog:hover { filter: brightness(1.2); }
+  .gch:hover { background: var(--surface-2); }
+  .resume:hover { filter: brightness(1.08); }
+  /* dark, slim scrollbars instead of the browser's grey ones */
+  * { scrollbar-width: thin; scrollbar-color: var(--surface-2) transparent; }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-thumb { background: var(--surface-2); border-radius: 8px; border: 2px solid var(--bg); }
+  *::-webkit-scrollbar-track { background: transparent; }
+  .chips { scrollbar-width: none; }
+}
+
+@media (min-width: 900px) {
+  :root { --gutter: 24px; }
+  #view { max-width: 1240px; padding-left: var(--gutter); padding-right: var(--gutter); padding-bottom: 48px; }
+  .topbar { padding-left: 16px; padding-right: 16px; }
+  .topbar h1 { font-size: 20px; }
+  .chips { margin: 0; padding-left: 0; padding-right: 0; }
+  .filters { margin: 0; padding-left: 0; padding-right: 0; }
+
+  /* Home */
+  .home-search { max-width: 560px; }
+  .cards.tiles { grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .browse { grid-template-rows: repeat(2, auto); grid-auto-columns: calc((100% - 24px) / 4); gap: 12px; }
+  .browse.scrolls { grid-auto-columns: calc((100% - 36px) / 4.3); }
+  .rc { width: 100px; }
+  .rc .logo { width: 84px; height: 84px; }
+  .resume { max-width: 720px; }
+
+  /* Lists: two columns of rows when nothing is playing */
+  .list:not(.grid) { display: grid; grid-template-columns: 1fr 1fr; column-gap: 20px; }
+  .list.grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .row { contain-intrinsic-size: auto 62px; }
+  .empty.small { grid-column: 1 / -1; }
+
+  /* Sheets open as a centred dialog, not a bottom drawer */
+  .sheet { bottom: auto; top: 50%; transform: translateY(-50%); max-width: 640px; max-height: 84vh; border-radius: 20px; padding-bottom: 20px; }
+  .sheet-grip { display: none; }
+  .ovlist { max-height: 56vh; overflow-y: auto; }
+
+  /* Guide: taller, more room */
+  #view.wide { padding-left: var(--gutter); padding-right: var(--gutter); }
+  .gtools .gq { max-width: 360px; }
+}
+
+/* Playing on a wide screen: the video docks on the right and stays put; the list scrolls beside it. */
+@media (min-width: 1100px) {
+  body.playing .player { position: fixed; top: calc(var(--safe-top) + 50px); right: 0; bottom: 0; width: clamp(420px, 44vw, 760px); border-bottom: 0; border-left: 1px solid var(--line); background: var(--bg); overflow: hidden; z-index: 15; }
+  body.playing .stage { max-width: none; }
+  body.playing .player video { aspect-ratio: 16 / 9; max-height: none; height: auto; }
+  body.playing .player-bar { padding: 12px 16px; }
+  body.playing #view { max-width: none; margin-right: clamp(420px, 44vw, 760px); padding-right: var(--gutter); }
+  body.playing .list:not(.grid) { grid-template-columns: 1fr; }
+  body.playing .filters { top: calc(var(--safe-top) + 50px); }
+  body.playing .ctl-icons [data-c="airplay"], body.playing .ctl-icons [data-c="pip"] { display: inline-grid; }
+  body.playing.multi-on .player { display: none; }
+  /* Full-screen-ish: double-click the video */
+  body.playing .stage video { cursor: pointer; }
+}

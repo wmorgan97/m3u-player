@@ -90,6 +90,7 @@ async function init() {
   syncFavs();
   bindPlayer();
   new ResizeObserver(([e]) => document.documentElement.style.setProperty('--chrome-h', `${e.target.offsetHeight}px`)).observe($('.chrome'));
+  bindKeys();
   window.addEventListener('hashchange', route);
   window.addEventListener('resize', debounce(sizeGuide, 100));
   route();
@@ -2515,6 +2516,43 @@ function bindControls() {
   }, 1000);
 }
 
+// Desktop keyboard: ↑/↓ or PageUp/PageDown change channel, Space pauses, M mutes, F full screen,
+// L channel list, / focuses search, Esc closes, typing digits zaps by channel number.
+let zapBuf = '', zapTimer = 0;
+function bindKeys() {
+  document.addEventListener('keydown', e => {
+    const typing = e.target.matches('input, textarea, select');
+    const sheetOpen = !$('#sheet').hidden;
+    if (e.key === 'Escape') { if (sheetOpen) closeSheet(); else if (state.playing && !typing) stopPlaying(); return; }
+    if (typing || sheetOpen || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === '/') { e.preventDefault(); ($('#q') || $('#home-q') || $('#gq'))?.focus(); return; }
+    if (/^\d$/.test(e.key) && (state.playing || state.current)) {
+      zapBuf += e.key; clearTimeout(zapTimer);
+      toast(`Channel ${zapBuf}…`);
+      zapTimer = setTimeout(() => {
+        const n = +zapBuf; zapBuf = '';
+        const list = state.playing?.list || state.filtered;
+        const i = list.findIndex(c => c.num === n);
+        if (i >= 0) playChannel(list, i); else toast(`No channel ${n}`);
+      }, 900);
+      return;
+    }
+    if (!state.playing) return;
+    switch (e.key) {
+      case 'ArrowUp': case 'PageUp': e.preventDefault(); step(-1); break;
+      case 'ArrowDown': case 'PageDown': e.preventDefault(); step(1); break;
+      case ' ': case 'k': e.preventDefault(); video.paused ? video.play().catch(() => {}) : video.pause(); showControls(); break;
+      case 'ArrowLeft': e.preventDefault(); video.currentTime = Math.max(seekRange()?.start ?? 0, video.currentTime - 30); showControls(); break;
+      case 'ArrowRight': e.preventDefault(); { const r = seekRange(); if (r) video.currentTime = Math.min(r.end - 3, video.currentTime + 30); showControls(); } break;
+      case 'm': video.muted = !video.muted; showControls(); break;
+      case 'f': if (video.webkitEnterFullscreen && !document.fullscreenEnabled) video.webkitEnterFullscreen(); else $('.stage').requestFullscreen?.(); break;
+      case 'l': channelsOverlay(); break;
+    }
+  });
+  // double-click the video = full screen (desktop)
+  video.addEventListener('dblclick', () => { if (document.fullscreenElement) document.exitFullscreen?.(); else $('.stage').requestFullscreen?.(); });
+}
+
 function setStatus(text, isError = false) {
   const el = $('#now-status');
   const c = nowChannel();
@@ -2671,6 +2709,7 @@ function playChannel(list, index) {
   const prev = nowChannel();
   state.playing = { list, index };
   $('#player').hidden = false;
+  document.body.classList.add('playing');
   $('#player-error').hidden = true;
   $('#now-name').textContent = c.name;
   $('#now-logo').outerHTML = logoHtml(c, 'id="now-logo"');
@@ -2757,6 +2796,7 @@ function stopPlaying() {
   player.stop();
   state.playing = null;
   $('#player').hidden = true;
+  document.body.classList.remove('playing');
   highlightPlaying();
   if (location.hash.startsWith('#/guide')) sizeGuide();
 }
