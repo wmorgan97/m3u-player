@@ -218,7 +218,7 @@ let transcodeVod = false;   // set per play: movies, episodes and catch-up get a
 const liveEnc = new Set();  // live channel urls that showed no picture: converted to H.264 from then on
 // The server hands VOD over as a complete playlist with the real length, so the video element's own
 // time and duration are the truth; seeking anywhere is a plain seek (the server makes segments on demand).
-let vodTrack = 0, vodInfo = null, subTrackEl = null, vodEnc = false;   // audio track in use, the file's probe, subtitles, "convert video for this device"
+let vodTrack = 0, vodInfo = null, subTrackEl = null, vodEnc = false, vodInfoFor = '';   // audio track in use, the file's probe, subtitles, "convert video for this device"
 // Can this device decode the file's video as-is? Chrome has no HEVC/10-bit; Safari on Apple silicon has HEVC.
 function canDecode(v) {
   if (!v) return true;
@@ -3524,6 +3524,7 @@ async function tuneVod(c, list, index) {
     vodEnc = !canDecode(d.video);
     if (vodEnc) setStatus('Converting for this device…');
   } catch { vodInfo = vodInfo || { duration: 0, audio: [], subs: [] }; }
+  if (!vodInfo) vodInfo = { duration: 0, audio: [], subs: [] };
   if (nowChannel() !== c) return;
   updateControls(); renderVodPanel(c);
   tune(c, list, index);
@@ -3532,8 +3533,8 @@ function tune(c, list, index) {
   if (nowChannel() !== c) return;
   transcodeVod = !isLiveChannel(c);
   player.vod = transcodeVod;
-  if (tuneFrom !== c) { vodTrack = 0; vodInfo = null; vodEnc = false; clearSubtitles(); }   // a different title: back to its default track
-  if (transcodeVod && !vodInfo && transcodeUrl(c.url)) return tuneVod(c, list, index);
+  if (vodInfoFor !== c.url) { vodTrack = 0; vodInfo = null; vodEnc = false; clearSubtitles(); vodInfoFor = c.url; }   // a different title: back to its default track
+  if (transcodeVod && !vodInfo && transcodeUrl(c.url)) return tuneVod(c, list, index);   // tuneVod always sets vodInfo, so this runs once
   const pr = state.progress[c.pkey || c.url];
   const resumeAt = pr && pr.v === 3 && !pr.done && pr.t > 30 && pr.t < (pr.d || Infinity) - 60 ? pr.t : 0;   // only positions saved by the current VOD logic
   if (tuneFrom && tuneFrom.url !== c.url) unwarm(streamOf(tuneFrom));   // free the single provider slot right before connecting
