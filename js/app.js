@@ -2780,7 +2780,7 @@ function trackProgress(force = false) {
   if (!force && Date.now() - lastProgressSave < 5000) return;
   lastProgressSave = Date.now();
   const t = vodPos();
-  state.progress[c.url] = { t, d, at: Date.now(), done: t / d > 0.93, item: { id: c.id, kind: c.kind, name: c.name, url: c.url, logo: c.logo, group: c.group, src: c.src } };
+  state.progress[c.url] = { t, d, v: 2, at: Date.now(), done: t / d > 0.93, item: { id: c.id, kind: c.kind, name: c.name, url: c.url, logo: c.logo, group: c.group, src: c.src } };
   const entries = Object.entries(state.progress);
   if (entries.length > MAX_PROGRESS) state.progress = Object.fromEntries(entries.sort((a, b) => b[1].at - a[1].at).slice(0, MAX_PROGRESS));
   db.set('progress', state.progress).catch(() => {});
@@ -2953,7 +2953,7 @@ function tune(c, list, index) {
   transcodeVod = !isLiveChannel(c);
   player.vod = transcodeVod;
   const pr = state.progress[c.url];
-  const resumeAt = pr && !pr.done && pr.t > 30 ? pr.t : 0;
+  const resumeAt = pr && pr.v === 2 && !pr.done && pr.t > 30 && pr.t < (pr.d || Infinity) - 60 ? pr.t : 0;   // only positions saved by the current VOD logic
   if (transcodeVod) {
     vodStart = pendingSeek ?? resumeAt;   // a seek restart, or resume where you left off, else the beginning
     vodDuration = pendingSeek !== null ? vodDuration : 0;

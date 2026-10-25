@@ -234,7 +234,9 @@ export async function handleHls(req, res, url) {
     return (!t || t.startsWith('#')) ? line : `/hls/${id}/${t}`;
   }).join('\n');
   // Start a few seconds behind the live edge so the player always has segments in hand (no edge-chasing rebuffers).
-  if (!s.vod && !/#EXT-X-START/.test(body)) body = body.replace('#EXTM3U', `#EXTM3U\n#EXT-X-START:TIME-OFFSET=-${behind},PRECISE=NO`);
+  // Live starts a few seconds behind the edge; VOD must start at the very beginning of the session, otherwise
+  // Safari treats the still-growing playlist as live and jumps to its newest part.
+  if (!/#EXT-X-START/.test(body)) body = body.replace('#EXTM3U', s.vod ? '#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES' : `#EXTM3U\n#EXT-X-START:TIME-OFFSET=-${behind},PRECISE=NO`);
   res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
   res.end(req.method === 'HEAD' ? undefined : body);
 }
