@@ -431,3 +431,8 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
 .dl-bar { display: block; max-width: 220px; margin-top: 6px; overflow: hidden; }
 .dl-bar .indeterminate { display: block; width: 40%; height: 100%; background: var(--accent); animation: dlslide 1.2s ease-in-out infinite; }
 @keyframes dlslide { 0% { transform: translateX(-100%); } 100% { transform: translateX(260%); } }
+
+/* ---------- Download stats ---------- */
+.dl-stats { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 12.5px; color: var(--muted); }
+.dl-stats b { font-size: 15px; color: var(--text); font-variant-numeric: tabular-nums; }
+.dl-stats span { font-variant-numeric: tabular-nums; }

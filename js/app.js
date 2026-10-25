@@ -1139,6 +1139,17 @@ function renderMore() {
 // browser's storage in 8 MB pieces; the Downloads page plays it from there with no connection at all.
 const DL_CHUNK = 8 << 20;
 let dlActive = null;
+// Speed over the last ~5 seconds, plus ETA from the size estimate.
+function noteSpeed(meta, delta) {
+  const now = Date.now();
+  meta.samples = (meta.samples || []).filter(s => now - s.t < 5000);
+  meta.samples.push({ t: now, b: delta });
+  const span = now - (meta.samples[0]?.t || now);
+  meta.speed = span > 500 ? meta.samples.reduce((n, s) => n + s.b, 0) / (span / 1000) : meta.speed || 0;
+  meta.startedAt ||= now;
+}
+const fmtSpeed = bps => bps >= 1e6 ? `${(bps * 8 / 1e6).toFixed(1)} Mbps` : `${Math.round(bps * 8 / 1e3)} kbps`;
+const fmtEta = s => !Number.isFinite(s) || s < 0 ? '' : s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : s >= 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)}s`;
 const fmtBytes = n => n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${Math.round(n / 1e6)} MB`;
 async function startDownload(item, q = '720') {
   if (!canSync()) return toast('Downloads need your server connection');
@@ -1165,7 +1176,7 @@ async function runDownload(meta) {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      buf.push(value); size += value.length; meta.bytes += value.length;
+      buf.push(value); size += value.length; meta.bytes += value.length; noteSpeed(meta, value.length);
       if (size >= DL_CHUNK) {
         await db.set(`dlc:${meta.id}:${meta.parts}`, new Blob(buf, { type: 'video/mp4' }));
         meta.parts++; buf = []; size = 0;
@@ -1174,10 +1185,11 @@ async function runDownload(meta) {
     }
     if (size) { await db.set(`dlc:${meta.id}:${meta.parts}`, new Blob(buf, { type: 'video/mp4' })); meta.parts++; }
     if (meta.bytes < 1e6) throw new Error('The server sent no video (the file may be unavailable)');
-    meta.done = true;
+    meta.done = true; meta.finishedAt = Date.now();
   } catch (e) {
     meta.error = e.name === 'AbortError' ? 'Cancelled' : (e.message || 'Failed');
   }
+  delete meta.samples;
   dlActive = null;
   await db.set('downloads', state.downloads);
   refreshDownloadsUi();
@@ -1242,16 +1254,17 @@ async function saveToDisk(item, q) {
       const { done, value } = await reader.read();
       if (done) break;
       await writable.write(value);
-      meta.bytes += value.length;
+      meta.bytes += value.length; noteSpeed(meta, value.length);
       if (Date.now() - lastSave > 3000) { lastSave = Date.now(); db.set('downloads', state.downloads).catch(() => {}); refreshDownloadsUi(); }
     }
     await writable.close();
     if (meta.bytes < 1e6) throw new Error('The server sent no video (the file may be unavailable)');
-    meta.done = true;
+    meta.done = true; meta.finishedAt = Date.now();
   } catch (e) {
     meta.error = e.name === 'AbortError' ? 'Cancelled' : (e.message || 'Failed');
     try { await writable?.abort(); } catch {}
   }
+  delete meta.samples;
   dlActive = null;
   await db.set('downloads', state.downloads);
   refreshDownloadsUi();
@@ -1267,24 +1280,42 @@ async function playDiskFile(meta) {
     playChannel([{ id: meta.id, kind: meta.kind, name: meta.name, logo: meta.logo, group: meta.group, year: meta.year, url, pkey: meta.orig, offline: true, src: meta.src }], 0);
   } catch { toast('That file isn’t there any more (moved or deleted?)'); }
 }
-function refreshDownloadsUi() { if (location.hash === '#/downloads') showDownloads(); }
-async function showDownloads() {
+function refreshDownloadsUi() { if (location.hash === '#/downloads') showDownloads({ keep: true }); }
+setInterval(() => { if (dlActive && location.hash === '#/downloads') showDownloads({ keep: true }); }, 1000);
+let spaceLine = '';
+async function showDownloads({ keep = false } = {}) {
   state.current = null;
   setTopbar({ title: 'Downloads', back: '#/' });
   const list = Object.values(state.downloads).sort((a, b) => b.at - a.at);
-  let space = '';
-  try { const e = await navigator.storage?.estimate?.(); if (e?.quota) space = `${fmtBytes(e.usage || 0)} used of ${fmtBytes(e.quota)} available on this device`; } catch {}
+  if (!keep || !spaceLine) { try { const e = await navigator.storage?.estimate?.(); if (e?.quota) spaceLine = `${fmtBytes(e.usage || 0)} used of ${fmtBytes(e.quota)} available on this device`; } catch {} }
+  const space = spaceLine;
+  const y = scrollY;
+  const detail = m => {
+    const pct = m.estimate ? Math.min(99, (m.bytes / m.estimate) * 100) : 0;
+    const eta = m.estimate && m.speed ? (m.estimate - m.bytes) / m.speed : NaN;
+    const elapsed = m.startedAt ? (Date.now() - m.startedAt) / 1000 : 0;
+    return `<span class="dl-stats">
+      <b>${m.estimate ? `${pct.toFixed(0)}%` : fmtBytes(m.bytes)}</b>
+      <span>${fmtBytes(m.bytes)}${m.estimate ? ` of ~${fmtBytes(m.estimate)}` : ''}</span>
+      ${m.speed ? `<span>${fmtSpeed(m.speed)}</span>` : ''}
+      ${fmtEta(eta) ? `<span>${fmtEta(eta)} left</span>` : ''}
+      ${elapsed > 5 ? `<span class="muted">${fmtEta(elapsed)} elapsed</span>` : ''}
+      <span class="muted">${m.q === 'file' ? 'exact copy' : m.q === 'orig' ? 'original · H.264' : m.q + 'p · H.264'}${m.disk ? ' · to disk' : ' · in app'}</span>
+    </span>`;
+  };
   view.innerHTML = `
     <p class="muted">${esc(space || 'Downloaded titles play without a connection.')}${window.showSaveFilePicker ? ' On this computer, downloads go straight to a file you choose.' : ''}</p>
     ${list.length ? `<ul class="cards">${list.map(m => `<li class="card dl" data-dl="${m.id}">
       <span class="hs-poster">${m.logo ? `<img src="${esc(m.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
       <span class="card-text"><span class="card-title">${esc(m.name)}</span>
-        <span class="muted">${m.done ? `${m.disk ? `On disk: ${esc(m.file)} · ` : ''}${fmtBytes(m.bytes)} · ${m.q === 'file' ? 'Exact original' : m.q === 'orig' ? 'Original' : m.q + 'p'}${m.duration ? ` · ${fmtDur(m.duration)}` : ''}` : m.error ? `Stopped: ${esc(m.error)} · ${fmtBytes(m.bytes)} saved` : `${m.disk ? 'Saving to disk' : 'Downloading'}… ${fmtBytes(m.bytes)}${m.estimate ? ` of about ${fmtBytes(m.estimate)} (${Math.min(99, Math.round((m.bytes / m.estimate) * 100))}%)` : ''}`}</span>
+        ${m.done ? `<span class="muted">${m.disk ? `On disk: ${esc(m.file)} · ` : ''}${fmtBytes(m.bytes)} · ${m.q === 'file' ? 'Exact original' : m.q === 'orig' ? 'Original' : m.q + 'p'}${m.duration ? ` · ${fmtDur(m.duration)}` : ''}${m.startedAt && m.finishedAt ? ` · took ${fmtEta((m.finishedAt - m.startedAt) / 1000)}` : ''}</span>`
+          : m.error ? `<span class="muted">Stopped: ${esc(m.error)} · ${fmtBytes(m.bytes)} saved</span>` : detail(m)}
         ${!m.done && !m.error ? `<span class="bar dl-bar">${m.estimate ? `<i style="width:${Math.min(99, (m.bytes / m.estimate) * 100).toFixed(1)}%"></i>` : '<i class="indeterminate"></i>'}</span>` : ''}</span>
       ${m.done ? `<button class="btn primary small" data-act="play">${icon('play')} Play</button>` : m.error ? '<button class="btn small" data-act="retry">Retry</button>' : '<button class="btn small" data-act="cancel">Cancel</button>'}
       <button class="icon-btn" data-act="delete" aria-label="Delete">${icon('close')}</button>
     </li>`).join('')}</ul>`
     : `<div class="empty">${icon('film', 'big')}<p><b>No downloads yet</b></p><p class="muted">Open a film or episode and choose Download. Keep the app open while it downloads.</p></div>`}`;
+  if (keep) scrollTo(0, y);
   view.onclick = async e => {
     const li = e.target.closest('[data-dl]'), act = e.target.closest('[data-act]')?.dataset.act;
     if (!li) return;
