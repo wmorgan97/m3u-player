@@ -212,3 +212,7 @@
 .rhandle { display: grid; place-items: center; width: 44px; height: 44px; flex: none; color: var(--muted); touch-action: none; -webkit-user-select: none; user-select: none; cursor: grab; }
 .rhandle .ico { width: 22px; height: 22px; fill: currentColor; stroke: none; }
 #list .row.dragging { background: var(--surface-2); box-shadow: 0 8px 24px rgba(0, 0, 0, .45); opacity: .92; position: relative; z-index: 2; content-visibility: visible; }
+
+/* Toast for a job in progress: small spinner, stays until the result toast replaces it */
+.toast .spin { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--text) 25%, transparent); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

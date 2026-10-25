@@ -914,7 +914,7 @@ function bindRowDrag() {
     if (!drag) return;
     const top = $('.chrome').offsetHeight + ($('.filters')?.offsetHeight || 0), EDGE = 90;
     const v = drag.y < top + EDGE ? -(top + EDGE - drag.y) : drag.y > innerHeight - EDGE ? drag.y - (innerHeight - EDGE) : 0;
-    if (v) { scrollBy(0, Math.max(-26, Math.min(26, v / 3))); if (v > 0) renderMore(); placeAt(drag.x, drag.y); }
+    if (v) { scrollBy(0, Math.max(-28, Math.min(28, v / 2.5))); if (v > 0) renderMore(); placeAt(drag.x, Math.min(Math.max(drag.y, top + 6), innerHeight - 6)); }
     requestAnimationFrame(autoScroll);
   };
   list.addEventListener('pointerdown', e => {
@@ -1359,8 +1359,9 @@ function updateGuide(p, { silent = false } = {}) {
     guideAsked.delete(p.id);
     const g = guides.get(p.id);
     if (g) g.at = 0;
-    if (!silent) toast('Updating TV guide…');
-    return ensureGuide(location.hash === `#/guide/${p.id}` ? guideScope(p) : state.filtered) || Promise.resolve();
+    if (!silent) toast('Updating TV guide…', { busy: true });
+    return Promise.resolve(ensureGuide(location.hash === `#/guide/${p.id}` ? guideScope(p) : state.filtered))
+      .then(() => { if (!silent) toast(guides.get(p.id)?.channelCount ? 'TV guide updated' : 'No guide data for these channels'); });
   }
   if (guideUpdates.has(p.id)) return guideUpdates.get(p.id);
   const urls = epgUrls(p);
@@ -1368,7 +1369,7 @@ function updateGuide(p, { silent = false } = {}) {
     if (!silent) setEpgUrl(p);
     return Promise.resolve();
   }
-  if (!silent) toast('Updating TV guide…');
+  if (!silent) toast('Updating TV guide…', { busy: true });
   const maxArchive = Math.min(3, p.channels.reduce((m, c) => Math.max(m, archiveDays(c)), 1));
   const scope = guideChannels(p);
   const job = parseEpg(urls, { from: Date.now() - maxArchive * DAY, to: Date.now() + 2 * DAY, wanted: wantedFor(scope) })
@@ -1865,13 +1866,17 @@ function groupsSheet(p, tab, { scroll = 0, q = '' } = {}) {
       };
       // Holding a group near the top or bottom edge scrolls the list, faster the closer you get,
       // so a group can be carried any distance in one drag.
-      const EDGE = 80;
+      const EDGE = 110;
       const autoScroll = () => {
         if (!drag) return;
-        const r = el.getBoundingClientRect();
+        const r = el.getBoundingClientRect(), lr = list.getBoundingClientRect();
         const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
         const v = drag.y < top + EDGE ? -(top + EDGE - drag.y) : drag.y > bottom - EDGE ? drag.y - (bottom - EDGE) : 0;
-        if (v) { el.scrollTop += Math.max(-24, Math.min(24, v / 3)); placeAt(drag.x, drag.y); }
+        if (v) {
+          el.scrollTop += Math.max(-28, Math.min(28, v / 2.5));
+          // The finger may be over the sheet's header (or above the sheet): place against the nearest visible row.
+          placeAt(drag.x, Math.min(Math.max(drag.y, Math.max(top, lr.top) + 6), Math.min(bottom, lr.bottom) - 6));
+        }
         requestAnimationFrame(autoScroll);
       };
       list.onpointermove = e => {
@@ -2112,7 +2117,7 @@ function addPlaylistSheet() {
 
 async function refreshSource(p, { silent = false } = {}) {
   const redraw = () => { if (!silent || state.current === p) rerender(); };
-  if (!silent) toast('Refreshing…');
+  if (!silent) toast('Refreshing channels…', { busy: true });
   try {
     const before = p.channels;
     if (p.kind === 'xtream') {

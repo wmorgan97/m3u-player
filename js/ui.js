@@ -138,11 +138,14 @@ export function confirmDialog(message, okLabel = 'OK', danger = false) {
 
 // ---------- toast ----------
 let toastTimer;
-export function toast(message, { action, fn } = {}) {
+// busy: a job in progress ("Refreshing…") — shows a spinner and stays up until the next toast replaces it
+// (a 60s safety timeout covers a job that never reports back).
+export function toast(message, { action, fn, busy = false } = {}) {
   const t = $('#toast');
-  t.innerHTML = `<span>${esc(message)}</span>${action ? `<button>${esc(action)}</button>` : ''}`;
+  t.innerHTML = `${busy ? '<span class="spin" aria-hidden="true"></span>' : ''}<span>${esc(message)}</span>${action ? `<button>${esc(action)}</button>` : ''}`;
+  t.classList.toggle('busy', busy);
   t.hidden = false;
   if (action) t.querySelector('button').onclick = () => { t.hidden = true; fn(); };
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, action ? 5000 : 2200);
+  toastTimer = setTimeout(() => { t.hidden = true; }, busy ? 60000 : action ? 5000 : 2200);
 }
