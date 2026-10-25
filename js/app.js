@@ -291,29 +291,50 @@ function switchAudioTrack(i) {
   const list = state.playing.list, index = state.playing.index;
   player.play(streamOf(c)).then(ok => { if (ok && pos > 2) seekVod(pos); }).catch(() => playChannel(list, index));
 }
+// Subtitles: the server writes the file's text subtitles as WebVTT while it cuts the video; the app polls
+// that file every few seconds and adds new cues to a text track, so they keep pace with playback.
+let subPoll = 0, subTrack = null, subIdx = -1;
+const subCueKeys = new Set();
 function clearSubtitles() {
+  clearInterval(subPoll); subPoll = 0; subIdx = -1;
+  if (subTrack) { subTrack.mode = 'disabled'; try { [...subTrack.cues || []].forEach(cue => subTrack.removeCue(cue)); } catch {} }
+  subCueKeys.clear();
   if (subTrackEl) { subTrackEl.remove(); subTrackEl = null; }
 }
-async function useSubtitles(i) {
+const vttMs = t => { const p = t.trim().split(':').map(Number); return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + p[1]; };
+async function pullSubtitles(c, i) {
+  const tc = transcodeUrl(c.url);
+  if (!tc || nowChannel() !== c || subIdx !== i) return;
+  try {
+    const r = await fetch(tc.replace('/hls?', '/hls/subs?') + `&s=${i}`, { cache: 'no-store' });
+    if (!r.ok) return;
+    const text = await r.text();
+    if (nowChannel() !== c || subIdx !== i || !subTrack) return;
+    let added = 0;
+    for (const block of text.split(/\n\n+/)) {
+      const lines = block.split('\n'), ti = lines.findIndex(l => l.includes('-->'));
+      if (ti < 0) continue;
+      const [a, b] = lines[ti].split('-->');
+      const body = lines.slice(ti + 1).join('\n').trim();
+      const key = `${a.trim()}|${body}`;
+      if (!body || subCueKeys.has(key)) continue;
+      subCueKeys.add(key);
+      try { subTrack.addCue(new VTTCue(vttMs(a), vttMs(b.split(' ')[0]), body)); added++; } catch {}
+    }
+    if (added && subCueKeys.size === added) toast(`Subtitles: ${vodInfo?.subs?.[i]?.label || 'on'}`);
+  } catch {}
+}
+function useSubtitles(i) {
   const c = nowChannel();
   clearSubtitles();
   if (i < 0 || !c) return;
-  const tc = transcodeUrl(c.url);
-  if (!tc) return;
-  const src = tc.replace('/hls?', '/hls/subs?') + `&s=${i}`;
+  subIdx = i;
+  if (!subTrack) subTrack = video.addTextTrack('subtitles', 'Subtitles', 'en');
+  subTrack.mode = 'showing';
+  for (const t of video.textTracks) if (t !== subTrack) t.mode = 'disabled';
   toast('Loading subtitles…', { busy: true });
-  try {
-    const r = await fetch(src);   // the server extracts them once (can take a while on a big file)
-    if (!r.ok) throw new Error(await r.text());
-    if (nowChannel() !== c) return;
-    const tr = document.createElement('track');
-    tr.kind = 'subtitles'; tr.label = vodInfo?.subs?.[i]?.label || 'Subtitles'; tr.srclang = vodInfo?.subs?.[i]?.lang || 'en'; tr.src = src; tr.default = true;
-    video.appendChild(tr);
-    subTrackEl = tr;
-    const show = () => { for (const t of video.textTracks) t.mode = t === tr.track ? 'showing' : 'disabled'; };
-    tr.addEventListener('load', show); show();
-    toast(`Subtitles: ${tr.label}`);
-  } catch (e) { toast(e.message || 'Subtitles unavailable'); }
+  pullSubtitles(c, i);
+  subPoll = setInterval(() => pullSubtitles(c, i), 5000);
 }
 
 function seekVod(t) {
@@ -3161,7 +3182,7 @@ function playerMenu() {
   const fileAudio = transcodeVod && vodInfo?.audio?.length > 1 ? vodInfo.audio : null;
   const fileSubs = transcodeVod ? (vodInfo?.subs || []).filter(s => s.text) : [];
   const audio = fileAudio ? fileAudio.map(t => ({ i: t.i, label: `${t.label}${t.channels > 2 ? ` · ${t.channels}ch` : ''}`, active: t.i === vodTrack })) : player.audioTracks();
-  const subs = fileSubs.length ? fileSubs.map(t => ({ i: t.i, label: t.label, active: subTrackEl && subTrackEl.src.endsWith(`&s=${t.i}`) })) : player.subtitleTracks();
+  const subs = fileSubs.length ? fileSubs.map(t => ({ i: t.i, label: t.label, active: subIdx === t.i })) : player.subtitleTracks();
   const hasGuide = isLiveChannel(c) && guideFor(c)?.list(c).length;
   const g = hasGuide && guideFor(c);
   const now = g && g.nowNext(c).now;

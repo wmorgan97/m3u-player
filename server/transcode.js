@@ -90,20 +90,28 @@ function probeFile(target) {
   return job;
 }
 
-// Text subtitles pulled out of the file as WebVTT (one ffmpeg pass, cached): the app attaches them as a <track>.
-const subJobs = new Map();
-function extractSubs(target, idx) {
-  const key = `${target}#${idx}`;
-  if (subJobs.has(key)) return subJobs.get(key);
-  const file = join(ROOT, `subs-${sessionId(key)}.vtt`);
-  const job = new Promise((resolve, reject) => {
-    execFile(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-user_agent', 'Mozilla/5.0', '-i', target, '-map', `0:s:${idx}`, '-f', 'webvtt', '-y', file],
-      { timeout: 600_000, windowsHide: true, maxBuffer: 1 << 20 }, err => err ? reject(new Error('Could not read those subtitles')) : resolve(file));
-  });
-  subJobs.set(key, job);
-  job.catch(() => subJobs.delete(key));
-  setTimeout(() => { subJobs.delete(key); fs.rm(file, { force: true }).catch(() => {}); }, 6 * 3600_000).unref();
-  return job;
+// All the WebVTT written so far for subtitle stream idx (every run's file), cues merged and sorted; the
+// app polls this while it plays and adds cues it hasn't seen. A half-written last cue is left out.
+async function mergedVtt(s, idx) {
+  let names = [];
+  try { names = (await fs.readdir(s.dir)).filter(n => n.startsWith(`subs${idx}-`) && n.endsWith('.vtt')); } catch {}
+  const cues = new Map();
+  for (const n of names) {
+    let text = '';
+    try { text = await fs.readFile(join(s.dir, n), 'utf8'); } catch { continue; }
+    const blocks = text.replace(/\r/g, '').split(/\n\n+/);
+    if (!/\n\n\s*$/.test(text)) blocks.pop();   // incomplete tail
+    for (const b of blocks) {
+      const m = /(\d{2}:)?\d{2}:\d{2}\.\d{3} --> (\d{2}:)?\d{2}:\d{2}\.\d{3}/.exec(b);
+      if (!m) continue;
+      const lines = b.split('\n'), ti = lines.findIndex(l => l.includes('-->'));
+      const body = lines.slice(ti + 1).join('\n').trim();
+      if (body) cues.set(`${lines[ti].slice(0, 12)}|${body}`, lines[ti] + '\n' + body);
+    }
+  }
+  const toMs = t => { const p = t.split(':').map(Number); return p.length === 3 ? (p[0] * 3600 + p[1] * 60 + p[2]) * 1000 : (p[0] * 60 + p[1]) * 1000; };
+  const sorted = [...cues.values()].sort((a, b) => toMs(a.split(' --> ')[0]) - toMs(b.split(' --> ')[0]));
+  return 'WEBVTT\n\n' + sorted.join('\n\n') + '\n\n';
 }
 
 // Live: one ffmpeg per channel writing a rolling window. VOD: the file is cut into fixed 4s segments
@@ -111,7 +119,7 @@ function extractSubs(target, idx) {
 // ahead or back just restarts the run there while already-made segments stay on disk. The playlist the
 // player gets is synthesised from the file's duration (see vodManifest), so it is a plain VOD to every
 // player: real length, instant seeking, no live behaviour.
-function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0 } = {}) {
+function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0, subs = [] } = {}) {
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '2',
@@ -138,6 +146,9 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
       : ['-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_init_time', '1', '-hls_list_size', '1000',
          '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments', '-hls_segment_type', 'mpegts']),
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
+    // VOD: every text subtitle stream is written alongside as WebVTT from the same pass (no second download
+    // of the file, no second provider connection). One file per run, merged when served.
+    ...(vod ? subs.flatMap(i => ['-map', `0:s:${i}`, '-c:s', 'webvtt', '-f', 'webvtt', '-y', join(dir, `subs${i}-${fromIdx}.vtt`)]) : []),
   ];
 }
 
@@ -145,8 +156,10 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
   // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
   const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
   await fs.mkdir(dir, { recursive: true });
-  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio, track }), { windowsHide: true });
-  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: 0, audio, track };
+  const probe = vod ? await probeFile(target) : null;
+  const subs = (probe?.subs || []).filter(s => s.text).map(s => s.i);
+  const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod, fromIdx: 0, audio, track, subs }), { windowsHide: true });
+  const session = { proc, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0, duration: probe?.duration || 0, audio, track, subs };
   console.log(`[hls] start ${id} ${target.slice(0, 100)}`);
   proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
   proc.on('exit', () => { session.exited = true; });
@@ -158,7 +171,7 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
 // VOD: restart the run at segment index n (seek). Existing segments stay; the new run writes seg n, n+1, …
 function restartRun(s, n) {
   try { s.proc.kill(); } catch {}
-  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio, track: s.track }), { windowsHide: true });
+  const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, { vod: true, fromIdx: n, audio: s.audio, track: s.track, subs: s.subs || [] }), { windowsHide: true });
   Object.assign(s, { proc, exited: false, errTail: '', startedAt: Date.now(), runStart: n });
   proc.stderr.on('data', d => { s.errTail = (s.errTail + d).slice(-1500); });
   proc.on('exit', () => { if (s.proc === proc) s.exited = true; });
@@ -290,11 +303,11 @@ export async function handleHls(req, res, url) {
   if (info) return send(res, 200, JSON.stringify(await probeFile(t.href)), { 'content-type': 'application/json', 'cache-control': 'no-store' });
   if (subs) {
     const idx = Math.max(0, Number(url.searchParams.get('s')) || 0);
-    try {
-      const file = await extractSubs(t.href, idx);
-      const body = await fs.readFile(file);
-      return send(res, 200, body, { 'content-type': 'text/vtt; charset=utf-8', 'cache-control': 'no-store' });
-    } catch (e) { return send(res, 502, e.message); }
+    const tr = Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0));
+    const s = sessions.get(sessionId(t.href + (tr ? `#a${tr}` : '')));
+    if (!s || !s.vod) return send(res, 404, 'Stream not running');
+    s.lastAccess = Date.now();
+    return send(res, 200, await mergedVtt(s, idx), { 'content-type': 'text/vtt; charset=utf-8', 'cache-control': 'no-store' });
   }
 
   const vod = url.searchParams.get('vod') === '1';
