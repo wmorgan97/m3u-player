@@ -19,7 +19,7 @@ const state = {
   favorites: [],
   recents: [],
   progress: {},    // url -> { t, d, at, done, item }  (movies & episodes)
-  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '', density: 'standard', logos: true, numbers: false, showNext: true, mergeDupes: true, resumeCard: true, accent: '' },
+  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '', nativeControls: false, density: 'standard', logos: true, numbers: false, showNext: true, mergeDupes: true, resumeCard: true, accent: '' },
   current: null,   // playlist being viewed (real, or virtual 'fav' / 'recent' / 'all')
   tab: 'live',     // 'live' | 'movies' | 'series' (Xtream playlists)
   group: null,     // null = all groups
@@ -223,6 +223,8 @@ function applySettings() {
   root.classList.toggle('no-logos', s.logos === false);
   root.classList.toggle('numbers', !!s.numbers);
   root.style.setProperty('--accent', ACCENTS[s.accent] || ACCENTS['']);
+  video.controls = !!s.nativeControls;
+  $('.stage')?.classList.toggle('native', !!s.nativeControls);
   net.proxy = state.settings.proxy || (serverProxy.available && !serverProxy.needsKey ? serverProxyUrl() : '');
   net.streamProxy = state.settings.streamProxy;
   player.tsToHls = state.settings.tsToHls;
@@ -2318,6 +2320,8 @@ async function settingsSheet() {
       <label class="switch"><span><b>Merge duplicate channels</b><span class="muted">Show each channel once; the copies become backup streams, used automatically if one fails.</span></span><input type="checkbox" name="mergeDupes" ${s.mergeDupes !== false ? 'checked' : ''}></label>
       <label class="switch"><span><b>Continue watching on Home</b><span class="muted">Your last channel at the top of Home, one tap to play.</span></span><input type="checkbox" name="resumeCard" ${s.resumeCard !== false ? 'checked' : ''}></label>
       <div class="section-title">Playback</div>
+      <label class="switch"><span><b>Use iPhone’s own player controls</b><span class="muted">Instead of the app’s controls (pause live, rewind, channel list on the video).</span></span>
+        <input type="checkbox" name="nativeControls" ${s.nativeControls ? 'checked' : ''}></label>
       <label class="switch"><span><b>Try HLS for .ts links</b><span class="muted">Most IPTV providers also serve each .ts channel as .m3u8, which iPhone can play. Tried first, with the original link as backup.</span></span>
         <input type="checkbox" name="tsToHls" ${s.tsToHls ? 'checked' : ''}></label>
       <div class="form-actions"><button class="btn primary">Save settings</button></div>
@@ -2337,7 +2341,7 @@ async function settingsSheet() {
         const mergeWas = state.settings.mergeDupes !== false;
         Object.assign(state.settings, {
           ...(f.has('proxy') ? { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')) } : {}),
-          tsToHls: f.get('tsToHls') === 'on',
+          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on',
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
           showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on', resumeCard: f.get('resumeCard') === 'on',
         });
@@ -2427,6 +2431,90 @@ function channelsOverlay() {
   });
 }
 
+// ---------- the app's own player controls ----------
+// Tap the video: channel + what's on, play/pause (pause live), back 30s, a scrub bar over the server's
+// 45-minute buffer, LIVE to jump back to the edge, channel list, mute, AirPlay, PiP, full screen.
+let ctlHide = 0, keepAlive = 0;
+const seekRange = () => { try { const s = video.seekable; return s.length ? { start: s.start(0), end: s.end(s.length - 1) } : null; } catch { return null; } };
+function showControls() {
+  const ctl = $('#ctl');
+  if (!ctl || state.settings.nativeControls || !state.playing) return;
+  ctl.hidden = false;
+  updateControls();
+  clearTimeout(ctlHide);
+  if (!video.paused) ctlHide = setTimeout(hideControls, 3500);
+}
+function hideControls() { const ctl = $('#ctl'); if (ctl) ctl.hidden = true; }
+function updateControls() {
+  const ctl = $('#ctl');
+  if (!ctl || ctl.hidden) return;
+  const c = nowChannel();
+  if (!c) return;
+  const live = !Number.isFinite(video.duration);
+  const r = seekRange();
+  const behind = live && r ? Math.max(0, r.end - video.currentTime) : 0;
+  const atLive = !live || behind < 10;
+  ctl.querySelector('[data-c="play"]').innerHTML = icon(video.paused ? 'play' : 'pause');
+  ctl.querySelector('[data-c="mute"]').innerHTML = icon(video.muted ? 'volume-off' : 'volume');
+  $('#ctl-name').textContent = c.name;
+  const g = isLiveChannel(c) && guideFor(c), nn = g && g.nowNext(c), now = nn?.now;
+  $('#ctl-prog').textContent = now ? `${now[2]} · ends ${fmtTime(now[1])}` : (c.group ? prettyGroup(c.group) : '');
+  $('#ctl-pct').style.width = now ? `${(((Date.now() - now[0]) / (now[1] - now[0])) * 100).toFixed(1)}%` : '0';
+  $('.ctl-pbar').hidden = !now;
+  const seek = $('#ctl-seek');
+  if (r && r.end > r.start && !seek.matches(':active')) seek.value = Math.round(((video.currentTime - r.start) / (r.end - r.start)) * 1000);
+  $('#ctl-time').textContent = live ? (atLive ? '' : `-${fmtDur(behind)}`) : `${fmtDur(video.currentTime)} / ${fmtDur(video.duration || 0)}`;
+  const lv = $('#ctl-live');
+  lv.hidden = !live;
+  lv.classList.toggle('on', atLive);
+  ctl.querySelector('[data-c="prev"]').disabled = !state.playing || state.playing.index === 0;
+  ctl.querySelector('[data-c="next"]').disabled = !state.playing || state.playing.index >= state.playing.list.length - 1;
+}
+function bindControls() {
+  const ctl = $('#ctl'), stage = $('.stage');
+  for (const b of ctl.querySelectorAll('[data-c]')) if (b.dataset.c !== 'live') b.innerHTML = icon({ list: 'list', mute: 'volume', airplay: 'airplay', pip: 'pip', full: 'expand', more: 'more', prev: 'prev', next: 'next', play: 'pause', back30: 'back30' }[b.dataset.c]);
+  if (!video.webkitShowPlaybackTargetPicker) ctl.querySelector('[data-c="airplay"]').hidden = true;
+  if (!(document.pictureInPictureEnabled || video.webkitSupportsPresentationMode?.('picture-in-picture'))) ctl.querySelector('[data-c="pip"]').hidden = true;
+  stage.addEventListener('click', e => {
+    if (e.target.closest('.ctl button, #ctl-seek') || !state.playing || state.settings.nativeControls) return;
+    ctl.hidden ? showControls() : hideControls();
+  });
+  ctl.addEventListener('click', e => {
+    const b = e.target.closest('[data-c]');
+    if (!b) return;
+    e.stopPropagation();
+    const r = seekRange();
+    switch (b.dataset.c) {
+      case 'play': video.paused ? video.play().catch(() => {}) : video.pause(); break;
+      case 'prev': step(-1); break;
+      case 'next': step(1); break;
+      case 'back30': video.currentTime = Math.max(r?.start ?? 0, video.currentTime - 30); if (video.paused) video.play().catch(() => {}); break;
+      case 'live': if (r) video.currentTime = Math.max(r.start, r.end - 3); video.play().catch(() => {}); break;
+      case 'list': channelsOverlay(); break;
+      case 'mute': video.muted = !video.muted; break;
+      case 'airplay': try { video.webkitShowPlaybackTargetPicker(); } catch {} break;
+      case 'pip': player.togglePip?.().catch(e => toast(e.message)); break;
+      case 'full': if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); else (stage.requestFullscreen?.() || video.requestFullscreen?.()); break;
+      case 'more': playerMenu(); break;
+    }
+    showControls();
+  });
+  const seek = $('#ctl-seek');
+  seek.addEventListener('input', () => { const r = seekRange(); if (r) video.currentTime = r.start + (seek.value / 1000) * (r.end - r.start); showControls(); });
+  video.addEventListener('pause', () => { showControls(); clearTimeout(ctlHide); });
+  video.addEventListener('play', showControls);
+  setInterval(() => {
+    updateControls();
+    // While paused or behind live, keep the server's stream alive so the buffer is there when you resume.
+    const c = nowChannel();
+    if (c && (video.paused || (seekRange() && seekRange().end - video.currentTime > 10)) && Date.now() - keepAlive > 8000) {
+      keepAlive = Date.now();
+      const tc = transcodeUrl(streamOf(c));
+      if (tc) fetch(tc.replace('/hls?', '/hls/warm?'), { keepalive: true }).catch(() => {});
+    }
+  }, 1000);
+}
+
 function setStatus(text, isError = false) {
   const el = $('#now-status');
   const c = nowChannel();
@@ -2468,7 +2556,7 @@ function bindPlayer() {
     if (state.playing?.list.length > 1 && player.isLive) step(dy < 0 ? 1 : -1);
   }, { passive: true });
   video.addEventListener('waiting', () => { if (state.playing) setStatus('Buffering…'); });
-  video.addEventListener('playing', () => { setStatus(''); hideTuning(); });
+  video.addEventListener('playing', () => { setStatus(''); hideTuning(); showControls(); });
   video.addEventListener('timeupdate', () => trackProgress());
   video.addEventListener('pause', () => trackProgress(true));
   video.addEventListener('ended', () => {
@@ -2507,6 +2595,7 @@ function bindPlayer() {
   $('#next').onpointerdown = () => { const p = state.playing; if (p) warm(p.list[p.index + 1]?.url); };
   $('#close').onclick = stopPlaying;
   $('#now-more').onclick = playerMenu;
+  bindControls();
   $('#now-list').innerHTML = icon('list');
   $('#now-list').onclick = channelsOverlay;
   $('.now').onclick = channelsOverlay;
@@ -2662,6 +2751,7 @@ function showPlayerError(c, err) {
 
 function stopPlaying() {
   trackProgress(true);
+  hideControls();
   const c = nowChannel();
   if (c) unwarm(streamOf(c));   // free the provider connection now, not after the idle timeout
   player.stop();

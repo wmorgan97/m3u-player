@@ -230,3 +230,32 @@
 .gtools .gdays { flex: none; margin: 0; }
 .gtools .gq { flex: 1; min-width: 0; }
 .gempty { padding: 32px 16px; }
+
+/* ---------- App's own player controls (tap the video to show) ---------- */
+.stage { touch-action: manipulation; }
+.ctl { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; padding: 10px 12px; color: #fff;
+  background: linear-gradient(rgba(0,0,0,.62), transparent 32%, transparent 62%, rgba(0,0,0,.72)); z-index: 3; }
+.ctl button { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #fff; font: inherit; }
+.ctl button:active { background: rgba(255,255,255,.18); }
+.ctl .ico { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ctl .ico .dot { fill: currentColor; stroke: none; }
+.ctl-top { display: flex; align-items: flex-start; gap: 8px; }
+.ctl-info { flex: 1; min-width: 0; padding-top: 2px; }
+#ctl-name { font-weight: 650; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+#ctl-prog { font-size: 12.5px; color: rgba(255,255,255,.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ctl-pbar { display: block; max-width: 180px; margin-top: 5px; height: 3px; background: rgba(255,255,255,.22); }
+.ctl-pbar i { background: var(--accent); }
+.ctl-icons { display: flex; flex: none; }
+.ctl-icons button { width: 36px; height: 36px; }
+.ctl-mid { display: flex; justify-content: center; align-items: center; gap: 28px; }
+.ctl-mid button { width: 48px; height: 48px; background: rgba(0,0,0,.35); backdrop-filter: blur(6px); }
+.ctl-mid .ctl-play { width: 64px; height: 64px; }
+.ctl-mid .ctl-play .ico { width: 30px; height: 30px; }
+.ctl-bottom { display: flex; align-items: center; gap: 8px; }
+#ctl-seek { flex: 1; min-width: 0; height: 28px; margin: 0; accent-color: var(--accent); background: transparent; }
+#ctl-time { flex: none; font-size: 12px; font-variant-numeric: tabular-nums; color: rgba(255,255,255,.85); min-width: 42px; text-align: right; }
+#ctl-live { width: auto; height: 26px; padding: 0 10px; border-radius: 13px; font-size: 11.5px; font-weight: 700; letter-spacing: .06em; background: rgba(255,255,255,.16); }
+#ctl-live.on { background: #e5343f; }
+#ctl-live.on::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #fff; }
+@media (max-width: 420px) { .ctl-icons [data-c="airplay"], .ctl-icons [data-c="pip"] { display: none; } }
+.stage.native .ctl { display: none; }

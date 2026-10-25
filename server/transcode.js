@@ -74,7 +74,9 @@ async function startSession(id, target) {
       : ['-c:v', 'copy']),
     '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
     '-flush_packets', '1', '-muxdelay', '0',
-    '-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_list_size', '12',
+    // ~45 minutes of segments stay on disk (delete_segments trims older ones): pause, rewind and
+    // jump-back work in the app; the player still starts near the live edge (EXT-X-START).
+    '-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_init_time', '1', '-hls_list_size', '1000',
     '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments', '-hls_segment_type', 'mpegts',
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
   ];

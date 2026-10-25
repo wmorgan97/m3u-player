@@ -26,7 +26,24 @@
     </header>
     <section id="player" class="player" hidden>
       <div class="stage">
-        <video id="video" playsinline controls autoplay x-webkit-airplay="allow"></video>
+        <video id="video" playsinline autoplay x-webkit-airplay="allow"></video>
+        <div id="ctl" class="ctl" hidden>
+          <div class="ctl-top">
+            <div class="ctl-info"><div id="ctl-name"></div><div id="ctl-prog" class="muted"></div><span class="bar ctl-pbar"><i id="ctl-pct"></i></span></div>
+            <div class="ctl-icons">
+              <button data-c="list" aria-label="Channel list"></button><button data-c="mute" aria-label="Mute"></button>
+              <button data-c="airplay" aria-label="AirPlay"></button><button data-c="pip" aria-label="Picture in picture"></button>
+              <button data-c="full" aria-label="Full screen"></button><button data-c="more" aria-label="More"></button>
+            </div>
+          </div>
+          <div class="ctl-mid"><button data-c="prev" aria-label="Previous channel"></button><button data-c="play" class="ctl-play" aria-label="Play or pause"></button><button data-c="next" aria-label="Next channel"></button></div>
+          <div class="ctl-bottom">
+            <button data-c="back30" aria-label="Back 30 seconds"></button>
+            <input id="ctl-seek" type="range" min="0" max="1000" value="1000" aria-label="Position">
+            <span id="ctl-time"></span>
+            <button data-c="live" id="ctl-live">LIVE</button>
+          </div>
+        </div>
         <div id="player-error" class="player-error" hidden></div>
         <div id="tuning" class="tuning" hidden></div>
       </div>

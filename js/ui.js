@@ -30,6 +30,13 @@ const PATHS = {
   'eye-off': '<path d="M3 3l18 18"/><path d="M10.6 5.9A9.8 9.8 0 0112 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 01-3.3 4.1M6.6 6.6C4 8.4 2.5 12 2.5 12s3.5 6.5 9.5 6.5a9.6 9.6 0 004.1-.9"/><path d="M9.9 9.9a3 3 0 004.2 4.2"/>',
   film: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/>',
   play: '<path class="dot" d="M7 4.5v15l13-7.5z"/>',
+  pause: '<rect class="dot" x="6" y="4.5" width="4.5" height="15" rx="1"/><rect class="dot" x="13.5" y="4.5" width="4.5" height="15" rx="1"/>',
+  back30: '<path d="M4 11a8 8 0 102.3-5.7"/><path d="M4 4v7h7"/><text x="8.2" y="16" font-size="7.5" font-weight="700" fill="currentColor" stroke="none">30</text>',
+  volume: '<path d="M4 9.5v5h3.5L12 18V6L7.5 9.5z"/><path d="M15.5 9a4 4 0 010 6M18 6.5a7.5 7.5 0 010 11"/>',
+  'volume-off': '<path d="M4 9.5v5h3.5L12 18V6L7.5 9.5z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/>',
+  pip: '<rect x="3" y="5" width="18" height="14" rx="2.5"/><rect class="dot" x="12" y="11" width="7" height="5" rx="1"/>',
+  airplay: '<path d="M5 16.5A2.5 2.5 0 013 14V7a2.5 2.5 0 012.5-2.5h13A2.5 2.5 0 0121 7v7a2.5 2.5 0 01-2 2.5"/><path d="M12 14l5 6H7z"/>',
+  expand: '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>',
   search2: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
 };
 

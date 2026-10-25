@@ -96,6 +96,9 @@ export class Player {
     throw lastError;
   }
 
+  // A live stream has no fixed duration; movies and catch-up do.
+  get isLive() { return this.ready && !Number.isFinite(this.video.duration); }
+
   stop() {
     this.token++;
     this.teardown();
