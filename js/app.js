@@ -894,7 +894,7 @@ function toggleReordering() {
   state.selecting = false;
   updateTopbar();
   applyFilter({ keep: true });
-  if (state.reordering) toast('Drag ⠿ to move channels. Tip: you can also long-press any channel.');
+  if (state.reordering) toast('Reorder mode: drag ⠿ (or press and hold a channel) to move it. Tap ⠿ in the top bar when done.', { action: 'Done', fn: toggleReordering });
 }
 // Puts the group's channels in `ordered` order, keeping the group's slots in the playlist; backup copies
 // of a merged channel travel with it.
@@ -954,7 +954,7 @@ function bindRowDrag() {
     if (state.reordering && e.target.closest('.rhandle')) { e.preventDefault(); return start(li, e); }
     if (e.target.closest('button')) return;
     // Long-press (0.45s without moving) picks the row up.
-    press = { li, x: e.clientX, y: e.clientY, timer: setTimeout(() => { press = null; suppressClick = true; start(li, e); }, 450) };
+    press = { li, x: e.clientX, y: e.clientY, timer: setTimeout(() => { press = null; suppressClick = true; start(li, e); }, e.pointerType === 'mouse' ? 300 : 450) };
   });
   // iOS: once a row is picked up, the finger moves the row, not the page.
   list.addEventListener('touchmove', e => { if (drag) e.preventDefault(); }, { passive: false });
@@ -1090,6 +1090,7 @@ function channelMenu(c) {
     { label: favUrls.has(c.url) ? 'Remove from Favorites' : 'Add to Favorites', fn: () => toggleFavorite(c, null).then(highlightStars) },
     isLiveChannel(c) && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
     p?.id === 'fav' && { label: 'Move to list…', fn: () => favListMenu(c) },
+    canReorder() && !state.reordering && { label: 'Reorder channels (drag)…', fn: () => { toggleReordering(); const li = $(`#list .row[data-i="${state.filtered.indexOf(c)}"]`); li?.scrollIntoView({ block: 'center' }); } },
     editable && isLiveChannel(c) && { label: 'Move to top of group', fn: () => moveInGroup(c, true) },
     editable && isLiveChannel(c) && { label: 'Move to bottom of group', fn: () => moveInGroup(c, false) },
     editable && { label: 'Edit…', fn: () => editChannel(c, p) },
@@ -1857,6 +1858,8 @@ function playlistMenu(p) {
       // Widening needs the provider's full list again; narrowing just drops rows.
       if (p.sourceUrl || p.kind === 'xtream') refreshSource(p); else { p.channels = applyContent(v, p.channels); await save(p); rerender(); }
     } }))) },
+    canReorder() && { label: state.reordering ? 'Done reordering' : 'Reorder channels in this group (drag)', fn: toggleReordering },
+    viewing && live && state.group === null && !p.virtual && { label: 'Reorder channels… (open a group first)', fn: () => toast('Pick a group chip, then ⠿ in the top bar or ⋯ → Reorder channels') },
     real && live && { label: 'Add channel…', fn: () => addChannel(p) },
     live && p.channels.length && { label: 'Export / share M3U…', fn: () => exportMenu(p.name, p.channels, p.header) },
     narrowed && live && state.filtered.length && { label: `Export this view (${state.filtered.length.toLocaleString()})…`, fn: () => exportMenu(`${p.name} - ${state.group || 'search'}`, state.filtered, p.header) },
