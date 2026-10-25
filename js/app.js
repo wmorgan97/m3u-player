@@ -338,6 +338,8 @@ function showHome() {
   try { dismissed = localStorage.getItem('install-tip') === 'off'; } catch {}
   const pl = state.playlists;
   const cw = continueWatching();
+  // Snapshot: playing a channel moves it to the front of state.recents, so tiles must keep their own channel.
+  const recentStrip = state.recents.slice(0, 12);
   // Browse: the groups the user pinned to Home (in their order); until they pin any, the biggest live groups.
   const pinnedAny = pl.some(p => p.homeGroups?.length);
   const browse = pl.flatMap(p => {
@@ -359,7 +361,7 @@ function showHome() {
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
     ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search all channels" autocomplete="off" autocorrect="off" spellcheck="false"></label>` : ''}
     ${state.recents.length ? `<div class="section-title">Jump back in</div>
-      <div class="strip">${state.recents.slice(0, 12).map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
+      <div class="strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
     ${browse.length || pinnedAny ? `<div class="section-title split">Browse${browseEdit}</div>
       <div class="browse">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
         <span class="bt-name">${esc(prettyGroup(b.name))}</span><span class="muted">${b.count.toLocaleString()}</span></button>`).join('')}</div>` : ''}
@@ -397,7 +399,7 @@ function showHome() {
     const c = e.target.closest('[data-cw]');
     if (c) { const entry = cw[+c.dataset.cw]; return playChannel([entry.item], 0); }
     const r = e.target.closest('[data-recent]');
-    if (r) return playChannel(state.recents, +r.dataset.recent);
+    if (r) return playChannel(recentStrip, +r.dataset.recent);
     const b = e.target.closest('[data-browse]');
     if (b) { pendingGroup = b.dataset.group; location.hash = `#/p/${b.dataset.browse}`; return; }
     const eg = e.target.closest('[data-edit-groups]');
