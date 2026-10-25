@@ -23,7 +23,10 @@ const str = (v, max = 400) => (v ? String(v).slice(0, max) : undefined);
 const slimMovie = s => ({ stream_id: s.stream_id, name: str(s.name, 200), stream_icon: str(s.stream_icon, 300), category_id: s.category_id ?? s.category_ids?.[0],
   rating: num(s.rating), year: str(s.year, 10), added: num(s.added), container_extension: str(s.container_extension, 8) });
 const slimSeries = s => ({ series_id: s.series_id, name: str(s.name, 200), cover: str(s.cover, 300), category_id: s.category_id ?? s.category_ids?.[0],
-  rating: num(s.rating), releaseDate: str(s.releaseDate || s.release_date, 12), plot: str(s.plot, 240), genre: str(s.genre, 60) });
+  rating: num(s.rating), releaseDate: str(s.releaseDate || s.release_date, 12), plot: str(s.plot, 240), genre: str(s.genre, 60), added: num(s.last_modified) });
+// "4K-TOP - Dune (2021)" and "TOP - Dune (2021)" are the same title for a shelf: keep the first.
+const titleKey = it => String(it.name || '').toLowerCase().replace(/^[^-|]{1,14}[-|]\s*/, '').replace(/[^a-z0-9]+/g, '');
+const uniq = (list, n) => { const seen = new Set(), out = []; for (const it of list) { const k = titleKey(it); if (k && !seen.has(k)) { seen.add(k); out.push(it); if (out.length >= n) break; } } return out; };
 
 async function api(base, user, pass, action) {
   const u = new URL('/player_api.php', base);
@@ -43,10 +46,16 @@ async function build(server, user, pass, kind) {
   const byCat = new Map();
   for (const it of items) { const k = String(it.category_id ?? ''); if (!byCat.has(k)) byCat.set(k, []); byCat.get(k).push(it); }
   const catList = cats.map(c => ({ category_id: c.category_id, category_name: str(c.category_name, 120), count: byCat.get(String(c.category_id))?.length || 0 })).filter(c => c.count);
-  const recent = kind === 'movies' ? [...items].sort((a, b) => (b.added || 0) - (a.added || 0)).slice(0, 300) : items.slice(-300).reverse();
+  const byAdded = items.some(it => it.added) ? [...items].sort((a, b) => (b.added || 0) - (a.added || 0)) : [...items].reverse();
+  const recent = uniq(byAdded, 300);
+  // Top rated, recent-ish: rated 7+, from the last three years (by year/release date, else when added).
+  const nowYear = new Date().getFullYear(), yearAgo = Date.now() / 1000 - 3 * 365 * 86400;
+  const yearOf = it => Number(String(it.year || it.releaseDate || '').slice(0, 4)) || 0;
+  const top = uniq(items.filter(it => (it.rating || 0) >= 7 && (yearOf(it) >= nowYear - 3 || (!yearOf(it) && (it.added || 0) > yearAgo)) && (it.stream_icon || it.cover))
+    .sort((a, b) => (b.rating || 0) - (a.rating || 0) || (b.added || 0) - (a.added || 0)), 120);
   const names = items.map(it => (it.name || '').toLowerCase());
   console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  return { items, names, byCat, overview: JSON.stringify({ at: Date.now(), cats: catList, recent, total: items.length }) };
+  return { items, names, byCat, overview: JSON.stringify({ at: Date.now(), cats: catList, recent, top, total: items.length }) };
 }
 
 export async function handleCatalog(req, res, url, send, allowed) {

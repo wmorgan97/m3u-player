@@ -470,3 +470,31 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
 @media (min-width: 900px) { .cont-row { margin: 0 0 4px; padding-left: 0; padding-right: 0; } .cont-row .cw { width: 160px; } .cont-row .cw-img { width: 160px; } }
 
 .dl-wait { width: 100%; color: var(--star); }
+
+/* ---------- Home hub ---------- */
+.hero-car { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; margin: 4px 0 6px; border-radius: 20px; }
+.hero-car::-webkit-scrollbar { display: none; }
+.hero-slide { position: relative; flex: none; width: 100%; min-height: 240px; scroll-snap-align: start; overflow: hidden; display: flex; align-items: flex-end; cursor: pointer;
+  background: linear-gradient(145deg, hsl(var(--hue) 30% 22%), hsl(var(--hue) 26% 10%)); }
+.hero-slide::after { content: ''; position: absolute; inset: 0; background: linear-gradient(transparent 15%, rgba(0,0,0,.78)); }
+.hero-slide .hero-bg { position: absolute; inset: -20px; width: calc(100% + 40px); height: calc(100% + 40px); object-fit: cover; filter: blur(20px) saturate(1.25) brightness(.55); }
+.hero-slide .hero-body { position: relative; z-index: 1; display: flex; gap: 16px; align-items: flex-end; width: 100%; padding: 16px; }
+.onnow-row { gap: 12px; }
+.onnow { flex: none; width: 220px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; scroll-snap-align: start; }
+.on-art { position: relative; display: grid; place-items: center; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden;
+  background: linear-gradient(145deg, hsl(var(--hue) 30% 26%), hsl(var(--hue) 26% 12%)); }
+.on-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.on-art .logo { position: absolute; left: 8px; bottom: 8px; width: 40px; height: 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
+.on-art:not(:has(> img)) .logo { position: static; width: 64px; height: 64px; }
+.on-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.on-text b { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.on-text .muted { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.onnow .bar { display: block; max-width: none; }
+.onnow:active .on-art { filter: brightness(1.15); }
+.section-title.split .link { font-size: 13px; text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--accent); text-decoration: none; }
+@media (min-width: 900px) {
+  .hero-slide { min-height: 320px; }
+  .hero-slide .hero-poster { width: 150px; }
+  .hero-slide .hero-title { font-size: 32px; }
+  .onnow { width: 260px; }
+}

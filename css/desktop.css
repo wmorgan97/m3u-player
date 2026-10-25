@@ -37,7 +37,7 @@
 
   /* Lists: two columns of rows when nothing is playing */
   /* minmax(0, …): a long programme line must shrink and ellipsise, never push the second column off-screen */
-  .list:not(.grid) { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 20px; }
+  .list:not(.grid):not(.discover) { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 20px; }
   .list .row { min-width: 0; }
   .list .row-text, .list .row-sub, .list .epg-now { min-width: 0; max-width: 100%; }
   .list .epg-now > .muted { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -62,7 +62,7 @@
   body.playing .player video { aspect-ratio: 16 / 9; max-height: none; height: auto; }
   body.playing .player-bar { padding: 12px 16px; }
   body.playing #view { max-width: none; margin-right: clamp(420px, 44vw, 760px); padding-right: var(--gutter); }
-  body.playing .list:not(.grid) { grid-template-columns: minmax(0, 1fr); }
+  body.playing .list:not(.grid):not(.discover) { grid-template-columns: minmax(0, 1fr); }
   body.playing .filters { top: calc(var(--safe-top) + 50px); }
   body.playing .ctl-icons [data-c="airplay"], body.playing .ctl-icons [data-c="pip"] { display: inline-grid; }
   body.playing.multi-on .player { display: none; }
@@ -110,4 +110,22 @@
   body.playing.vod-playing #view { margin-right: auto; max-width: 1240px; }
   body.playing.vod-playing .list:not(.grid):not(.discover) { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   body.playing.vod-playing .filters { top: calc(var(--safe-top) + 50px); }
+}
+
+/* ---------- Playlists on a computer: groups in a left sidebar (all visible, scrolls on its own) ---------- */
+@media (min-width: 900px) {
+  #view.pl { display: grid; grid-template-columns: 248px minmax(0, 1fr); column-gap: 28px; align-items: start; max-width: 1440px; }
+  #view.pl > * { grid-column: 2; min-width: 0; }
+  #view.pl .filters { display: contents; }
+  #view.pl .filters .search { grid-column: 2; position: sticky; top: calc(var(--chrome-h, 60px) + 6px); z-index: 6; margin-bottom: 6px; box-shadow: 0 8px 18px var(--bg); }
+  #view.pl #chips { grid-column: 1; grid-row: 1 / span 30; position: sticky; top: calc(var(--chrome-h, 60px) + 8px);
+    max-height: calc(100vh - var(--chrome-h, 60px) - 24px); overflow-y: auto; overflow-x: hidden;
+    display: flex; flex-direction: column; gap: 2px; margin: 4px 0 0; padding: 6px 6px 18px 0; scrollbar-width: thin; border-right: 1px solid var(--line); }
+  #view.pl #chips .chip { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 9px 12px; border: 0; border-radius: 10px;
+    background: none; text-align: left; white-space: normal; line-height: 1.25; font-size: 14px; color: var(--muted); }
+  #view.pl #chips .chip span { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
+  #view.pl #chips .chip:hover { background: var(--surface); color: var(--text); }
+  #view.pl #chips .chip.active { background: var(--surface-2); color: var(--text); font-weight: 650; box-shadow: inset 3px 0 0 var(--accent); }
+  #view.pl #chips .chip[data-all] { margin-bottom: 6px; }
+  body.playing #view.pl { grid-template-columns: 220px minmax(0, 1fr); }
 }

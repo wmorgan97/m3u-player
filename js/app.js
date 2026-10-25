@@ -515,6 +515,7 @@ function route() {
   if (multiActive && kind !== 'multi') stopMulti();
   view.onclick = null;
   view.classList.toggle('wide', kind === 'guide' || kind === 'multi');
+  view.classList.toggle('pl', kind === 'p' || kind === 'fav' || kind === 'recent' || kind === 'all');   // desktop: groups in a left sidebar
   if (kind !== 'guide') guideDay = 0;
   if (kind === 'p' || kind === 'guide') {
     const p = byId(id);
@@ -645,6 +646,95 @@ async function homeSearch(q) {
   box.innerHTML = (section('Channels', 'hs-chan', chans, chanRow) + section('Movies', 'hs-movie', movies.slice(0, 8), vodRow) + section('Series', 'hs-series', series.slice(0, 8), vodRow)) || '<div class="muted hs-empty">Nothing matches.</div>';
 }
 
+// ---------- Home hub ----------
+// Everything worth watching in one place: a featured carousel, what's on live now, new and top-rated
+// movies and series, and "Because you watched…". Catalogues load in the background and Home refreshes.
+const homeRefresh = debounce(() => { if (!state.current && (!location.hash || location.hash === '#/')) { const y = scrollY; showHome(); scrollTo(0, y); } }, 500);
+function homeHub(pl) {
+  const hub = { hero: [], onNow: [], shelves: { movies: [], series: [] }, vodLink: {} };
+  for (const p of pl.filter(p => p.kind === 'xtream' && p.content !== 'live')) {
+    for (const tab of ['movies', 'series']) {
+      const e = vodCache.get(vodKey(p, tab));
+      if (!e) { loadVod(p, tab).then(homeRefresh).catch(() => {}); continue; }
+      if (Array.isArray(e)) continue;
+      hub.vodLink[tab] ||= `#/p/${p.id}`;
+      const what = tab === 'movies' ? 'movies' : 'series';
+      if (e.recent.length) hub.shelves[tab].push({ title: `New ${what}`, key: `h-new-${tab}`, items: e.recent.slice(0, 30) });
+      if (e.top?.length) hub.shelves[tab].push({ title: 'Top rated', key: `h-top-${tab}`, items: e.top.slice(0, 30) });
+      hub.hero.push(...(e.top || []).filter(it => it.logo).slice(0, 4));
+    }
+  }
+  // Because you watched: the newest film or episode with progress, then more from its group.
+  const last = Object.values(state.progress).filter(x => x.item && (x.item.kind === 'movie' || x.item.kind === 'episode')).sort((a, b) => b.at - a.at)[0];
+  if (last) {
+    const p = byId(last.item.src), tab = last.item.kind === 'movie' ? 'movies' : 'series';
+    const e = p && vodCache.get(vodKey(p, tab));
+    const group = last.item.kind === 'movie' ? last.item.group : null;
+    if (e && !Array.isArray(e) && group) {
+      const items = e.groups.get(group);
+      if (!items) requestVod(p, tab, { group });
+      else {
+        const more = items.filter(it => it.url !== last.item.url).slice(0, 30);
+        if (more.length) hub.shelves.movies.unshift({ title: `Because you watched ${vodMeta(last.item.name).title || last.item.name}`, key: 'h-because', items: more });
+      }
+    }
+  }
+  // On now: channels from your Home groups (else recent channels) with a programme on right now.
+  const live = pl.flatMap(p => {
+    const k = m3uKinds(p), chans = k ? k.live : p.channels;
+    const want = new Set(p.homeGroups || []);
+    return want.size ? chans.filter(c => want.has(c.group)).map(c => ({ ...c, src: p.id })) : [];
+  });
+  const pool = (live.length ? live : state.recents.filter(isLiveChannel)).slice(0, 80);
+  ensureGuide(pool);
+  for (const c of pool) {
+    const g = guideFor(c), now = g && g.nowNext(c).now;
+    if (now) hub.onNow.push({ c, now });
+    if (hub.onNow.length >= 24) break;
+  }
+  shelfItems.set('onnow', hub.onNow);
+  // Featured: a mix of top movies and series, alternating.
+  const mix = [];
+  const ms = hub.hero.filter(it => it.kind === 'movie'), ss = hub.hero.filter(it => it.kind === 'series');
+  for (let i = 0; mix.length < 6 && (i < ms.length || i < ss.length); i++) { if (ms[i]) mix.push(ms[i]); if (ss[i]) mix.push(ss[i]); }
+  hub.hero = mix.slice(0, 6);
+  shelfItems.set('hero', hub.hero);
+  for (const tab of ['movies', 'series']) for (const sh of hub.shelves[tab]) shelfItems.set(sh.key, sh.items);
+  return hub;
+}
+function homeShelfHtml(sh) {
+  return `<div class="sub-title">${esc(sh.title)}</div><ul class="shelf-row home-shelf">${sh.items.map((it, k) => cardHtml(it, sh.key, k)).join('')}</ul>`;
+}
+function onNowHtml({ c, now }, k) {
+  const pct = ((Date.now() - now[0]) / (now[1] - now[0])) * 100;
+  const img = now[4]?.img;
+  return `<li class="onnow" data-k="${k}" style="--hue:${hueOf(c.name)}">
+    <span class="on-art">${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}</span>
+    <span class="on-text"><b>${esc(now[2])}</b><span class="muted">${esc(c.name)} · ends ${fmtTime(now[1])}</span></span>
+    <span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span></li>`;
+}
+let heroTimer = 0;
+function heroHtml(items) {
+  clearInterval(heroTimer);
+  heroTimer = setInterval(() => {
+    const car = $('.hero-car');
+    if (!car) return clearInterval(heroTimer);
+    const n = car.querySelectorAll('.hero-slide').length, i = Math.round(car.scrollLeft / car.clientWidth);
+    car.scrollTo({ left: ((i + 1) % n) * car.clientWidth, behavior: 'smooth' });
+  }, 7000);
+  return `<div class="hero-car">${items.map((it, k) => `<div class="hero-slide" data-shelf="hero" data-k="${k}" style="--hue:${hueOf(it.name)}">
+      <img class="hero-bg" src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
+      <div class="hero-body">
+        <span class="poster-img hero-poster"><img src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>
+        <div class="hero-text">
+          <span class="muted small-caps">${it.kind === 'series' ? 'Top series' : 'Top movie'}</span>
+          <div class="hero-title">${esc(vodMeta(it.name).title || it.name)}</div>
+          <div class="muted">${[it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : '', it.genre].filter(Boolean).map(esc).join(' · ')}</div>
+          <div class="hero-actions"><button class="btn primary" data-hero-play="${k}">${icon('play')} ${it.kind === 'series' ? 'Episodes' : 'Play'}</button><button class="btn">Details</button></div>
+        </div>
+      </div></div>`).join('')}</div>`;
+}
+
 // Home tiles fill top-to-bottom, then the next column (1 top-left, 2 under it). At most 4 rows, so the
 // block stays a fixed height: more groups add columns that scroll sideways instead of lengthening the page.
 const browseRows = n => (n <= 2 ? n : Math.min(4, Math.ceil(n / 2)));
@@ -665,13 +755,7 @@ function showHome() {
   // Watchlist = saved films and series; New this week = the newest titles from each Xtream catalogue (loaded on demand).
   const watchlist = state.favorites.filter(f => f.kind === 'movie' || f.kind === 'series').slice(-30).reverse();
   shelfItems.set('home-watch', watchlist);
-  const week = Date.now() / 1000 - 7 * 86400;
-  const fresh = pl.filter(p => p.kind === 'xtream' && p.content !== 'live').flatMap(p => {
-    const e = vodCache.get(vodKey(p, 'movies'));
-    if (!e) { loadVod(p, 'movies').then(() => { if (!state.current) rerender(); }).catch(() => {}); return []; }
-    return Array.isArray(e) ? [] : e.recent.filter(it => it.added > week);
-  }).slice(0, 30);
-  shelfItems.set('home-new', fresh);
+  const hub = homeHub(pl);
   // Snapshot: playing a channel moves it to the front of state.recents, so tiles must keep their own channel.
   const recentStrip = state.recents.slice(0, 12);
   // Browse: the groups the user pinned to Home (in their order); until they pin any, the biggest live groups.
@@ -697,17 +781,19 @@ function showHome() {
       ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
     ${pl.length ? `<label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search channels, movies and series" autocomplete="off" autocorrect="off" spellcheck="false"></label><div id="home-results" class="home-results" hidden></div>` : ''}
+    ${hub.hero.length ? heroHtml(hub.hero) : ''}
     ${resumeCardHtml(recentStrip[0]) || cw.length ? `<div class="section-title">Continue watching</div>
       <div class="cont-row">${resumeCardHtml(recentStrip[0])}${cw.map((e, i) => `<button class="cw" data-cw="${i}">
         <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
         <span class="cw-name">${esc(e.item.name)}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></button>`).join('')}</div>` : ''}
     ${browse.length || pinnedAny || state.recents.length ? `<div class="section-title split">Live TV${browseEdit}</div>` : ''}
+    ${hub.onNow.length ? `<div class="sub-title">On now</div><ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul>` : ''}
     ${browse.length || pinnedAny ? `<div class="browse${browse.length > 8 ? ' scrolls' : ''}" style="--rows:${browseRows(browse.length)}">${browse.map(b => `<button class="bt" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}">
         <span class="bt-name">${esc(prettyGroup(b.name))}</span><span class="muted">${b.count.toLocaleString()}</span></button>`).join('')}</div>` : ''}
     ${state.recents.length ? `<div class="strip recent-strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
-    ${fresh.length || watchlist.length ? '<div class="section-title">Movies &amp; Series</div>' : ''}
-    ${fresh.length ? `<div class="sub-title">New this week</div><ul class="shelf-row home-shelf">${fresh.map((it, k) => cardHtml(it, 'home-new', k)).join('')}</ul>` : ''}
-    ${watchlist.length ? `<div class="sub-title">Watchlist</div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul>` : ''}
+    ${hub.shelves.movies.length ? `<div class="section-title split">Movies${hub.vodLink.movies ? `<a class="link" href="${hub.vodLink.movies}">Browse all</a>` : ''}</div>${hub.shelves.movies.map(homeShelfHtml).join('')}` : ''}
+    ${hub.shelves.series.length ? `<div class="section-title split">Series${hub.vodLink.series ? `<a class="link" href="${hub.vodLink.series}">Browse all</a>` : ''}</div>${hub.shelves.series.map(homeShelfHtml).join('')}` : ''}
+    ${watchlist.length ? `<div class="section-title">Watchlist</div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul>` : ''}
     <div class="section-title">Library</div>
     <ul class="lib-row">
       <li class="lib" data-go="#/fav">${icon('star')}<span>Favorites</span><b>${state.favorites.length}</b></li>
@@ -734,7 +820,11 @@ function showHome() {
   });
   $('#home-q')?.addEventListener('input', debounce(e => homeSearch(e.target.value.trim()), 250));
   view.onclick = e => {
-    const sc = e.target.closest('.scard, .hs-row');
+    const hp = e.target.closest('[data-hero-play]');
+    if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playChannel([it], 0); }
+    const on = e.target.closest('.onnow');
+    if (on) { const list = (shelfItems.get('onnow') || []).map(x => x.c); return playChannel(list, +on.dataset.k); }
+    const sc = e.target.closest('.scard, .hs-row, .hero-slide');
     if (sc) {
       const it = shelfItems.get(sc.dataset.shelf)?.[+sc.dataset.k];
       if (!it) return;
@@ -943,7 +1033,7 @@ const toItems = (p, tab, cats, list) => {
 };
 function catalogueEntry(p, tab, d) {
   const cats = d.cats || [];
-  return { cats, total: d.total || 0, recent: toItems(p, tab, cats, d.recent || []), groups: new Map(), searches: new Map(),
+  return { cats, total: d.total || 0, recent: toItems(p, tab, cats, d.recent || []), top: toItems(p, tab, cats, d.top || []), groups: new Map(), searches: new Map(),
     groupList: cats.map(c => ({ name: c.category_name || '', count: c.count, id: c.category_id })) };
 }
 async function requestVod(p, tab, { group, q }) {
@@ -961,6 +1051,7 @@ async function requestVod(p, tab, { group, q }) {
   } finally {
     vodPending.delete(tag);
     if (state.current === p && state.tab === tab) applyFilter({ keep: true });
+    homeRefresh();
   }
 }
 
@@ -1009,11 +1100,15 @@ function renderChips() {
   const showGroups = groups.length > 1 || (groups[0] && groups[0].name);
   const pinned = new Set(p.homeGroups || []);
   if (pinned.size) groups.sort((a, b) => pinned.has(b.name) - pinned.has(a.name));   // stable: starred groups first, then your order
-  $('#chips').hidden = !showGroups || discoverMode();
+  $('#chips').hidden = !showGroups;
   $('#chips').innerHTML = chip('All', visibleCount, state.group === null, 'data-all') +
     (showGroups ? groups.map(g => chip(g.name ? prettyGroup(g.name) : UNGROUPED, g.count, state.group === g.name,
       `data-group="${esc(g.name)}" ${locked(g.name) ? 'data-locked="1"' : ''}`, locked(g.name))).join('') : '');
-  $('#chips .chip.active')?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'instant' });
+  const active = $('#chips .chip.active'), bar = $('#chips');
+  if (active && bar) {   // bring the selected group into view inside the chip row / sidebar, never scroll the page
+    if (bar.scrollWidth > bar.clientWidth) bar.scrollLeft = active.offsetLeft - bar.clientWidth / 2 + active.offsetWidth / 2;
+    if (bar.scrollHeight > bar.clientHeight) bar.scrollTop = active.offsetTop - bar.clientHeight / 2;
+  }
 }
 
 // Movies/Series front page for a server-backed catalogue: a hero, "Recently added", then a shelf per
@@ -1049,7 +1144,6 @@ function renderDiscover() {
   const hero = entry.recent.find(it => it.logo) || entry.recent[0];
   const what = tab === 'movies' ? 'movies' : 'series';
   list.className = 'list discover';
-  $('#chips').hidden = true;
   view.classList.add('vod');
   const groupTiles = groups.map(g => `<li class="gtile" data-see="${esc(g.name)}" style="--hue:${hueOf(g.name)}"><b>${esc(prettyGroup(g.name) || UNGROUPED)}</b><span>${g.count.toLocaleString()}</span></li>`).join('');
   list.innerHTML = `
