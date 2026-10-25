@@ -100,7 +100,11 @@
 
 /* ---------- Films play in a wide "cinema" layout, not the live dock ---------- */
 @media (min-width: 1100px) {
+  /* The whole page scrolls (YouTube-style): the header stops being sticky, the top bar stays pinned on its own. */
+  body.playing.vod-playing .chrome { position: static; }
+  body.playing.vod-playing .topbar { position: sticky; top: 0; z-index: 21; background: var(--bg); }
   body.playing.vod-playing .player { position: static; width: auto; max-width: 1240px; margin: 0 auto; border-left: 0; border-bottom: 1px solid var(--line); display: block; }
+  body.playing.vod-playing .stage { max-width: 1240px; }
   body.playing.vod-playing .player video { max-height: 72vh; }
   body.playing.vod-playing .epg-panel { display: none; }
   body.playing.vod-playing #view { margin-right: auto; max-width: 1240px; }

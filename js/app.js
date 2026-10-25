@@ -937,6 +937,63 @@ function renderMore() {
 // Fill in what's on for rows already on screen, touching only that line (no rebuild, no flicker, taps keep working).
 // Under the docked player (wide screens): what's on now with its description, then what's coming up;
 // earlier programmes are listed when the channel has catch-up. Tap any programme for details.
+// Now-playing page for a film or episode (under the video): poster, title, chips, description, cast,
+// Save / trailer / start over, then more titles from the same group.
+const vodInfoCache = new Map();
+async function renderVodPanel(c) {
+  const el = $('#vod-panel');
+  if (!el) return;
+  if (!c || isLiveChannel(c) || c.kind === 'catchup') { el.hidden = true; el.innerHTML = ''; return; }
+  const p = playlistOf(c), x = xtOf(p);
+  let info = vodInfoCache.get(c.sid) || {};
+  const draw = () => {
+    if (nowChannel() !== c) return;
+    const i = info.info || {};
+    const pr = state.progress[c.url];
+    const meta = [c.year || String(i.releasedate || i.release_date || '').slice(0, 4), i.duration, i.genre || c.genre, c.kind === 'episode' ? c.group : prettyGroup(c.group)].filter(Boolean);
+    const plot = i.plot || i.description || c.plot || '';
+    const entry = p && vodCache.get(vodKey(p, c.kind === 'episode' ? 'series' : 'movies'));
+    const more = entry && !Array.isArray(entry) ? (entry.groups.get(c.group) || entry.recent).filter(it => it.url !== c.url).slice(0, 18) : [];
+    shelfItems.set('vp-more', more);
+    el.innerHTML = `
+      <div class="vp-top">
+        <span class="vp-poster poster-img" data-initials="${initials(c.name)}">${(i.movie_image || c.logo) ? `<img src="${esc(i.movie_image || c.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
+        <div class="vp-text">
+          <h2 class="vp-title">${esc(c.name)}</h2>
+          <div class="vp-meta">${meta.map(m => `<span class="pill">${esc(m)}</span>`).join('')}${c.rating ? `<span class="pill rating">★ ${c.rating.toFixed(1)}</span>` : ''}</div>
+          ${plot ? `<p class="vp-plot" data-plot>${esc(plot)}</p>` : ''}
+          ${i.cast || i.actors || i.director ? `<p class="muted vp-cast">${i.director ? `Director: ${esc(i.director)}` : ''}${(i.cast || i.actors) ? `${i.director ? ' · ' : ''}Cast: ${esc(i.cast || i.actors)}` : ''}</p>` : ''}
+          <div class="vp-actions">
+            <button class="btn" data-vp="fav">${favUrls.has(c.url) ? '★ Saved' : '☆ Save'}</button>
+            ${i.youtube_trailer ? '<button class="btn" data-vp="trailer">Trailer</button>' : ''}
+            ${pr && pr.t > 30 ? '<button class="btn" data-vp="restart">Start over</button>' : ''}
+            ${c.kind === 'episode' && state.playing && state.playing.index < state.playing.list.length - 1 ? `<button class="btn primary" data-vp="next">${icon('next')} Next episode</button>` : ''}
+          </div>
+        </div>
+      </div>
+      ${more.length ? `<div class="section-title">More in ${esc(prettyGroup(c.group) || 'this group')}</div><ul class="shelf-row">${more.map((it, k) => cardHtml(it, 'vp-more', k)).join('')}</ul>` : ''}`;
+    el.hidden = false;
+    el.onclick = e => {
+      const b = e.target.closest('[data-vp]');
+      if (b) {
+        if (b.dataset.vp === 'fav') toggleFavorite(c, null).then(draw);
+        if (b.dataset.vp === 'trailer') window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(i.youtube_trailer)}`, '_blank');
+        if (b.dataset.vp === 'restart') seekVod(0);
+        if (b.dataset.vp === 'next') step(1);
+        return;
+      }
+      if (e.target.closest('[data-plot]')) e.target.closest('[data-plot]').classList.toggle('open');
+      const card = e.target.closest('.scard');
+      if (card) { const it = shelfItems.get('vp-more')?.[+card.dataset.k]; if (it) it.kind === 'series' ? seriesSheet(it) : playChannel([it], 0); }
+    };
+  };
+  draw();
+  if (x && c.sid && c.kind === 'movie' && !vodInfoCache.has(c.sid)) {
+    try { info = (await x.vodInfo(c.sid)) || {}; vodInfoCache.set(c.sid, info); draw(); } catch {}
+  }
+  if (p && p.kind === 'xtream' && !vodCache.has(vodKey(p, c.kind === 'episode' ? 'series' : 'movies'))) loadVod(p, c.kind === 'episode' ? 'series' : 'movies').then(draw).catch(() => {});
+}
+
 function renderEpgPanel() {
   const el = $('#epg-panel');
   if (!el) return;
@@ -3007,6 +3064,7 @@ function playChannel(list, index) {
   addRecent(c);
   ensureGuide([c]);
   renderEpgPanel();
+  renderVodPanel(c);
   tuneFrom = prev;
   try {
     if ('mediaSession' in navigator) {
@@ -3082,6 +3140,7 @@ function stopPlaying() {
   trackProgress(true);
   hideControls();
   const panel = $('#epg-panel'); if (panel) { panel.hidden = true; panel.innerHTML = ''; }
+  const vp = $('#vod-panel'); if (vp) { vp.hidden = true; vp.innerHTML = ''; }
   const c = nowChannel();
   if (c) unwarm(streamOf(c));   // free the provider connection now, not after the idle timeout
   player.stop();

@@ -354,3 +354,26 @@
 .gtile span { font-size: 11.5px; color: rgba(255,255,255,.7); }
 .gtile:active { filter: brightness(1.15); }
 @media (min-width: 900px) { .gtile { width: 180px; height: 84px; } }
+
+/* ---------- Now-playing page for films (under the video) ---------- */
+.vod-panel { max-width: 1240px; margin: 0 auto; padding: 16px 16px 8px; border-top: 1px solid var(--line); }
+.vp-top { display: flex; gap: 16px; align-items: flex-start; }
+.vp-poster { flex: none; width: 92px; aspect-ratio: 2 / 3; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+.vp-text { min-width: 0; flex: 1; }
+.vp-title { margin: 0 0 6px; font-size: 22px; line-height: 1.15; font-weight: 750; }
+.vp-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.vp-meta .pill { padding: 3px 9px; font-size: 12px; }
+.vp-meta .pill.rating { color: var(--star); }
+.vp-plot { margin: 10px 0 0; font-size: 14.5px; line-height: 1.5; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.vp-plot.open { -webkit-line-clamp: unset; }
+.vp-cast { margin: 8px 0 0; font-size: 13px; }
+.vp-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.vp-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
+.vod-panel .section-title { margin: 18px 0 8px; }
+.vod-panel .shelf-row { margin: 0; padding: 2px 0 8px; }
+@media (max-width: 899px) { .vod-panel { display: none; } }   /* phone: the film page sheet has the details; keep the list reachable */
+@media (min-width: 900px) { .vp-poster { width: 120px; } .vp-title { font-size: 26px; } }
+
+/* ---------- Full screen must ignore every layout cap ---------- */
+body .stage:fullscreen, body .stage.fs { width: 100vw; height: 100vh; max-width: none; margin: 0; background: #000; display: flex; align-items: center; justify-content: center; }
+body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; height: 100vh !important; max-height: none !important; aspect-ratio: auto !important; object-fit: contain; }
