@@ -498,3 +498,25 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
   .hero-slide .hero-title { font-size: 32px; }
   .onnow { width: 260px; }
 }
+
+/* ---------- Movie & series library pages (a group, or a search) ---------- */
+.lib-head { grid-column: 1 / -1; display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding: 6px 0 14px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+.lib-head h2 { margin: 0 0 4px; font-size: 24px; font-weight: 750; letter-spacing: -.01em; line-height: 1.15; }
+.lib-sort { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); flex: none; }
+.lib-sort select { min-height: 36px; padding: 0 30px 0 12px; border-radius: 10px; }
+.list.grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 12px; }
+.list.grid .poster { gap: 6px; }
+.list.grid .poster-img { border-radius: 12px; box-shadow: 0 6px 18px rgba(0,0,0,.35); transition: transform .18s ease, box-shadow .18s ease; }
+.list.grid .poster-name { font-size: 13.5px; font-weight: 600; }
+.list.grid .poster .muted { font-size: 12px; }
+@media (hover: hover) {
+  .list.grid .poster:hover .poster-img { transform: translateY(-4px) scale(1.02); box-shadow: 0 14px 30px rgba(0,0,0,.55), 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent); }
+  .list.grid .poster-img::after { content: '▶'; position: absolute; inset: 0; display: grid; place-items: center; font-size: 30px; color: #fff; background: rgba(0,0,0,.35); opacity: 0; transition: opacity .18s; }
+  .list.grid .poster:hover .poster-img::after { opacity: 1; }
+}
+@media (min-width: 600px) { .list.grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (min-width: 900px) {
+  .list.grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 26px 18px; }
+  .lib-head h2 { font-size: 30px; }
+  #view.pl .shelf:has(.gtiles) { display: none; }   /* the sidebar already lists every group */
+}

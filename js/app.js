@@ -28,6 +28,7 @@ const state = {
   rendered: 0,
   selecting: false,
   reordering: false,   // drag-to-reorder mode inside a group
+  vodSort: 'default',  // a movie/series group's library: default | new | rating | az | year
   selected: new Set(),
   playing: null,   // { list, index }
   unlocked: false, // parental PIN entered this session
@@ -1205,9 +1206,24 @@ function applyFilter({ keep = false } = {}) {
   $('#q').placeholder = `Search ${what === 'series' ? `${count.toLocaleString()} series` : plural(count, what)}`;
   const list = $('#list');
   list.classList.remove('discover');
-  list.classList.toggle('grid', state.tab !== 'live' && state.current.kind === 'xtream');
+  const vodGrid = state.tab !== 'live' && state.current.kind === 'xtream';
+  list.classList.toggle('grid', vodGrid);
+  if (vodGrid && state.vodSort !== 'default') {
+    const yr = it => Number(it.year) || 0, by = {
+      new: (a, b) => (b.added || 0) - (a.added || 0), rating: (a, b) => (b.rating || 0) - (a.rating || 0),
+      az: (a, b) => collator.compare(vodMeta(a.name).title || a.name, vodMeta(b.name).title || b.name), year: (a, b) => yr(b) - yr(a),
+    }[state.vodSort];
+    if (by) state.filtered = [...state.filtered].sort(by);
+  }
   list.innerHTML = '';
   state.rendered = 0;
+  // A movie/series group (or a search) is a library page: title, count and sorting above the posters.
+  if (vodGrid && (state.group !== null || state.query)) {
+    const title = state.query ? `Results for “${esc(state.query)}”` : esc(prettyGroup(state.group) || UNGROUPED);
+    list.insertAdjacentHTML('beforeend', `<li class="lib-head"><div><h2>${title}</h2><span class="muted">${plural(state.filtered.length, state.tab === 'series' ? 'series' : 'movie').replace('seriess', 'series')}</span></div>
+      <label class="lib-sort">Sort<select data-sort-vod>${[['default', 'Featured'], ['new', 'Newest added'], ['rating', 'Top rated'], ['year', 'Release year'], ['az', 'A–Z']].map(([v, l]) => `<option value="${v}" ${state.vodSort === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></li>`);
+    list.onchange = e => { if (e.target.matches('[data-sort-vod]')) { state.vodSort = e.target.value; applyFilter(); } };
+  }
   if (state.filtered.length) {
     renderMore();
     while (state.rendered < Math.min(keepRows, state.filtered.length)) renderMore();
@@ -1614,8 +1630,8 @@ function rowHtml(c, i) {
 }
 
 function posterHtml(it, i) {
-  const m = it.kind || it.year !== undefined ? null : vodMeta(it.name);   // plain M3U movie: tidy "Title (2023) HD"
-  const name = m?.title || it.name, year = it.year ?? m?.year;
+  const m = vodMeta(it.name);   // "TOP - Dune (2021) 4K" -> "Dune", 2021
+  const name = m.title || it.name, year = it.year ?? m.year;
   return `<li class="poster" data-i="${i}">
     <span class="poster-img" data-initials="${initials(it.name)}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
       ${it.rating ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
