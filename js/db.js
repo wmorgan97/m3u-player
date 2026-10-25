@@ -1,19 +1,29 @@
 // Tiny IndexedDB wrapper. Playlists can hold tens of thousands of channels,
-// which is far more than localStorage allows.
+// which is far more than localStorage allows. Channels are stored in small
+// chunks (not one giant record) so a huge playlist does not spike memory and
+// crash the browser when it is saved — the failure mode on iPhone at ~19k
+// channels, where a single put() of the whole playlist aborted the write.
+
+const CHUNK = 1000;                 // channels per stored record
+const chunkKey = (id, i) => `${id}#${String(i).padStart(6, '0')}`;
+const chunkRange = id => IDBKeyRange.bound(`${id}#`, `${id}#￿`);
 
 let opening;
 function open() {
   return opening ??= new Promise((resolve, reject) => {
-    const req = indexedDB.open('m3u-player', 1);
+    const req = indexedDB.open('m3u-player', 2);
     req.onupgradeneeded = () => {
-      req.result.createObjectStore('playlists', { keyPath: 'id' });
-      req.result.createObjectStore('kv');
+      const d = req.result;
+      if (!d.objectStoreNames.contains('playlists')) d.createObjectStore('playlists', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      if (!d.objectStoreNames.contains('chunks')) d.createObjectStore('chunks'); // key: `${playlistId}#<index>`
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
 
+// Single-store transaction (kv and simple ops). Resolves with the request result.
 async function run(store, mode, fn) {
   const conn = await open();
   return new Promise((resolve, reject) => {
@@ -24,12 +34,70 @@ async function run(store, mode, fn) {
   });
 }
 
+// Multi-store transaction. `fn` receives the stores in order; its return value
+// is resolved once the transaction completes.
+async function multi(stores, mode, fn) {
+  const conn = await open();
+  return new Promise((resolve, reject) => {
+    const tx = conn.transaction(stores, mode);
+    const out = fn(...stores.map(s => tx.objectStore(s)));
+    tx.oncomplete = () => resolve(out);
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  });
+}
+
+// Write a playlist as metadata (no channels) + N small channel chunks, all in
+// one transaction. Old chunks for this id are cleared first so a re-save never
+// leaves stragglers behind.
+async function putPlaylist(p) {
+  const { channels = [], ...meta } = p;
+  meta.channelCount = channels.length;
+  await multi(['playlists', 'chunks'], 'readwrite', (pl, ch) => {
+    pl.put(meta);
+    ch.delete(chunkRange(p.id));
+    for (let i = 0; i * CHUNK < channels.length; i++) {
+      ch.put({ pid: p.id, i, channels: channels.slice(i * CHUNK, (i + 1) * CHUNK) }, chunkKey(p.id, i));
+    }
+  });
+}
+
+// Read every playlist, reassembling each one's channels from its chunks.
+// Legacy v1 records kept the channels inline; those are used as-is and get
+// migrated to chunked form the next time they are saved.
+async function allPlaylists() {
+  const [metas, chunks] = await Promise.all([
+    run('playlists', 'readonly', s => s.getAll()),
+    run('chunks', 'readonly', s => s.getAll()),
+  ]);
+  const byId = new Map();
+  for (const c of chunks) {
+    if (!byId.has(c.pid)) byId.set(c.pid, []);
+    byId.get(c.pid)[c.i] = c.channels;
+  }
+  return metas.map(m => {
+    if (Array.isArray(m.channels)) return m;                 // legacy inline record
+    const parts = byId.get(m.id) || [];
+    return { ...m, channels: parts.filter(Boolean).flat() };
+  });
+}
+
+async function deletePlaylist(id) {
+  await multi(['playlists', 'chunks'], 'readwrite', (pl, ch) => {
+    pl.delete(id);
+    ch.delete(chunkRange(id));
+  });
+}
+
 export const db = {
-  allPlaylists: () => run('playlists', 'readonly', s => s.getAll()),
-  putPlaylist: p => run('playlists', 'readwrite', s => s.put(p)),
-  deletePlaylist: id => run('playlists', 'readwrite', s => s.delete(id)),
+  allPlaylists,
+  putPlaylist,
+  deletePlaylist,
   get: key => run('kv', 'readonly', s => s.get(key)),
   set: (key, value) => run('kv', 'readwrite', s => s.put(value, key)),
   del: key => run('kv', 'readwrite', s => s.delete(key)),
-  clear: () => Promise.all([run('playlists', 'readwrite', s => s.clear()), run('kv', 'readwrite', s => s.clear())]),
+  clear: () => Promise.all([
+    run('playlists', 'readwrite', s => s.clear()),
+    run('chunks', 'readwrite', s => s.clear()),
+    run('kv', 'readwrite', s => s.clear()),
+  ]),
 };
