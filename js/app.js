@@ -611,7 +611,7 @@ function showPlaylist(p) {
   const showTabs = vodOn && (p.kind === 'xtream' || p._hasVod);
   // A VOD-only playlist (movies/series from one provider, live from another) opens on Movies, not an empty Live tab.
   const liveEmpty = p.content === 'vod' || (k && !k.live.length);
-  const firstTab = memo?.tab || (liveEmpty ? (k.movies.length ? 'movies' : 'series') : 'live');
+  const firstTab = memo?.tab || (liveEmpty ? (!k || k.movies.length ? 'movies' : 'series') : 'live');   // Xtream has no M3U split (k is null)
   const tabBtn = (t, label) => `<button data-tab="${t}"${t === firstTab ? ' class="active"' : ''}>${label}</button>`;
   view.innerHTML = `
     ${showTabs ? `<div class="seg" id="seg">
