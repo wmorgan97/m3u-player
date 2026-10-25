@@ -111,14 +111,14 @@ setInterval(() => {
   for (const [id, s] of sessions) if (now - s.lastAccess > IDLE_MS) stopSession(id);
 }, 10_000).unref();
 
-async function waitForPlaylist(dir, timeout, alive = () => true) {
+async function waitForPlaylist(dir, timeout, alive = () => true, ready = READY_SEGMENTS) {
   const file = join(dir, 'index.m3u8');
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (!alive()) return false;   // the user moved on to another channel
     try {
       const t = await fs.readFile(file, 'utf8');
-      if ((t.match(/\.ts/g) || []).length >= READY_SEGMENTS) return true;
+      if ((t.match(/\.ts/g) || []).length >= ready) return true;
     } catch {}
     await new Promise(r => setTimeout(r, 80));
   }
@@ -182,7 +182,11 @@ export async function handleHls(req, res, url) {
   s.lastAccess = Date.now();
   if (warm) return send(res, 204, '');
 
-  const ok = await waitForPlaylist(s.dir, START_TIMEOUT_MS, () => sessions.get(id) === s);
+  // Buffer level chosen by the app: how many segments before we hand over the playlist, and how far
+  // behind the live edge to start. More = fewer stalls, slower channel change.
+  const ready = Math.min(4, Math.max(1, Number(url.searchParams.get('ready')) || READY_SEGMENTS));
+  const behind = Math.min(30, Math.max(2, Number(url.searchParams.get('behind')) || START_BEHIND_LIVE_S));
+  const ok = await waitForPlaylist(s.dir, START_TIMEOUT_MS, () => sessions.get(id) === s, ready);
   if (sessions.get(id) !== s) return send(res, 409, 'Superseded by another channel');
   if (!ok) {
     const tail = (s.errTail || '').split('\n').filter(Boolean).pop() || 'the stream did not start';
@@ -201,7 +205,7 @@ export async function handleHls(req, res, url) {
     return (!t || t.startsWith('#')) ? line : `/hls/${id}/${t}`;
   }).join('\n');
   // Start a few seconds behind the live edge so the player always has segments in hand (no edge-chasing rebuffers).
-  if (!/#EXT-X-START/.test(body)) body = body.replace('#EXTM3U', `#EXTM3U\n#EXT-X-START:TIME-OFFSET=-${START_BEHIND_LIVE_S},PRECISE=NO`);
+  if (!/#EXT-X-START/.test(body)) body = body.replace('#EXTM3U', `#EXTM3U\n#EXT-X-START:TIME-OFFSET=-${behind},PRECISE=NO`);
   res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
   res.end(req.method === 'HEAD' ? undefined : body);
 }

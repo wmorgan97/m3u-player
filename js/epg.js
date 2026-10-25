@@ -27,9 +27,16 @@ export function parseTime(s) {
   return t;
 }
 
+// Channel names from playlists and guides differ in small ways ("UK| BBC 1 ᴴᴰ", "BBC One HD",
+// "BBC 1 (Backup)"): strip the noise and spell numbers as digits so they still match.
+const NUM_WORDS = { one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10' };
 export const normName = s => String(s || '').toLowerCase()
-  .replace(/\b(hd|fhd|uhd|4k|sd|hevc|h265|backup)\b/g, '')
-  .replace(/[^\p{L}\p{N}]+/gu, '');
+  .replace(/[\u1D2C-\u1D6A\u00B2\u00B3\u00B9\u2070-\u209F]+/g, '')          // superscript provider tags
+  .replace(/^\s*(?:uk|gb|us|usa|ca|ie|au|nz|eu)\s*[:|\-]\s*/, '')               // "UK| " / "UK: " prefixes
+  .replace(/\(.*?\)|\[.*?\]/g, '')                                             // (backup) [vip]
+  .replace(/\b(hd|fhd|uhd|4k|sd|hevc|h265|backup|raw|vip|low|50fps)\b/g, '')
+  .replace(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b/g, w => NUM_WORDS[w])
+  .replace(/[^\p{L}\p{N}+]+/gu, '');                                           // keep "+" so "+1" channels stay distinct
 
 const attr = (tag, name) => { const m = new RegExp(`\\b${name}="([^"]*)"`).exec(tag); return m ? decode(m[1]) : ''; };
 const child = (block, name) => { const m = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)</${name}>`).exec(block); return m ? decode(m[1]).trim() : ''; };

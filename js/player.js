@@ -140,7 +140,8 @@ export class Player {
       v.addEventListener('error', bad);
 
       if (useHlsJs) {
-        const hls = this.hls = new Hls({ enableWorker: true, backBufferLength: 30 });
+        const hls = this.hls = new Hls({ enableWorker: true, backBufferLength: 30, maxBufferLength: 60, maxMaxBufferLength: 120,
+          liveSyncDurationCount: this.liveSync || 3, liveMaxLatencyDurationCount: (this.liveSync || 3) + 6, fragLoadingMaxRetry: 6, levelLoadingMaxRetry: 6 });
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (!data.fatal) return;
           if (!settled) return settle(reject, new Error(hlsErrorMessage(data)));

@@ -19,7 +19,7 @@ const state = {
   favorites: [],
   recents: [],
   progress: {},    // url -> { t, d, at, done, item }  (movies & episodes)
-  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '', nativeControls: false, density: 'standard', logos: true, numbers: false, showNext: true, mergeDupes: true, resumeCard: true, accent: '' },
+  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '', nativeControls: false, buffer: 'auto', density: 'standard', logos: true, numbers: false, showNext: true, mergeDupes: true, resumeCard: true, accent: '' },
   current: null,   // playlist being viewed (real, or virtual 'fav' / 'recent' / 'all')
   tab: 'live',     // 'live' | 'movies' | 'series' (Xtream playlists)
   group: null,     // null = all groups
@@ -193,12 +193,30 @@ async function enterServerKey() {
 
 // Last-resort playback: route a raw stream through our own server's /hls repackager
 // (ffmpeg -> HLS) so Safari can play MPEG-TS it otherwise refuses. Our server only.
+// Buffer levels: segments the server waits for before playback starts, and how far behind live to start.
+// Auto begins fast and steps up on its own when a channel keeps stalling.
+const BUFFER_LEVELS = { fast: { ready: 1, behind: 4, sync: 2 }, balanced: { ready: 2, behind: 8, sync: 3 }, stable: { ready: 3, behind: 14, sync: 5 } };
+let autoLevel = 'fast', stallTimes = [];
+const bufferLevel = () => BUFFER_LEVELS[state.settings.buffer === 'auto' || !state.settings.buffer ? autoLevel : state.settings.buffer] || BUFFER_LEVELS.fast;
+function noteStall() {
+  if (!state.playing || state.settings.buffer !== 'auto' && state.settings.buffer) return;
+  const now = Date.now();
+  if (now - lastTune < 12_000) return;   // starting up, not a stall
+  stallTimes = [...stallTimes.filter(t => now - t < 120_000), now];
+  if (stallTimes.length >= 3 && autoLevel !== 'stable') {
+    autoLevel = autoLevel === 'fast' ? 'balanced' : 'stable';
+    stallTimes = [];
+    player.liveSync = bufferLevel().sync;
+    toast(`Kept stalling: using a ${autoLevel} buffer from now on`, { action: 'Reload now', fn: () => playChannel(state.playing.list, state.playing.index) });
+  }
+}
 function transcodeUrl(url) {
   if (isNative) return null;                 // the native app plays raw streams itself
   if (!serverProxy.available) return null;   // only our own server exposes /hls
   const key = state.settings.serverKey || '';
   if (serverProxy.needsKey && !key) return null;
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}url=${encodeURIComponent(url)}`;
+  const b = bufferLevel();
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -235,6 +253,7 @@ function applySettings() {
   player.wrap = streamUrl;
   player.preferNative = isNative;
   player.transcode = transcodeUrl;
+  player.liveSync = bufferLevel().sync;
 }
 
 // groupsOf() walks every channel; cache the result per playlist+tab and drop it when the playlist changes.
@@ -2382,6 +2401,9 @@ async function settingsSheet() {
       <label class="switch"><span><b>Merge duplicate channels</b><span class="muted">Show each channel once; the copies become backup streams, used automatically if one fails.</span></span><input type="checkbox" name="mergeDupes" ${s.mergeDupes !== false ? 'checked' : ''}></label>
       <label class="switch"><span><b>Continue watching on Home</b><span class="muted">Your last channel at the top of Home, one tap to play.</span></span><input type="checkbox" name="resumeCard" ${s.resumeCard !== false ? 'checked' : ''}></label>
       <div class="section-title">Playback</div>
+      <label>Buffering<select name="buffer">
+        ${[['auto', 'Auto (fast, steps up if a channel keeps stalling)'], ['fast', 'Fast switching (~4s buffer)'], ['balanced', 'Balanced (~8s buffer)'], ['stable', 'Stable (~14s buffer, slower switching)']].map(([v, l]) => `<option value="${v}" ${(s.buffer || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select></label>
       <label class="switch"><span><b>Use iPhone’s own player controls</b><span class="muted">Instead of the app’s controls (pause live, rewind, channel list on the video).</span></span>
         <input type="checkbox" name="nativeControls" ${s.nativeControls ? 'checked' : ''}></label>
       <label class="switch"><span><b>Try HLS for .ts links</b><span class="muted">Most IPTV providers also serve each .ts channel as .m3u8, which iPhone can play. Tried first, with the original link as backup.</span></span>
@@ -2403,7 +2425,7 @@ async function settingsSheet() {
         const mergeWas = state.settings.mergeDupes !== false;
         Object.assign(state.settings, {
           ...(f.has('proxy') ? { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')) } : {}),
-          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on',
+          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'),
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
           showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on', resumeCard: f.get('resumeCard') === 'on',
         });
@@ -2654,7 +2676,7 @@ function bindPlayer() {
     if (e.touches.length || Date.now() - st > 600 || Math.abs(dy) < 70 || Math.abs(dx) > Math.abs(dy) / 2) return;
     if (state.playing?.list.length > 1 && player.isLive) step(dy < 0 ? 1 : -1);
   }, { passive: true });
-  video.addEventListener('waiting', () => { if (state.playing) setStatus('Buffering…'); });
+  video.addEventListener('waiting', () => { if (state.playing) { setStatus('Buffering…'); noteStall(); } });
   video.addEventListener('playing', () => { setStatus(''); hideTuning(); showControls(); });
   video.addEventListener('timeupdate', () => trackProgress());
   video.addEventListener('pause', () => trackProgress(true));
