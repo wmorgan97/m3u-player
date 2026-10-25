@@ -19,7 +19,7 @@ const state = {
   favorites: [],
   recents: [],
   progress: {},    // url -> { t, d, at, done, item }  (movies & episodes)
-  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '', nativeControls: false, buffer: 'auto', vodPlayer: 'app', density: 'standard', logos: true, numbers: false, showNext: true, mergeDupes: true, resumeCard: true, accent: '' },
+  settings: { proxy: '', streamProxy: 'http', tsToHls: true, pinHash: '', nativeControls: false, buffer: 'auto', vodPlayer: 'app', vodLanguage: 'en', density: 'standard', logos: true, numbers: false, showNext: true, mergeDupes: true, resumeCard: true, accent: '' },
   current: null,   // playlist being viewed (real, or virtual 'fav' / 'recent' / 'all')
   tab: 'live',     // 'live' | 'movies' | 'series' (Xtream playlists)
   group: null,     // null = all groups
@@ -1033,10 +1033,30 @@ const toItems = (p, tab, cats, list) => {
   items.forEach(it => { it.src = p.id; });
   return items;
 };
+// ---- movie & series languages ----
+// "English only" (the default) hides groups whose name marks another language or country ("FR - …",
+// "NORDIC …", "TURKISH …", Arabic/Hebrew/Greek/Cyrillic/Persian names) and orders what's left so the
+// big English collections come first: top picks and new releases, streaming services, English genres,
+// studios, kids & anime, documentaries, then sport and extras.
+const NON_LATIN = /[\u0370-\u03FF\u0400-\u04FF\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/;
+const LANG_PREFIX = /^\s*(?:(ES|LA|BR|AF|FR|QC|IN|SO|PK|BN|DE|IT|NL|BE|PL|GR|IL|RU|MT|BG|RO|AL|EX|KU|TR|IR|CN|PH|JP|KR)\s*-|PT\/BR\b)/i;
+const LANG_WORD = /(?:^|[^A-ZÀ-ÿ])(NORDIC|SVENSKA?|DANSKE?|NORGE|NORSK|SUOMEN|SUOMI|ÍSLANDS|TURKISH|TURKSIH|GREECE|GREEK|ITALY|FRANCE|QUÉBEC|ALBANIA|INDIAN?|HINDI|SOMALIA|PAKISTAN|NETHERLANDS|VIDEOLAND|BELGIUM|GERMANY|POLSKA|ESPAÑA|LATINO|PERSIAN|KURDISH|HEBREW|ROMANIAN|BULGARIYA|HUNGARY|RUSS[AI]+N|AFRICA|CHINA|PHILIPPINES|MALTA|JOYN|ASIA|MENA|ARABIA)(?:$|[^A-ZÀ-ÿ])/i;
+const isEnglishGroup = n => !NON_LATIN.test(n) && !LANG_PREFIX.test(n) && !LANG_WORD.test(n);
+const GROUP_RANKS = [/\bTOP\b|NEW RELEASE|TRENDING|IMDB/i, /NETFLIX|AMAZON|DISNEY|APPLE|HBO|PARAMOUNT\+|PEACOCK|\bSKY\b|SHOWTIME|VIAPLAY|DISCOVERY|OSN/i,
+  /^EN -|ENGLISH/i, /MARVEL|UNIVERSAL|PARAMOUNT PICTURES|DREAMWORKS|BOND|COLLECTION/i, /KIDS|ANIM|NICKELODEON|CRUNCHYROLL/i, /DOCU/i,
+  /SOCCER|WWE|UFC|BOXING|FIFA|STAND-UP|CONCERT|MUSIC|WORKOUT|PODCAST|REALITY|CHRISTMAS/i];
+const groupRank = n => { const i = GROUP_RANKS.findIndex(r => r.test(n || '')); return i < 0 ? GROUP_RANKS.length : i; };
+
 function catalogueEntry(p, tab, d) {
-  const cats = d.cats || [];
-  return { cats, total: d.total || 0, recent: toItems(p, tab, cats, d.recent || []), top: toItems(p, tab, cats, d.top || []), groups: new Map(), searches: new Map(),
-    groupList: cats.map(c => ({ name: c.category_name || '', count: c.count, id: c.category_id })) };
+  const all = d.cats || [];
+  const en = state.settings.vodLanguage !== 'all';
+  const cats = en ? all.filter(c => isEnglishGroup(c.category_name || '')) : all;
+  const ok = new Set(cats.map(c => c.category_name || ''));
+  const keep = list => (en ? list.filter(it => ok.has(it.group || '')) : list);
+  const sorted = en ? [...cats].sort((a, b) => groupRank(a.category_name) - groupRank(b.category_name) || b.count - a.count) : cats;
+  return { cats: all, keep, total: en ? cats.reduce((n, c) => n + c.count, 0) : d.total || 0,
+    recent: keep(toItems(p, tab, all, d.recent || [])), top: keep(toItems(p, tab, all, d.top || [])), groups: new Map(), searches: new Map(),
+    groupList: sorted.map(c => ({ name: c.category_name || '', count: c.count, id: c.category_id })) };
 }
 async function requestVod(p, tab, { group, q }) {
   const key = vodKey(p, tab), entry = vodCache.get(key);
@@ -1047,7 +1067,7 @@ async function requestVod(p, tab, { group, q }) {
     const cat = q === undefined ? entry.cats.find(c => (c.category_name || '') === group) : null;
     const d = await vodApi(p, tab, q !== undefined ? { q } : { group: cat?.category_id ?? '' });
     const items = toItems(p, tab, entry.cats, d.items || []);
-    if (q !== undefined) entry.searches.set(q, items); else entry.groups.set(group, items);
+    if (q !== undefined) entry.searches.set(q, entry.keep ? entry.keep(items) : items); else entry.groups.set(group, items);
   } catch (err) {
     toast(err.message);
   } finally {
@@ -1143,7 +1163,7 @@ function renderDiscover() {
   shelfObserver?.disconnect();
   const hidden = new Set(p.hiddenGroups || []);
   const groups = entry.groupList.filter(g => !hidden.has(g.name));
-  const hero = entry.recent.find(it => it.logo) || entry.recent[0];
+  const hero = (entry.top || []).find(it => it.logo) || entry.recent.find(it => it.logo) || entry.recent[0];
   const what = tab === 'movies' ? 'movies' : 'series';
   list.className = 'list discover';
   view.classList.add('vod');
@@ -1160,7 +1180,8 @@ function renderDiscover() {
           <div class="hero-actions"><button class="btn primary" data-hero="play">${icon('play')} ${tab === 'movies' ? 'Play' : 'Episodes'}</button><button class="btn" data-hero="info">Details</button></div>
         </div>
       </div></li>` : ''}
-    ${shelfHtml('Recently added', 'recent', entry.recent.slice(0, 40))}
+    ${entry.top?.length ? shelfHtml('Trending now', 'top', entry.top.slice(0, 40)) : ''}
+    ${shelfHtml('New releases', 'recent', entry.recent.slice(0, 40))}
     <li class="shelf"><div class="shelf-head"><h3>Browse by group</h3><span class="muted">${groups.length} groups</span></div><ul class="shelf-row gtiles">${groupTiles}</ul></li>
     ${groups.slice(0, 40).map(g => shelfHtml(prettyGroup(g.name) || UNGROUPED, 'g:' + g.name, (entry.groups.get(g.name) || []).slice(0, 24), { total: g.count, group: g.name, pending: !entry.groups.has(g.name) })).join('')}
     ${groups.length > 40 ? `<li class="muted center shelf-note">${(groups.length - 40).toLocaleString()} more groups: use the chips above.</li>` : ''}`;
@@ -3232,6 +3253,9 @@ async function settingsSheet() {
       ${isNative ? '' : `<label>Play films &amp; series in<select name="vodPlayer">
         ${[['app', 'This app'], ['vlc', 'VLC (free; plays every format)'], ['infuse', 'Infuse'], ...(/Macintosh/.test(navigator.userAgent) ? [['iina', 'IINA (Mac, free)']] : [])].map(([v, l]) => `<option value="${v}" ${(s.vodPlayer || 'app') === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>`}
+      <label>Movies &amp; series languages<select name="vodLanguage">
+        ${[['en', 'English only'], ['all', 'All languages']].map(([v, l]) => `<option value="${v}" ${(s.vodLanguage || 'en') === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select></label>
       <label>Buffering<select name="buffer">
         ${[['auto', 'Auto (fast, steps up if a channel keeps stalling)'], ['fast', 'Fast switching (~4s buffer)'], ['balanced', 'Balanced (~8s buffer)'], ['stable', 'Stable (~14s buffer, slower switching)']].map(([v, l]) => `<option value="${v}" ${(s.buffer || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
@@ -3253,14 +3277,15 @@ async function settingsSheet() {
       el.querySelector('form').onsubmit = async e => {
         e.preventDefault();
         const f = new FormData(e.target);
-        const mergeWas = state.settings.mergeDupes !== false;
+        const mergeWas = state.settings.mergeDupes !== false, langWas = state.settings.vodLanguage;
         Object.assign(state.settings, {
           ...(f.has('proxy') ? { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')) } : {}),
-          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'),
+          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'),
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
           showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on', resumeCard: f.get('resumeCard') === 'on',
         });
         if (mergeWas !== state.settings.mergeDupes) state.playlists.forEach(invalidate);
+        if (langWas !== state.settings.vodLanguage) vodCache.clear();   // rebuilt with the new language filter on next view
         applySettings();
         rerender();
         await db.set('settings', state.settings);
