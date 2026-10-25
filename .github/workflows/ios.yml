@@ -65,6 +65,15 @@ jobs:
             build | tail -n 60
           test -d build/Build/Products/Release-iphoneos/App.app
 
+      - name: Check the app bundle
+        run: |
+          APP=build/Build/Products/Release-iphoneos/App.app
+          ls "$APP" "$APP/Frameworks"
+          for f in Frameworks/Capacitor.framework Frameworks/Cordova.framework public/index.html public/js/app.js public/js/native.js public/vendor/hls.min.js capacitor.config.json; do
+            test -e "$APP/$f" || { echo "::error::Missing $f in the app bundle"; exit 1; }
+          done
+          /usr/libexec/PlistBuddy -c 'Print :NSAppTransportSecurity' -c 'Print :UIBackgroundModes' -c 'Print :CFBundleShortVersionString' "$APP/Info.plist"
+
       - name: Package .ipa
         run: |
           mkdir Payload
