@@ -41,6 +41,7 @@ export class Player {
     this.tsToHls = true;
     this.wrap = url => url;   // e.g. route through the proxy
     this.preferNative = false; // the iPhone app's web view: use iOS's own HLS player first
+    this.transcode = null;    // last resort: a fn(url) -> our server's /hls repackager, so Safari can play raw TS
     this.onFatal = null;
     video.addEventListener('error', () => { if (this.ready) this.onFatal?.(mediaErrorMessage(video.error)); });
   }
@@ -66,15 +67,20 @@ export class Player {
   async play(url) {
     const token = ++this.token;
     let lastError;
+    const tries = [];
     for (const candidate of this.candidates(url)) {
-      for (const mode of this.modes(candidate)) {
-        try {
-          await this.attempt(candidate, mode);
-          return token === this.token;
-        } catch (e) {
-          if (token !== this.token) return false;
-          lastError = e;
-        }
+      for (const mode of this.modes(candidate)) tries.push([candidate, mode]);
+    }
+    // Last resort: have our server repackage the raw stream into HLS so Safari can play it.
+    const tc = this.transcode?.(url);
+    if (tc) for (const mode of this.modes(tc)) tries.push([tc, mode]);
+    for (const [candidate, mode] of tries) {
+      try {
+        await this.attempt(candidate, mode);
+        return token === this.token;
+      } catch (e) {
+        if (token !== this.token) return false;
+        lastError = e;
       }
     }
     throw lastError;

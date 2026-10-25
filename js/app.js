@@ -133,12 +133,23 @@ async function enterServerKey() {
   rerender();
 }
 
+// Last-resort playback: route a raw stream through our own server's /hls repackager
+// (ffmpeg -> HLS) so Safari can play MPEG-TS it otherwise refuses. Our server only.
+function transcodeUrl(url) {
+  if (isNative) return null;                 // the native app plays raw streams itself
+  if (!serverProxy.available) return null;   // only our own server exposes /hls
+  const key = state.settings.serverKey || '';
+  if (serverProxy.needsKey && !key) return null;
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}url=${encodeURIComponent(url)}`;
+}
+
 function applySettings() {
   net.proxy = state.settings.proxy || (serverProxy.available && !serverProxy.needsKey ? serverProxyUrl() : '');
   net.streamProxy = state.settings.streamProxy;
   player.tsToHls = state.settings.tsToHls;
   player.wrap = streamUrl;
   player.preferNative = isNative;
+  player.transcode = transcodeUrl;
 }
 
 async function save(p) {
@@ -1124,6 +1135,7 @@ function showMulti() {
     pl.tsToHls = player.tsToHls;
     pl.wrap = streamUrl;
     pl.preferNative = isNative;
+    pl.transcode = transcodeUrl;
     return pl;
   });
   multi.tiles.slice(0, multi.layout).forEach((c, i) => startTile(i, c));
