@@ -16,9 +16,10 @@ const FFMPEG = process.env.FFMPEG || 'C:\\ffmpeg\\ffmpeg.exe';
 const PROXY_KEY = process.env.PROXY_KEY || '';
 const ALLOW_PRIVATE = process.env.ALLOW_PRIVATE === '1';
 const ROOT = join(tmpdir(), 'm3u-hls');
-const IDLE_MS = 30_000;        // kill ffmpeg this long after the last segment fetch
-const MAX_SESSIONS = 4;        // concurrent transcodes
+const IDLE_MS = 45_000;        // kill ffmpeg this long after the last segment fetch (long enough for pre-warmed neighbours)
+const MAX_SESSIONS = 6;        // concurrent transcodes (one playing + a few pre-warmed)
 const START_TIMEOUT_MS = 25_000;
+const READY_SEGMENTS = 1;      // serve the playlist as soon as one segment is complete; the player buffers the rest
 
 const TYPES = {
   '.m3u8': 'application/vnd.apple.mpegurl',
@@ -56,10 +57,11 @@ async function startSession(id, target) {
   const args = [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2',
-    '-probesize', '1000000', '-analyzeduration', '1000000',   // open the input fast (don't over-probe a known TS)
-    '-fflags', '+genpts+nobuffer', '-i', target,
+    '-probesize', '500000', '-analyzeduration', '500000',     // open the input fast (don't over-probe a known TS)
+    '-fflags', '+genpts+nobuffer+flush_packets', '-flags', 'low_delay', '-i', target,
     '-map', '0:v:0?', '-map', '0:a:0?',
     '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+    '-flush_packets', '1', '-muxdelay', '0',
     '-f', 'hls', '-hls_time', '1', '-hls_list_size', '10',     // 1s segments start quicker
     '-hls_flags', 'delete_segments+append_list+omit_endlist', '-hls_segment_type', 'mpegts',
     '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
@@ -92,9 +94,9 @@ async function waitForPlaylist(dir, timeout) {
   while (Date.now() < deadline) {
     try {
       const t = await fs.readFile(file, 'utf8');
-      if ((t.match(/\.ts/g) || []).length >= 2) return true;   // a couple of segments buffered
+      if ((t.match(/\.ts/g) || []).length >= READY_SEGMENTS) return true;
     } catch {}
-    await new Promise(r => setTimeout(r, 250));
+    await new Promise(r => setTimeout(r, 80));
   }
   return false;
 }
@@ -118,7 +120,8 @@ export async function handleHls(req, res, url) {
     } catch { return send(res, 404, 'Not ready'); }
   }
 
-  // start (or reuse) a transcode and redirect to its playlist
+  // start (or reuse) a transcode and serve its playlist. /hls/warm just starts it (pre-warm) and returns.
+  const warm = parts.length === 2 && parts[1] === 'warm';
   const target = url.searchParams.get('url');
   const key = url.searchParams.get('key') || '';
   if (!target) return send(res, 400, 'Missing url');
@@ -133,10 +136,16 @@ export async function handleHls(req, res, url) {
   let s = sessions.get(id);
   if (s && s.exited) { stopSession(id); s = null; }
   if (!s) {
-    if (sessions.size >= MAX_SESSIONS) return send(res, 503, 'Too many streams in progress — stop one and retry');
+    if (sessions.size >= MAX_SESSIONS) {
+      if (warm) return send(res, 204, '');
+      // evict the least recently used session that isn't being watched, so a tap always wins over a pre-warm
+      const lru = [...sessions.entries()].sort((a, b) => a[1].lastAccess - b[1].lastAccess)[0];
+      if (lru) stopSession(lru[0]); else return send(res, 503, 'Too many streams in progress — stop one and retry');
+    }
     s = await startSession(id, t.href);
   }
   s.lastAccess = Date.now();
+  if (warm) return send(res, 204, '');
 
   const ok = await waitForPlaylist(s.dir, START_TIMEOUT_MS);
   if (!ok) {

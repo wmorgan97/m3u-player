@@ -143,6 +143,17 @@ function transcodeUrl(url) {
   return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}url=${encodeURIComponent(url)}`;
 }
 
+// Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
+const warmed = new Map();   // url -> time
+function warm(url) {
+  const tc = url && transcodeUrl(url);
+  if (!tc || /\.m3u8(\?|#|$)/i.test(url)) return;
+  if (Date.now() - (warmed.get(url) || 0) < 20_000) return;
+  warmed.set(url, Date.now());
+  fetch(tc.replace('/hls?', '/hls/warm?'), { keepalive: true }).catch(() => {});
+}
+const warmNeighbours = (list, index) => { warm(list[index + 1]?.url); warm(list[index - 1]?.url); };
+
 function applySettings() {
   net.proxy = state.settings.proxy || (serverProxy.available && !serverProxy.needsKey ? serverProxyUrl() : '');
   net.streamProxy = state.settings.streamProxy;
@@ -461,6 +472,8 @@ function showPlaylist(p) {
     if (state.tab !== 'live' && p.kind === 'xtream') loadVod(p, state.tab);
   });
   $('#list').onclick = onListClick;
+  // start the transcoder on touch-down, ~150-300ms before the tap registers
+  $('#list').onpointerdown = e => { const el = e.target.closest('.row'); if (el) warm(state.filtered[+el.dataset.i]?.url); };
   observer.observe($('#sentinel'));
   refreshPlaylistView();
   window.scrollTo(0, 0);
@@ -1921,6 +1934,7 @@ function playChannel(list, index) {
   setStatus('Connecting…');
   highlightPlaying();
   addRecent(c);
+  warmNeighbours(list, index);   // prev/next are ready before you press them
   try {
     if ('mediaSession' in navigator) {
       navigator.mediaSession.metadata = new MediaMetadata({ title: c.name, artist: c.group || 'M3U Player', artwork: c.logo ? [{ src: c.logo }] : [] });
