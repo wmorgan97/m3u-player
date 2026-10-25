@@ -1,8 +1,9 @@
 // Plays a stream in a <video>: native HLS where the browser has it (Safari,
 // iPhone), hls.js elsewhere, and a plain src for progressive files.
 
-const PROGRESSIVE = /\.(mp4|m4v|mov|webm|mkv|mp3|aac|m4a|ogg|oga|opus|flac|wav)(\?|#|$)/i;
+const PROGRESSIVE = /\.(mp4|m4v|mov|webm|mkv|avi|mp3|aac|m4a|ogg|oga|opus|flac|wav)(\?|#|$)/i;
 const HLS_MIME = 'application/vnd.apple.mpegurl';
+const IS_SAFARI = typeof navigator !== 'undefined' && /^((?!chrome|chromium|crios|fxios|android).)*safari/i.test(navigator.userAgent);
 
 function mediaErrorMessage(err) {
   switch (err?.code) {
@@ -17,7 +18,7 @@ function hlsErrorMessage(data) {
   if (/manifestLoad|levelLoad/i.test(data.details)) {
     return data.response?.code
       ? `The stream server replied ${data.response.code}.`
-      : 'The stream server is offline or blocks web browsers (CORS).';
+      : 'The stream server is offline or blocks web browsers.';
   }
   return `Stream error (${data.details}).`;
 }
@@ -38,6 +39,7 @@ export class Player {
     this.ready = false;
     this.cancel = null;
     this.tsToHls = true;
+    this.wrap = url => url;   // e.g. route through the proxy
     this.onFatal = null;
     video.addEventListener('error', () => { if (this.ready) this.onFatal?.(mediaErrorMessage(video.error)); });
   }
@@ -46,20 +48,32 @@ export class Player {
   candidates(url) {
     const list = [url];
     if (this.tsToHls && /\.ts(\?|$)/i.test(url)) list.unshift(url.replace(/\.ts(\?|$)/i, '.m3u8$1'));
-    return list;
+    return list.map(this.wrap);
   }
 
-  // Resolves true once playing, false if superseded by another play/stop; rejects if every candidate fails.
+  // Ways to play a URL, best first. Safari's own HLS player is preferred where
+  // it exists (AirPlay, background audio); elsewhere hls.js is more reliable.
+  modes(url) {
+    if (PROGRESSIVE.test(url)) return ['direct'];
+    const native = !!this.video.canPlayType(HLS_MIME);
+    const hlsjs = !!window.Hls?.isSupported();
+    const order = native && (IS_SAFARI || !hlsjs) ? ['native', 'hlsjs'] : ['hlsjs', 'native', 'direct'];
+    return order.filter(m => (m === 'hlsjs' ? hlsjs : m === 'native' ? native : !native));
+  }
+
+  // Resolves true once playing, false if superseded by another play/stop; rejects if every attempt fails.
   async play(url) {
     const token = ++this.token;
     let lastError;
     for (const candidate of this.candidates(url)) {
-      try {
-        await this.attempt(candidate);
-        return token === this.token;
-      } catch (e) {
-        if (token !== this.token) return false;
-        lastError = e;
+      for (const mode of this.modes(candidate)) {
+        try {
+          await this.attempt(candidate, mode);
+          return token === this.token;
+        } catch (e) {
+          if (token !== this.token) return false;
+          lastError = e;
+        }
       }
     }
     throw lastError;
@@ -80,11 +94,11 @@ export class Player {
     v.load();
   }
 
-  attempt(url) {
+  attempt(url, mode) {
     this.teardown();
     const v = this.video;
     const Hls = window.Hls;
-    const useHlsJs = !PROGRESSIVE.test(url) && !v.canPlayType(HLS_MIME) && Hls?.isSupported();
+    const useHlsJs = mode === 'hlsjs';
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -121,5 +135,47 @@ export class Player {
       }
       v.play().catch(() => {});
     });
+  }
+
+  get isLive() { return !Number.isFinite(this.video.duration); }
+
+  audioTracks() {
+    if (this.hls) return this.hls.audioTracks.map((t, i) => ({ i, label: t.name || t.lang || `Track ${i + 1}`, active: i === this.hls.audioTrack }));
+    return [...(this.video.audioTracks || [])].map((t, i) => ({ i, label: t.label || t.language || `Track ${i + 1}`, active: t.enabled }));
+  }
+
+  setAudioTrack(i) {
+    if (this.hls) this.hls.audioTrack = i;
+    else [...(this.video.audioTracks || [])].forEach((t, k) => { t.enabled = k === i; });
+  }
+
+  nativeTextTracks() {
+    return [...this.video.textTracks].filter(t => t.kind === 'subtitles' || t.kind === 'captions');
+  }
+
+  subtitleTracks() {
+    if (this.hls) return this.hls.subtitleTracks.map((t, i) => ({ i, label: t.name || t.lang || `Subtitles ${i + 1}`, active: i === this.hls.subtitleTrack }));
+    return this.nativeTextTracks().map((t, i) => ({ i, label: t.label || t.language || `Subtitles ${i + 1}`, active: t.mode === 'showing' }));
+  }
+
+  // -1 turns subtitles off.
+  setSubtitleTrack(i) {
+    if (this.hls) {
+      this.hls.subtitleTrack = i;
+      this.hls.subtitleDisplay = i >= 0;
+    } else {
+      this.nativeTextTracks().forEach((t, k) => { t.mode = k === i ? 'showing' : 'disabled'; });
+    }
+  }
+
+  async togglePip() {
+    const v = this.video;
+    if (document.pictureInPictureElement) return document.exitPictureInPicture();
+    if (v.requestPictureInPicture && document.pictureInPictureEnabled) return v.requestPictureInPicture();
+    if (v.webkitSetPresentationMode) {
+      v.webkitSetPresentationMode(v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture');
+      return;
+    }
+    throw new Error('Picture-in-Picture isn’t available here.');
   }
 }

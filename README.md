@@ -1,55 +1,67 @@
 # M3U Player
 
-An installable web app (PWA) for playing and organising M3U / M3U8 IPTV playlists, built mobile-first for iPhone.
+A free IPTV player for iPhone, built as an installable web app (PWA). It has the features other IPTV apps charge for, with no subscription, no ads and no account. Everything stays on your device.
 
 ## Features
 
-**Watch**
-- Add playlists from a link, an **Xtream** login (server / username / password), a file, or pasted text
-- Browse by group, search thousands of channels instantly, favorites and recently watched
-- Native HLS playback on iPhone (with Picture-in-Picture and AirPlay); hls.js in other browsers
-- Previous / next channel, lock-screen controls
-- `.ts` IPTV links are automatically tried as `.m3u8` first (playable on iPhone)
-- Any stream that won't play in the browser: one tap to **Open in VLC / Infuse**, or copy the link
+**Sources**
+- **Xtream Codes login** (server / username / password): Live TV, Movies and Series, plus account info (expiry, connections)
+- M3U / M3U8 links, files, or pasted text; Xtream `get.php` links are upgraded to the full API automatically
+- Auto-refresh: Xtream daily, M3U optional
 
-**Edit**
-- Edit channel name, group, stream URL and logo; add channels by hand
-- Multi-select → add to favorites, move to group, copy to another/new playlist (merge), export, delete (with undo)
-- Rename / delete groups, sort A–Z or by group, remove duplicates, refresh from the source URL
-- Export as `.m3u`: share sheet (Save to Files, AirDrop, open in VLC), download, or copy as text
+**Watching**
+- Native iPhone playback (AirPlay, Picture-in-Picture, lock-screen controls); hls.js in other browsers
+- **TV guide (EPG)**: now/next on every channel, full guide grid, per-channel schedule. XMLTV `.xml` / `.xml.gz`, auto-detected from the playlist or Xtream
+- **Catch-up / timeshift**: play past programmes, or restart the current one from the beginning (Xtream archive and M3U `catchup` attributes)
+- **Movies & Series**: posters, plot, cast, rating, seasons and episodes, auto-play next episode
+- **Continue watching** with resume position; watched episodes are ticked
+- **Multi-view**: 2 or 4 channels at once, tap to choose which one you hear
+- Audio track and subtitle selection, playback speed, **sleep timer**
+- Favorites, recently watched, search across all playlists
+- Previous / next channel; `.ts` IPTV links are tried as `.m3u8` first (playable on iPhone)
+- Anything that won't play in the browser: one tap to **Open in VLC / Infuse**
 
-Everything is stored on the device (IndexedDB). Nothing is sent anywhere.
+**Organising**
+- **Parental control**: lock groups behind a PIN
+- Hide groups, reorder groups, rename / delete groups
+- Edit channels (name, group, logo, link, guide ID), add channels by hand
+- Multi-select → favorite, move to group, copy/merge into another playlist, export, delete (with undo)
+- Sort A–Z or by group, remove duplicates
+- Export as `.m3u` (share sheet / Files / AirDrop / VLC, download, or copy)
+- **Backup & restore** everything to one file, to move to another device
 
 ## Install on iPhone
 
 1. Open the app's URL in **Safari**.
 2. Tap **Share → Add to Home Screen**.
 
-It then opens full-screen like a native app, works offline (the app itself), and iOS won't clear its data.
+It opens full-screen like a native app, starts offline, and iOS keeps its data.
+
+## The free proxy (recommended)
+
+Browsers block https:// web apps from talking to http:// servers, and many IPTV servers don't allow web apps at all. Most Xtream providers use http://, so you'll need this for Xtream logins, TV guides and http streams.
+
+[`proxy/`](proxy/README.md) has a tiny Cloudflare Worker you can deploy for free in about 5 minutes (copy and paste, no coding). Then enter its address in **Settings → Proxy**.
+
+Without it, M3U files with https:// streams still work fully.
 
 ## Hosting
 
-The included workflow (`.github/workflows/pages.yml`) runs the tests and deploys to **GitHub Pages** on every push to `main`.
-One-time setup: repo **Settings → Pages → Source: GitHub Actions**. (Pages on a private repo needs a paid GitHub plan; otherwise make the repo public. It holds no secrets.)
+`.github/workflows/pages.yml` runs the tests and deploys to **GitHub Pages** on every push to `main`. One-time setup: repo **Settings → Pages → Source: GitHub Actions**. Pages on a private repo needs a paid GitHub plan; otherwise make the repo public (it holds no secrets).
 
-Any static host works too (Netlify, Cloudflare Pages, Vercel): just serve the repo root. There's no build step.
+Any static host works too (Netlify, Cloudflare Pages, Vercel): serve the repo root. There's no build step.
 
-## Browser limitations (why some streams need VLC)
+## What a web app can't do
 
-A web app plays by the browser's rules:
-
-- **http:// streams on an https:// site** are often blocked as mixed content. Many IPTV providers only offer http.
-- **Raw MPEG-TS (`.ts`)** isn't playable in Safari. The app tries the `.m3u8` variant first, which most Xtream panels provide.
-- **Downloading a playlist** from a server that doesn't send CORS headers fails in the browser. Use the File tab, or set a CORS proxy in Settings. (Playback of HLS on iPhone is *not* affected by CORS.)
+- **Recording to the phone.** Use catch-up instead where your provider offers it.
+- Raw MPEG-TS-only streams and some codecs (e.g. MKV movies with unusual audio) don't play in Safari. Use the *Open in VLC / Infuse* buttons for those.
 - Custom headers (`#EXTVLCOPT:http-user-agent=…`) are kept in exports but can't be applied by a browser.
-
-For those cases, the app hands the stream to VLC or Infuse. A native SwiftUI app would remove these limits; the parser and data model here would port directly.
 
 ## Development
 
 ```sh
 npm start        # serves on http://localhost:8080
-npm test         # parser unit tests (node --test)
+npm test         # unit tests: M3U parser, XMLTV guide, Xtream API mapping
 ```
 
 Open the LAN address on your phone to test on a real device. To update hls.js: bump it in `package.json`, `npm install`, `npm run vendor`.
@@ -57,11 +69,15 @@ Open the LAN address on your phone to test on a real device. To update hls.js: b
 ```
 index.html           app shell
 css/app.css          styles
-js/app.js            views, routing, playlist/channel actions
+js/app.js            views and actions: playlists, movies/series, guide, multi-view, settings
+js/player.js         playback (native HLS, hls.js, fallbacks, tracks, PiP, external players)
+js/xtream.js         Xtream Codes API client
+js/epg.js            streaming XMLTV parser, now/next, catch-up URLs
 js/m3u.js            M3U parser / writer
-js/player.js         playback (native HLS, hls.js, fallbacks, external players)
+js/net.js            fetch with proxy fallback
 js/db.js             IndexedDB storage
 js/ui.js             sheets, menus, forms, toasts, icons
 sw.js                offline cache for the app shell
+proxy/worker.js      optional Cloudflare Worker proxy
 vendor/hls.min.js    hls.js (vendored, no build step)
 ```

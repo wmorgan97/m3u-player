@@ -30,5 +30,6 @@ export const db = {
   deletePlaylist: id => run('playlists', 'readwrite', s => s.delete(id)),
   get: key => run('kv', 'readonly', s => s.get(key)),
   set: (key, value) => run('kv', 'readwrite', s => s.put(value, key)),
+  del: key => run('kv', 'readwrite', s => s.delete(key)),
   clear: () => Promise.all([run('playlists', 'readwrite', s => s.clear()), run('kv', 'readwrite', s => s.clear())]),
 };

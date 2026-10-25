@@ -21,6 +21,13 @@ const PATHS = {
   list: '<path d="M9 6h11M9 12h11M9 18h11"/><circle class="dot" cx="4.5" cy="6" r="1.2"/><circle class="dot" cx="4.5" cy="12" r="1.2"/><circle class="dot" cx="4.5" cy="18" r="1.2"/>',
   tv: '<rect x="3" y="5" width="18" height="12" rx="2.5"/><path d="M8 21h8M12 17v4"/>',
   share: '<path d="M12 3v12M8 7l4-4 4 4"/><path d="M6 11v8a2 2 0 002 2h8a2 2 0 002-2v-8"/>',
+  guide: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 9h18M9 9v11M14 13h4M14 16.5h3"/>',
+  grid: '<rect x="3.5" y="3.5" width="7.5" height="7.5" rx="1.5"/><rect x="13" y="3.5" width="7.5" height="7.5" rx="1.5"/><rect x="3.5" y="13" width="7.5" height="7.5" rx="1.5"/><rect x="13" y="13" width="7.5" height="7.5" rx="1.5"/>',
+  refresh: '<path d="M20 11a8 8 0 10-2.3 5.7"/><path d="M20 4v7h-7"/>',
+  lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>',
+  film: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/>',
+  play: '<path class="dot" d="M7 4.5v15l13-7.5z"/>',
+  search2: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
 };
 
 export const icon = (name, cls = '') => `<svg class="ico ${cls}" viewBox="0 0 24 24" aria-hidden="true">${PATHS[name]}</svg>`;
@@ -74,8 +81,10 @@ export function menu(title, items) {
 }
 
 function field(f) {
-  const common = `name="${f.name}" placeholder="${esc(f.placeholder || '')}" ${f.required ? 'required' : ''} autocorrect="off" spellcheck="false"`;
-  const input = f.type === 'textarea'
+  const common = `name="${f.name}" placeholder="${esc(f.placeholder || '')}" ${f.required ? 'required' : ''} ${f.inputmode ? `inputmode="${f.inputmode}"` : ''} autocorrect="off" spellcheck="false"`;
+  const input = f.type === 'select'
+    ? `<select name="${f.name}">${f.options.map(o => `<option value="${esc(o.value)}" ${o.value === f.value ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`
+    : f.type === 'textarea'
     ? `<textarea ${common} rows="5">${esc(f.value)}</textarea>`
     : `<input ${common} type="${f.type || 'text'}" value="${esc(f.value ?? '')}" ${f.type === 'url' ? 'autocapitalize="off" inputmode="url"' : ''} ${f.list ? `list="dl-${f.name}"` : ''}>`;
   const datalist = f.list ? `<datalist id="dl-${f.name}">${f.list.map(o => `<option value="${esc(o)}">`).join('')}</datalist>` : '';
