@@ -957,7 +957,7 @@ async function seriesSheet(s) {
     logo: ep.info?.movie_image || s.logo,
     group: `${s.name} · Season ${season}`,
     num: ep.episode_num, duration: ep.info?.duration || '', plot: ep.info?.plot || '',
-  })));
+  }));
   // Start on the season of the most recently watched episode.
   const urls = new Map(seasons.flatMap(se => episodesOf(se).map(e => [e.url, se])));
   const last = Object.values(state.progress).filter(e => urls.has(e.item.url)).sort((a, b) => b.at - a.at)[0];
