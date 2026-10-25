@@ -1140,6 +1140,48 @@ function renderMore() {
 // browser's storage in 8 MB pieces; the Downloads page plays it from there with no connection at all.
 const DL_CHUNK = 8 << 20;
 let dlActive = null;
+// Fetch the download, waiting and retrying while the provider's one connection is in use (the server says
+// "busy", or the stream was cut when playback started). Exact copies resume from the byte they stopped at;
+// conversions restart from the beginning. onStart(restart) lets the caller reset its output.
+async function dlFetchLoop(meta, ctrl, onStart, onChunk) {
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const resume = meta.q === 'file' && meta.bytes > 0;
+    let res;
+    try {
+      res = await fetch(`${serverApi('download')}&q=${meta.q}&url=${encodeURIComponent(meta.orig)}`, { signal: ctrl.signal, cache: 'no-store', headers: resume ? { range: `bytes=${meta.bytes}-` } : {} });
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      res = null;
+    }
+    if (!res || res.status === 409 || res.status >= 500) {
+      meta.waiting = res ? 'Waiting: something from this provider is playing' : 'Waiting for the connection…';
+      refreshDownloadsUi();
+      await new Promise((r, rej) => { const t = setTimeout(r, 15000); ctrl.signal.addEventListener('abort', () => { clearTimeout(t); rej(new DOMException('Cancelled', 'AbortError')); }, { once: true }); });
+      continue;
+    }
+    if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
+    delete meta.waiting;
+    const restart = !(resume && res.status === 206);
+    if (restart) { meta.bytes = 0; meta.parts = 0; }
+    await onStart(restart);
+    meta.duration = Number(res.headers.get('x-duration')) || meta.duration || 0;
+    meta.estimate = Number(res.headers.get('x-estimate')) || meta.estimate || 0;
+    const reader = res.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;                                   // finished cleanly
+        await onChunk(value);
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      meta.waiting = 'Connection lost: resuming…';          // the stream was cut (playback took the connection): go round again
+      refreshDownloadsUi();
+      await new Promise(r => setTimeout(r, 8000));
+    }
+  }
+  throw new Error('Gave up after waiting too long for the provider connection');
+}
 // Speed over the last ~5 seconds, plus ETA from the size estimate.
 function noteSpeed(meta, delta) {
   const now = Date.now();
@@ -1168,23 +1210,18 @@ async function runDownload(meta) {
   dlActive = { id: meta.id, ctrl };
   delete meta.error;
   try {
-    const res = await fetch(`${serverApi('download')}&q=${meta.q}&url=${encodeURIComponent(meta.orig)}`, { signal: ctrl.signal, cache: 'no-store' });
-    if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
-    meta.duration = Number(res.headers.get('x-duration')) || 0;
-    meta.estimate = Number(res.headers.get('x-estimate')) || 0;
-    const reader = res.body.getReader();
     let buf = [], size = 0, lastSave = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    const flush = async () => { if (size) { await db.set(`dlc:${meta.id}:${meta.parts}`, new Blob(buf, { type: 'video/mp4' })); meta.parts++; buf = []; size = 0; } };
+    await dlFetchLoop(meta, ctrl, async restart => {
+      if (restart) { for (let i = 0; i < 400; i++) db.del(`dlc:${meta.id}:${i}`).catch(() => {}); buf = []; size = 0; }
+    }, async value => {
       buf.push(value); size += value.length; meta.bytes += value.length; noteSpeed(meta, value.length);
       if (size >= DL_CHUNK) {
-        await db.set(`dlc:${meta.id}:${meta.parts}`, new Blob(buf, { type: 'video/mp4' }));
-        meta.parts++; buf = []; size = 0;
+        await flush();
         if (Date.now() - lastSave > 3000) { lastSave = Date.now(); db.set('downloads', state.downloads).catch(() => {}); refreshDownloadsUi(); }
       }
-    }
-    if (size) { await db.set(`dlc:${meta.id}:${meta.parts}`, new Blob(buf, { type: 'video/mp4' })); meta.parts++; }
+    });
+    await flush();
     if (meta.bytes < 1e6) throw new Error('The server sent no video (the file may be unavailable)');
     meta.done = true; meta.finishedAt = Date.now();
   } catch (e) {
@@ -1244,20 +1281,14 @@ async function saveToDisk(item, q) {
   dlActive = { id, ctrl };
   let writable;
   try {
-    writable = await handle.createWritable();
-    const res = await fetch(`${serverApi('download')}&q=${q}&url=${encodeURIComponent(item.url)}`, { signal: ctrl.signal, cache: 'no-store' });
-    if (!res.ok) throw new Error((await res.text()) || `The server replied ${res.status}`);
-    meta.duration = Number(res.headers.get('x-duration')) || 0;
-    meta.estimate = Number(res.headers.get('x-estimate')) || 0;
-    const reader = res.body.getReader();
     let lastSave = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    await dlFetchLoop(meta, ctrl, async restart => {
+      if (restart || !writable) { try { await writable?.abort(); } catch {} writable = await handle.createWritable(); }   // a fresh file; a resume keeps appending
+    }, async value => {
       await writable.write(value);
       meta.bytes += value.length; noteSpeed(meta, value.length);
       if (Date.now() - lastSave > 3000) { lastSave = Date.now(); db.set('downloads', state.downloads).catch(() => {}); refreshDownloadsUi(); }
-    }
+    });
     await writable.close();
     if (meta.bytes < 1e6) throw new Error('The server sent no video (the file may be unavailable)');
     meta.done = true; meta.finishedAt = Date.now();
@@ -1297,6 +1328,7 @@ async function showDownloads({ keep = false } = {}) {
     const elapsed = m.startedAt ? (Date.now() - m.startedAt) / 1000 : 0;
     return `<span class="dl-stats">
       <b>${m.estimate ? `${pct.toFixed(0)}%` : fmtBytes(m.bytes)}</b>
+      ${m.waiting ? `<span class="dl-wait">${esc(m.waiting)}</span>` : ''}
       <span>${fmtBytes(m.bytes)}${m.estimate ? ` of ~${fmtBytes(m.estimate)}` : ''}</span>
       ${m.speed ? `<span>${fmtSpeed(m.speed)}</span>` : ''}
       ${fmtEta(eta) ? `<span>${fmtEta(eta)} left</span>` : ''}
@@ -3477,6 +3509,7 @@ function playChannel(list, index) {
   trackProgress(true);
   const prev = nowChannel();
   state.playing = { list, index };
+  if (dlActive && !c.offline && isLiveChannel(c) === isLiveChannel(c)) { const m = state.downloads[dlActive.id]; if (m && !m.done) toast('Your download pauses while you watch and resumes afterwards'); }
   $('#player').hidden = false;
   document.body.classList.add('playing');
   document.body.classList.toggle('vod-playing', !isLiveChannel(c));   // films: wide "cinema" layout, not the live dock

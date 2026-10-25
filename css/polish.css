@@ -468,3 +468,5 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
 .lib:active, .lib:hover { background: var(--surface-2); }
 .lib-dot { position: absolute; top: 6px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
 @media (min-width: 900px) { .cont-row { margin: 0 0 4px; padding-left: 0; padding-right: 0; } .cont-row .cw { width: 160px; } .cont-row .cw-img { width: 160px; } }
+
+.dl-wait { width: 100%; color: var(--star); }
