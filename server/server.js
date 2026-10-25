@@ -135,7 +135,8 @@ async function handleStatic(req, res, url) {
 
 export function createAppServer() {
   return createServer((req, res) => {
-    const url = new URL(req.url, 'http://local');
+    let url;
+    try { url = new URL(req.url, 'http://local'); } catch { return send(res, 400, 'Bad request'); }   // e.g. '//' would crash the server
     if (req.method === 'OPTIONS') return send(res, 204, '');
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
     const handler = url.pathname === '/proxy' ? handleProxy
@@ -154,3 +155,5 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === normalize(process.argv
     console.log(`M3U Player on http://${hostAddr === '0.0.0.0' ? 'localhost' : hostAddr}:${port}${proxyKey ? ' (proxy key required)' : ''}`);
   });
 }
+
+process.on('uncaughtException', e => console.error('[uncaught]', e));   // one bad request must never take the app down
