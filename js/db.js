@@ -61,7 +61,8 @@ async function putPlaylist(p) {
   await multi(['playlists', 'chunks'], 'readwrite', (pl, ch) => {
     pl.put(meta);
     if (!prev) ch.delete(chunkRange(p.id));
-    next.forEach((json, i) => { if (!prev || json !== prev[i]) ch.put({ pid: p.id, i, channels: JSON.parse(json) }, chunkKey(p.id, i)); });
+    // Stored as JSON text: a phone reads text back from IndexedDB far faster than a big object graph.
+    next.forEach((json, i) => { if (!prev || json !== prev[i]) ch.put({ pid: p.id, i, json }, chunkKey(p.id, i)); });
     for (let i = next.length; i < (prev?.length || 0); i++) ch.delete(chunkKey(p.id, i));
   });
   chunkCache.set(p.id, next);
@@ -78,13 +79,15 @@ async function allPlaylists() {
   const byId = new Map();
   for (const c of chunks) {
     if (!byId.has(c.pid)) byId.set(c.pid, []);
-    byId.get(c.pid)[c.i] = c.channels;
+    byId.get(c.pid)[c.i] = c.json ?? c.channels;   // text (current) or objects (older saves)
   }
   return metas.map(m => {
     if (Array.isArray(m.channels)) return m;                 // legacy inline record
     const parts = byId.get(m.id) || [];
-    chunkCache.set(m.id, parts.map(c => JSON.stringify(c || [])));
-    return { ...m, channels: parts.filter(Boolean).flat() };
+    // The stored text doubles as the change check for the next save (no re-stringifying 19k channels at start).
+    // Older object chunks get no cache entry, so the next save rewrites them as text.
+    if (parts.every(x => typeof x === 'string')) chunkCache.set(m.id, parts); else chunkCache.delete(m.id);
+    return { ...m, channels: parts.filter(Boolean).flatMap(x => (typeof x === 'string' ? JSON.parse(x) : x)) };
   });
 }
 
@@ -100,8 +103,13 @@ export const db = {
   allPlaylists,
   putPlaylist,
   deletePlaylist,
-  get: key => run('kv', 'readonly', s => s.get(key)),
-  set: (key, value) => run('kv', 'readwrite', s => s.put(value, key)),
+  // Big values (catalogues, TV guides) are kept as JSON text and parsed on read: much faster to load on a phone.
+  get: key => run('kv', 'readonly', s => s.get(key)).then(v => (v && typeof v === 'object' && typeof v.__json === 'string' ? JSON.parse(v.__json) : v)),
+  set: (key, value) => {
+    let stored = value;
+    if (value && typeof value === 'object') { const json = JSON.stringify(value); if (json.length > 20000) stored = { __json: json }; }
+    return run('kv', 'readwrite', s => s.put(stored, key));
+  },
   del: key => run('kv', 'readwrite', s => s.delete(key)),
   clear: () => (chunkCache.clear(), Promise.all([
     run('playlists', 'readwrite', s => s.clear()),
