@@ -4742,7 +4742,9 @@ if (isTV) {
     e.preventDefault();
     if (okLong) { okLong = false; return; }
     const el = document.activeElement;
-    if (el && el !== document.body) el.click();
+    if (!el || el === document.body) return;
+    el.click();
+    if (el.closest('#mainnav')) { lastContent = null; setTimeout(leaveRail, 350); }   // picked a section: into its page
   }, true);
   // Search in the side menu: the results open to its right.
   $('#tq')?.addEventListener('focus', () => document.body.classList.add('rail-open'));
