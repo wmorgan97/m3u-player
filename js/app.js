@@ -4359,12 +4359,29 @@ function playNative(list, index, c) {
     subtitle: now ? `${now[2]} · ends ${fmtTime(now[1])}` : prettyGroup(c.group) || '',
     info: now ? now[3] || '' : c.plot || '',
     headers: headersFromOpts(c.opts), hasPrev: index > 0, hasNext: index < list.length - 1,
+    ...nativeList(list, index, live),
   }).catch(e => toast(e.message || 'Couldn’t open the player'));
+}
+// The player's list button: up to 300 episodes / channels around the one playing (a full channel list can be thousands).
+function nativeList(list, index, live) {
+  if (list.length < 2) return {};
+  const from = Math.max(0, Math.min(index - 150, list.length - 300)), part = list.slice(from, from + 300);
+  const row = x => {
+    if (x.kind === 'episode') {
+      const m = vodMeta(x.name), ep = String(x.name).split(/\bS\d+\s*E\d+\s*[-–:]?\s*/i).pop().trim();
+      const n = m.episode ?? x.num;
+      return { t: n != null ? `${n}. ${ep && ep !== x.name ? ep : `Episode ${n}`}` : x.name, s: [m.season ? `Season ${m.season}` : '', x.duration || ''].filter(Boolean).join(' · ') };
+    }
+    if (isLiveChannel(x)) { const g = guideFor(x), now = g && g.nowNext(x).now; return { t: x.name, s: now ? now[2] : prettyGroup(x.group) || '' }; }
+    return { t: niceName(x), s: prettyGroup(x.group) || '' };
+  };
+  return { list: part.map(row), listStart: from, current: index, listTitle: live ? 'Channels' : list[index]?.kind === 'episode' ? 'Episodes' : 'Up next' };
 }
 window.__nativePlayer = ev => {
   const pl = state.playing, c = pl && pl.list[pl.index];
   if (!ev || !c) return;
   if (ev.type === 'step') { const i = pl.index + ev.dir; if (i >= 0 && i < pl.list.length) playChannel(pl.list, i); }
+  if (ev.type === 'jump' && ev.index >= 0 && ev.index < pl.list.length && ev.index !== pl.index) playChannel(pl.list, ev.index);
   if ((ev.type === 'progress' || ev.type === 'closed') && !isLiveChannel(c) && c.kind !== 'catchup' && ev.d >= 60) writeProgress(c, ev.t, ev.d);
   if (ev.type === 'ended' && c.kind === 'episode' && pl.index < pl.list.length - 1) playChannel(pl.list, pl.index + 1);
   if (ev.type === 'closed') { state.playing = null; highlightPlaying(); if (!state.current) rerender(); }
