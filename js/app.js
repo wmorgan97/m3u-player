@@ -4423,7 +4423,7 @@ function liveCopies(c) {
   return [...new Set([...(c.alts || []), ...same])].filter(u => u !== c.url);
 }
 function uhdCopy(c) {
-  if (!isLiveChannel(c) || IS_UHD.test(c.name || '') || state.settings.prefer4k === false || !(IS_SAFARI || isNative)) return null;
+  if (!isLiveChannel(c) || IS_UHD.test(c.name || '') || state.settings.prefer4k === false || !(IS_SAFARI || isNative || isTV)) return null;
   const p = playlistOf(c) || state.playlists.find(p => p.channels.some(x => x.url === c.url));
   if (!p) return null;
   const u = liveIndex(p).uhd.get(liveBase(c.name));
@@ -4438,7 +4438,7 @@ function playChannel(list, index) {
     c = list[index] = { ...up, name: c.name, logo: c.logo || up.logo, group: c.group, num: c.num, src: c.src, _fromUhd: true, alts: [c.url, ...(c.alts || [])] };
     toast('Playing the 4K version');
   }
-  if (isNative && !c.offline) return playNative(list, index, c);
+  if ((isNative || isTV) && !c.offline) return playNative(list, index, c);   // iPhone: VLC player; Shield: ExoPlayer
   // "Play films & series in VLC / Infuse / IINA": hand the provider's link straight to that app.
   const choice = isLiveChannel(c) ? state.settings.livePlayer : state.settings.vodPlayer;
   if (!c.offline && choice && choice !== 'app' && !/^blob:/.test(c.url)) {
@@ -4625,7 +4625,7 @@ const perfTimer = setInterval(() => {
     const worst = f.sort((a, b) => b.gap - a.gap).slice(0, 6).map(x => `${x.gap}ms@${x.at}s${x.scrolling ? '(scroll)' : ''}:${x.cause}`).join(' | ');
     const msg = `t=${Math.round(elapsed / 1000)}s freezes=${f.length} scrollFreezes=${f.filter(x => x.scrolling).length} imgs=${perf.imgs} busy[${top}] worst[${worst}]`;
     perf.busy.clear(); perf.imgs = 0;
-    fetch(serverApi('log'), { method: 'POST', keepalive: true, body: JSON.stringify({ kind: 'perf', message: msg.slice(0, 900), where: isNative ? 'native' : 'web' }) }).catch(() => {});
+    fetch(serverApi('log'), { method: 'POST', keepalive: true, body: JSON.stringify({ kind: 'perf', message: msg.slice(0, 900), where: isNative ? 'native' : isTV ? 'tv' : 'web' }) }).catch(() => {});
   }
   if (elapsed > 185_000) clearInterval(perfTimer);
 }, 30_000);
