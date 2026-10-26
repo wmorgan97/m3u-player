@@ -4652,7 +4652,7 @@ if (isTV) {
   // Everything you can pick on the page (or in an open sheet), minus the small buttons inside cards (hold OK for those).
   const picks = () => {
     const root = sheetOpen() ? $('#sheet') : $('#view');
-    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && visible(el));
+    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && !el.closest('.hero-dots') && visible(el));   // banner slides are one row: left/right change slide
   };
   const railPicks = () => [...document.querySelectorAll(RAIL)].filter(visible);
   // Rows: things whose tops line up (a shelf, even the part scrolled off to the side, a grid line, a row of buttons).
@@ -4719,13 +4719,13 @@ if (isTV) {
       ]);
     }
     if (el.matches('.row') && el.dataset.i !== undefined && state.filtered[+el.dataset.i]) return channelMenu(state.filtered[+el.dataset.i]);
-    const inner = [...el.querySelectorAll('button')].filter(b => b.getAttribute('aria-label'));
-    if (inner.length) return menu(null, [{ label: 'Open', fn: () => el.click() }, ...inner.map(b => ({ label: b.getAttribute('aria-label'), fn: () => b.click() }))]);
+    const inner = [...el.querySelectorAll('button')].map(b => ({ b, label: b.getAttribute('aria-label') || b.textContent.trim() })).filter(x => x.label);
+    if (inner.length) return menu(null, [...(el.matches('button') ? [] : [{ label: 'Open', fn: () => el.click() }]), ...inner.map(x => ({ label: x.label, fn: () => x.b.click() }))]);
     el.click();
   };
   let okDown = 0, okLong = false;
   document.addEventListener('keydown', e => {
-    const typing = e.target.matches('input, textarea, select');
+    const typing = e.target.matches('input:not([readonly]), textarea, select');
     if (e.key === 'Enter' && !typing) {
       e.preventDefault(); e.stopImmediatePropagation();
       if (!e.repeat) { okDown = Date.now(); okLong = false; }
@@ -4738,7 +4738,7 @@ if (isTV) {
     move(e.key);
   }, true);
   document.addEventListener('keyup', e => {
-    if (e.key !== 'Enter' || e.target.matches('input, textarea, select')) return;
+    if (e.key !== 'Enter' || e.target.matches('input, textarea, select')) return;   // (the search box opens its keyboard itself)
     e.preventDefault();
     if (okLong) { okLong = false; return; }
     const el = document.activeElement;
@@ -4746,8 +4746,15 @@ if (isTV) {
     el.click();
     if (el.closest('#mainnav')) { lastContent = null; setTimeout(leaveRail, 350); }   // picked a section: into its page
   }, true);
-  // Search in the side menu: the results open to its right.
-  $('#tq')?.addEventListener('focus', () => document.body.classList.add('rail-open'));
+  // Search in the side menu works like a menu item: moving onto it doesn't pop up the TV keyboard (which would
+  // swallow the remote's arrows); OK opens the keyboard, and leaving it makes it a menu item again.
+  const tq = $('#tq');
+  if (tq) {
+    tq.readOnly = true;
+    tq.addEventListener('focus', () => document.body.classList.add('rail-open'));
+    tq.addEventListener('blur', () => { tq.readOnly = true; });
+    tq.addEventListener('keyup', e => { if (e.key === 'Enter' && tq.readOnly) { tq.readOnly = false; tq.blur(); tq.focus(); } });
+  }
   // Back on the remote (MainActivity asks this first): true = handled here, false = leave the app.
   window.__tvBack = () => {
     if (sheetOpen()) { closeSheet(); return true; }
