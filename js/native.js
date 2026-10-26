@@ -2,7 +2,9 @@
 // false and none of this is used.
 
 const cap = globalThis.Capacitor;
-export const isNative = !!(cap?.isNativePlatform?.() && typeof cap.nativePromise === 'function');
+// iPhone only: the Android TV app (Shield) is the web app itself, loaded from the server, so it behaves exactly like
+// the browser version (server proxy, its player) and has none of the iPhone's native plugins.
+export const isNative = !!(cap?.isNativePlatform?.() && cap?.getPlatform?.() === 'ios' && typeof cap.nativePromise === 'function');
 
 const call = (plugin, method, options) => cap.nativePromise(plugin, method, options);
 
