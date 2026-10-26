@@ -4664,9 +4664,11 @@ if (isTV) {
     // Only what's on screen or within a screen of it (the Guide has thousands of programme cells, Movies ~1000 posters:
     // measuring them all on every press made the remote lag). Position first (one layout pass), the costlier checks after.
     const h = innerHeight, out = [];
+    const gch = root.querySelector('.gch'), covered = gch ? gch.getBoundingClientRect().right : -Infinity;   // Guide: cells under the channel column
     for (const el of root.querySelectorAll(PICKABLE)) {
       const r = el.getBoundingClientRect();
       if (r.bottom < -h || r.top > 2 * h || r.width <= 4 || r.height <= 4) continue;
+      if (r.left + r.width / 2 < covered && el.classList.contains('gprog')) continue;
       if (el.parentElement.closest(CARDISH) || el.closest(SKIP) || (sideColumn && el.closest(SIDE))) continue;
       if (el.checkVisibility && !el.checkVisibility()) continue;
       out.push(el);

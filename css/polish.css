@@ -867,7 +867,7 @@ html.tv .guide { height: calc(100vh / .75 - 150px) !important; max-height: none 
 
 /* Live TV rows: favourite / options are on Hold OK, so the row is one stop. */
 html.tv #list .row .icon-btn, html.tv #list .row .fav { display: none; }
-html.tv .epc:focus { outline: 3px solid #fff; background: var(--surface-2); }
+html.tv .epc:focus, html.tv .gprog:focus, html.tv .gch:focus { outline: 3px solid #fff; outline-offset: -3px; background: var(--surface-2); }
 
 /* What the remote is on: unmistakable, never clipped (drawn inside the edge). */
 html.tv :focus { outline: 3px solid var(--accent); outline-offset: -3px; }
