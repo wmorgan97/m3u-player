@@ -4792,6 +4792,14 @@ if (isTV) {
   };
   let okHeld = false, okLong = false;
   document.addEventListener('keydown', e => {
+    // The keyboard's search key: close the keyboard and go into the results (films, series and channels), rather
+    // than the computer version's all-channels page.
+    if (e.key === 'Enter' && e.target.id === 'tq' && !e.target.readOnly) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      e.target.blur();
+      const into = (n = 0) => { const row = $('#ts-results:not([hidden]) .hs-row'); if (row) { row.focus(); document.body.classList.add('rail-open'); } else if (n < 40) setTimeout(() => into(n + 1), 100); };
+      return into();
+    }
     const typing = e.target.matches('input:not([readonly]), textarea, select');
     if (e.key === 'Enter' && !typing) {
       e.preventDefault(); e.stopImmediatePropagation();
@@ -4836,6 +4844,7 @@ if (isTV) {
   // Back on the remote (MainActivity asks this first): true = handled here, false = leave the app.
   window.__tvBack = () => {
     if (sheetOpen()) { closeSheet(); setTimeout(leaveRail, 30); return true; }
+    if (!$('#ts-results').hidden) { $('#ts-results').hidden = true; $('#tq').focus(); return true; }
     if (inRail(document.activeElement) && location.hash && location.hash !== '#/') { leaveRail(); return true; }
     if (location.hash && location.hash !== '#/' && location.hash !== '#') { history.back(); return true; }
     if (!inRail(document.activeElement)) { enterRail(); return true; }   // Home: Back opens the menu, Back again leaves
