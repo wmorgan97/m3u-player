@@ -4694,6 +4694,7 @@ if (isTV) {
     return rows;
   };
   let memX = null, lastContent = null;
+  window.__tvRows = () => lines(picks()).slice(0, 8).map(r => Math.round(r.top) + ': ' + r.items.slice(0, 6).map(i => (i.el.textContent || i.el.className).trim().replace(/\s+/g, ' ').slice(0, 12)).join(' | '));   // for checking the TV layout remotely
   const focusEl = el => {
     if (!el.matches('a[href], button, input, select, textarea') && !el.hasAttribute('tabindex')) el.tabIndex = -1;
     el.focus({ preventScroll: true });
