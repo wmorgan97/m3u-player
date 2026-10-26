@@ -259,6 +259,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         statusLabel.text = ""
         liveBadge.isHidden = !next.live
         slider.isHidden = next.live
+        (slider.superview as? UIStackView)?.arrangedSubviews.last?.isHidden = !next.live
         backButton.isHidden = next.live
         forwardButton.isHidden = next.live
         timeLabel.isHidden = next.live
@@ -386,12 +387,10 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         statusLabel.textAlignment = .center
         timeLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
         timeLabel.textColor = .white
-        liveBadge.text = "  LIVE  "
-        liveBadge.font = .systemFont(ofSize: 11, weight: .bold)
-        liveBadge.textColor = .white
-        liveBadge.backgroundColor = UIColor(red: 0.9, green: 0.2, blue: 0.25, alpha: 1)
-        liveBadge.layer.cornerRadius = 10
-        liveBadge.clipsToBounds = true
+        // Small and quiet: a red dot and "LIVE", no coloured bar.
+        let live = NSMutableAttributedString(string: "● ", attributes: [.foregroundColor: UIColor(red: 1, green: 0.27, blue: 0.3, alpha: 1), .font: UIFont.systemFont(ofSize: 10, weight: .bold)])
+        live.append(NSAttributedString(string: "LIVE", attributes: [.foregroundColor: UIColor.white, .font: UIFont.systemFont(ofSize: 12, weight: .semibold), .kern: 0.8]))
+        liveBadge.attributedText = live
         slider.minimumTrackTintColor = UIColor(red: 0.36, green: 0.58, blue: 1, alpha: 1)
         slider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.3)
         slider.addTarget(self, action: #selector(scrubStart), for: .touchDown)
@@ -407,7 +406,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         let middle = UIStackView(arrangedSubviews: [prevButton, backButton, playButton, forwardButton, nextButton])
         middle.alignment = .center
         middle.spacing = 22
-        let bottom = UIStackView(arrangedSubviews: [liveBadge, slider, timeLabel])
+        let spacer = UIView()   // takes the spare width when the slider is hidden (live), so "LIVE" stays small
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let bottom = UIStackView(arrangedSubviews: [liveBadge, slider, timeLabel, spacer])
         bottom.alignment = .center
         bottom.spacing = 12
         // The slider takes all the spare width (it collapsed to its thumb before); labels keep their size.
@@ -430,7 +431,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             bottom.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 16),
             bottom.trailingAnchor.constraint(equalTo: g.trailingAnchor, constant: -16),
             bottom.bottomAnchor.constraint(equalTo: g.bottomAnchor, constant: -12),
-            liveBadge.heightAnchor.constraint(equalToConstant: 20),
+
             statusLabel.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
             statusLabel.topAnchor.constraint(equalTo: middle.bottomAnchor, constant: 18),
             spinner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
