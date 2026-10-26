@@ -755,7 +755,7 @@ async function homeSearch(q, box = $('#home-results')) {
   shelfItems.set('hs-chan', chans);
   const section = (title, key, items, row) => items.length ? `<div class="hs-title">${title}</div>${items.map((it, k) => row(it, key, k)).join('')}` : '';
   const chanRow = (c, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}">${logoHtml(c)}<span class="row-text"><span class="row-name">${esc(c.name)}</span><span class="muted">${esc(prettyGroup(c.group) || '')}</span></span>${icon('play')}</div>`;
-  const vodRow = (it, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}"><span class="hs-poster">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span><span class="row-text"><span class="row-name">${esc(it.name)}</span><span class="muted">${[it.kind === 'series' ? 'Series' : 'Movie', it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : ''].filter(Boolean).map(esc).join(' · ')}</span></span></div>`;
+  const vodRow = (it, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}"><span class="hs-poster">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span><span class="row-text"><span class="row-name">${esc(displayTitle(it.name))}</span><span class="muted">${[it.kind === 'series' ? 'Series' : 'Movie', it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : ''].filter(Boolean).map(esc).join(' · ')}</span></span></div>`;
   box.innerHTML = section('Channels', 'hs-chan', chans, chanRow) || '<div class="muted hs-empty">Searching…</div>';
   box.hidden = false;
   if (!canSync()) { if (!chans.length) box.innerHTML = '<div class="muted hs-empty">No channels match.</div>'; return; }
@@ -847,6 +847,13 @@ function homeHub(pl) {
     }
   }
   return hub;
+}
+// What people read: films and series as "Title (Year)", episodes as "Show · S1 E1"; channels unchanged.
+function niceName(c) {
+  if (!c) return '';
+  if (c.kind === 'episode') return cwTitle(c);
+  if (c.kind === 'movie' || c.kind === 'series') { const y = c.year || vodMeta(c.name).year; return `${displayTitle(c.name)}${y ? ` (${y})` : ''}`; }
+  return c.name;
 }
 // "MobLand · S1 E1" instead of "EN - MobLand (2025) (GB) - S01E01 - Stick or Twist".
 function cwTitle(it) {
@@ -1063,7 +1070,7 @@ function showHome() {
   $('#home-q')?.addEventListener('input', debounce(e => homeSearch(e.target.value.trim()), 250));
   view.onclick = e => {
     const hp = e.target.closest('[data-hero-play]');
-    if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playChannel([it], 0); }
+    if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playBestVersion(it); }
     const sv = e.target.closest('[data-svc]');
     if (sv) {
       const all = hub.services, tiles = all.filter(s => s.tab === 'movies').concat(all.filter(s => s.tab === 'series' && !all.some(m => m.tab === 'movies' && m.name === s.name)));
@@ -1861,7 +1868,7 @@ async function showDownloads({ keep = false } = {}) {
     <p class="muted">${esc(space || 'Downloaded titles play without a connection.')}${window.showSaveFilePicker ? ' On this computer, downloads go straight to a file you choose.' : ''}</p>
     ${list.length ? `<ul class="cards">${list.map(m => `<li class="card dl" data-dl="${m.id}">
       <span class="hs-poster">${m.logo ? `<img src="${esc(m.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
-      <span class="card-text"><span class="card-title">${esc(m.name)}</span>
+      <span class="card-text"><span class="card-title">${esc(niceName(m))}</span>
         ${m.done ? `<span class="muted">${m.disk ? `On disk: ${esc(m.file)} · ` : ''}${fmtBytes(m.bytes)} · ${m.q === 'file' ? 'Exact original' : m.q === 'orig' ? 'Original' : m.q + 'p'}${m.duration ? ` · ${fmtDur(m.duration)}` : ''}${m.startedAt && m.finishedAt ? ` · took ${fmtEta((m.finishedAt - m.startedAt) / 1000)}` : ''}</span>`
           : m.error ? `<span class="muted">Stopped: ${esc(m.error)} · ${fmtBytes(m.bytes)} saved</span>` : detail(m)}
         ${!m.done && !m.error ? `<span class="bar dl-bar">${m.estimate ? `<i style="width:${Math.min(99, (m.bytes / m.estimate) * 100).toFixed(1)}%"></i>` : '<i class="indeterminate"></i>'}</span>` : ''}</span>
@@ -1904,7 +1911,7 @@ async function renderVodPanel(c) {
       <div class="vp-top">
         <span class="vp-poster poster-img" data-initials="${initials(c.name)}">${(i.movie_image || c.logo) ? `<img src="${esc(i.movie_image || c.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
         <div class="vp-text">
-          <h2 class="vp-title">${esc(c.name)}</h2>
+          <h2 class="vp-title">${esc(niceName(c))}</h2>
           <div class="vp-meta">${meta.map(m => `<span class="pill">${esc(m)}</span>`).join('')}${c.rating ? `<span class="pill rating">★ ${c.rating.toFixed(1)}</span>` : ''}${qualityLabel() ? `<span class="pill q">${esc(qualityLabel())}</span>` : ''}${vodInfo?.audio?.length > 1 ? `<span class="pill">${vodInfo.audio.length} audio</span>` : ''}${vodInfo?.subs?.some(s => s.text) ? '<span class="pill">Subtitles</span>' : ''}</div>
           ${plot ? `<p class="vp-plot" data-plot>${esc(plot)}</p>` : ''}
           ${i.cast || i.actors || i.director ? `<p class="muted vp-cast">${i.director ? `Director: ${esc(i.director)}` : ''}${(i.cast || i.actors) ? `${i.director ? ' · ' : ''}Cast: ${esc(i.cast || i.actors)}` : ''}</p>` : ''}
@@ -2024,15 +2031,15 @@ function rowHtml(c, i) {
   return `<li class="row${selected ? ' selected' : ''}${playing ? ' playing' : ''}" data-i="${i}" role="button" tabindex="0" aria-label="${esc(c.name)}">
     ${state.selecting ? `<span class="check">${selected ? icon('check') : ''}</span>` : ''}
     ${state.settings.numbers && c.num ? `<span class="ch-num">${c.num}</span>` : ''}${logoHtml(c)}
-    <span class="row-text"><span class="row-name">${esc(c.name)}${archiveDays(c) ? '<span class="tag">Catch-up</span>' : ''}</span><span class="row-sub">${sub}</span>${progressBar(c)}</span>
+    <span class="row-text"><span class="row-name">${esc(niceName(c))}${archiveDays(c) ? '<span class="tag">Catch-up</span>' : ''}</span><span class="row-sub">${sub}</span>${progressBar(c)}</span>
     ${state.reordering ? `<span class="rhandle" aria-label="Drag to reorder">${icon('grip')}</span>` : state.selecting ? '' : `<button class="icon-btn star${favUrls.has(c.url) ? ' on' : ''}" data-act="fav" aria-label="Favorite">${icon('star')}</button>
     <button class="icon-btn" data-act="more" aria-label="Options">${icon('more')}</button>`}
   </li>`;
 }
 
 function posterHtml(it, i) {
-  const m = vodMeta(it.name);   // "TOP - Dune (2021) 4K" -> "Dune", 2021
-  const name = m.title || it.name, year = it.year ?? m.year;
+  const m = vodMeta(it.name);   // "TOP - Dune (2021) 4K (US)" -> "Dune", 2021
+  const name = it.kind === 'episode' ? it.name : displayTitle(it.name), year = it.year ?? m.year;
   return `<li class="poster" data-i="${i}">
     <span class="poster-img" data-initials="${initials(it.name)}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
       ${it.rating ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
@@ -2045,7 +2052,7 @@ function onListClick(e) {
   const see = e.target.closest('[data-see]');
   if (see) { state.group = see.dataset.see; updateTopbar(); renderChips(); applyFilter(); toListTop(); return; }
   const hp = e.target.closest('[data-hero-play]');
-  if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playChannel([it], 0); }
+  if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playBestVersion(it); }
   const card = e.target.closest('.scard, .hero, .hero-slide');
   if (card) {
     const it = shelfItems.get(card.dataset.shelf)?.[+card.dataset.k];
@@ -2466,6 +2473,7 @@ function detailHtml(m, info = {}) {
         ${pr && !pr.done && pr.t > 30 ? `<span class="bar film-bar"><i style="width:${Math.min(100, (pr.t / pr.d) * 100).toFixed(1)}%"></i></span><span class="muted">${fmtDur(pr.d - pr.t)} left</span>` : ''}
       </div>
     </div>
+    ${info.versions?.length > 1 ? (() => { const b = qualityOf(info.versions[0]), cur = qualityOf(m); return `<button class="vbanner${info.versions[0].url !== m.url && b.score > cur.score ? ' up' : ''}" data-versions><span class="vq">${esc(b.res)}</span><span><b>${info.versions.length} versions</b>${info.versions[0].url !== m.url && b.score > cur.score ? ` · ${esc(b.tags.join(' · '))} available` : ` · ${esc(info.versions.map(v => qualityOf(v).res).filter((r, k, a) => a.indexOf(r) === k).join(', '))}`}</span>${icon('next')}</button>`; })() : ''}
     ${i.plot || i.description || m.plot ? `<p class="detail-plot">${esc(i.plot || i.description || m.plot)}</p>` : ''}
     ${i.cast || i.actors ? `<p class="muted">Cast: ${esc(i.cast || i.actors)}</p>` : ''}
     ${i.director ? `<p class="muted">Director: ${esc(i.director)}</p>` : ''}
@@ -2480,12 +2488,59 @@ function detailHtml(m, info = {}) {
   </div>`;
 }
 
+// ---------- Versions: every copy of a film (4K HDR, 1080p, per-platform…), best first ----------
+// Quality comes from the provider's own labels in the title and group ("4K-NF", "UHD", "HDR", "Dolby"…).
+function qualityOf(it) {
+  const t = `${it.name || ''} ${it.group || ''}`;
+  const res = /\b(4k|uhd|2160p?)\b/i.test(t) ? '4K' : /\b(1080p?|fhd|full ?hd)\b/i.test(t) ? '1080p' : /\b720p?\b/i.test(t) ? '720p' : /\b(sd|480p?)\b/i.test(t) ? 'SD' : 'HD';
+  const hdr = /hdr|dolby ?vision|\bdv\b/i.test(t), hevc = /hevc|h\.?265|x265/i.test(t) || res === '4K';
+  const atmos = /atmos|dolby(?! ?vision)|ddp|eac3|5\.1|7\.1/i.test(t);
+  const lang = isEnglishGroup(it.group || '') ? '' : (String(it.group || '').match(/^([A-Za-z]{2,3})\b/)?.[1] || 'Other language').toUpperCase();
+  // Safari / the iPhone app play 4K HEVC untouched; Chrome would convert it, so there an untouched copy wins.
+  const plain = IS_SAFARI || isNative || !hevc;
+  const score = { '4K': 40, '1080p': 30, HD: 25, '720p': 20, SD: 10 }[res] + (hdr ? 4 : 0) + (atmos ? 1 : 0) - (plain ? 0 : 35) - (lang ? 60 : 0);
+  const tags = [res, hdr && 'HDR', atmos && 'Dolby audio', lang].filter(Boolean);
+  return { res, hdr, hevc, atmos, lang, score, tags, converts: !plain };
+}
+const versionsCache = new Map();
+async function versionsOf(m) {
+  const p = playlistOf(m);
+  if (!p || p.kind !== 'xtream' || !canSync() || m.kind !== 'movie') return [m];
+  if (!versionsCache.has(m.url)) versionsCache.set(m.url, (async () => {
+    try {
+      const d = await vodApi(p, 'movies', { versions: m.name });
+      const entry = vodCache.get(vodKey(p, 'movies'));
+      const list = toItems(p, 'movies', entry?.cats || [], d.items || []);
+      if (!list.some(v => v.url === m.url)) list.unshift(m);
+      return list.map(v => ({ v, q: qualityOf(v) })).sort((a, b) => b.q.score - a.q.score).map(x => x.v);
+    } catch { return [m]; }
+  })());
+  return versionsCache.get(m.url);
+}
+// Play: with more than one copy, choose (best first, marked); with one, just play.
+async function playBestVersion(m, { resume = true } = {}) {
+  const vs = await versionsOf(m);
+  if (vs.length < 2) return playChannel([m], 0);
+  const q = vs.map(qualityOf), best = 0;
+  sheet(`<div class="sheet-title">Choose quality</div><p class="muted sheet-intro">${esc(displayTitle(m.name))} · ${vs.length} versions</p>
+    <div class="vlist">${vs.map((v, i) => `<button class="vrow${i === best ? ' best' : ''}" data-v="${i}">
+      <span class="vq">${esc(q[i].res)}</span>
+      <span class="vtext"><b>${q[i].tags.map(esc).join(' · ')}${i === best ? ' <em>Recommended</em>' : ''}</b><span class="muted">${esc(groupLabel(v.group || ''))}${q[i].converts ? ' · converted in this browser' : ''}${state.progress[v.url]?.t > 30 && !state.progress[v.url]?.done ? ` · ${fmtDur(state.progress[v.url].d - state.progress[v.url].t)} left` : ''}</span></span>
+      ${icon('play')}</button>`).join('')}</div>`, {
+    onMount: el => {
+      el.querySelector('.vlist').onclick = e => { const b = e.target.closest('[data-v]'); if (!b) return; closeSheet(); playChannel([vs[+b.dataset.v]], 0); };
+    },
+  });
+  void resume;
+}
+
 async function movieSheet(m) {
   let info = {};
   const open = (keepScroll = false) => sheet(detailHtml(m, info), {
     keepScroll,
     onMount: el => {
-      el.querySelector('[data-play]').onclick = () => { closeSheet(); playChannel([m], 0); };
+      el.querySelector('[data-play]').onclick = () => { const pr = state.progress[m.url]; if (pr && !pr.done && pr.t > 30) { closeSheet(); return playChannel([m], 0); } closeSheet(); playBestVersion(m); };
+      el.querySelector('[data-versions]')?.addEventListener('click', () => { closeSheet(); playBestVersion(m); });
       el.querySelector('[data-restart]')?.addEventListener('click', () => { delete state.progress[m.url]; closeSheet(); playChannel([m], 0); });
       el.querySelector('[data-fav]').onclick = async () => { await toggleFavorite(m, null); open(true); };
       el.querySelector('[data-dl]')?.addEventListener('click', () => downloadMenu(m));
@@ -2499,11 +2554,12 @@ async function movieSheet(m) {
   open();
   const still = () => $('#sheet .detail')?.dataset.id === m.id;
   tmdbInfo(m).then(t => { if (t) { info = { ...info, tmdb: t }; if (still()) open(true); } });
+  versionsOf(m).then(vs => { if (vs.length > 1) { info = { ...info, versions: vs }; if (still()) open(true); } });
   const x = xtOf(playlistOf(m));
   if (!x || !m.sid) return;
   try {
     const pi = await x.vodInfo(m.sid) || {};
-    info = { ...pi, tmdb: info.tmdb };
+    info = { ...pi, tmdb: info.tmdb, versions: info.versions };
     if (still()) open(true);
   } catch {}
 }
@@ -3821,7 +3877,7 @@ function updateControls() {
   const atLive = !live || behind < 10;
   ctl.querySelector('[data-c="play"]').innerHTML = icon(video.paused ? 'play' : 'pause');
   ctl.querySelector('[data-c="mute"]').innerHTML = icon(video.muted ? 'volume-off' : 'volume');
-  $('#ctl-name').textContent = c.name;
+  $('#ctl-name').textContent = niceName(c);
   const g = isLiveChannel(c) && guideFor(c), nn = g && g.nowNext(c), now = nn?.now;
   $('#ctl-prog').textContent = now ? `${now[2]} · ends ${fmtTime(now[1])}` : [qualityLabel(), c.group ? prettyGroup(c.group) : ''].filter(Boolean).join(' · ');
   $('#ctl-pct').style.width = now ? `${(((Date.now() - now[0]) / (now[1] - now[0])) * 100).toFixed(1)}%` : '0';
@@ -4121,7 +4177,7 @@ const retried = new Set();   // channels that already got their one silent retry
 // Set-top-box style banner while a channel starts: instant feedback, and no black screen.
 function showTuning(c) {
   const el = $('#tuning'); if (!el) return;
-  el.innerHTML = `${logoHtml(c)}<span class="tuning-name">${esc(c.name)}</span><span class="muted">${esc(prettyGroup(c.group) || '')}</span>`;
+  el.innerHTML = `${logoHtml(c)}<span class="tuning-name">${esc(niceName(c))}</span><span class="muted">${esc(prettyGroup(c.group) || '')}</span>`;
   el.hidden = false; el.classList.remove('out');
 }
 function hideTuning() { const el = $('#tuning'); if (el && !el.hidden) { el.classList.add('out'); setTimeout(() => { el.hidden = true; }, 320); } }
@@ -4183,7 +4239,7 @@ function playChannel(list, index) {
   document.body.classList.add('playing');
   document.body.classList.toggle('vod-playing', !isLiveChannel(c));   // films: wide "cinema" layout, not the live dock
   $('#player-error').hidden = true;
-  $('#now-name').textContent = c.name;
+  $('#now-name').textContent = niceName(c);
   $('#now-logo').outerHTML = logoHtml(c, 'id="now-logo"');
   $('#prev').disabled = index === 0;
   $('#next').disabled = index === list.length - 1;

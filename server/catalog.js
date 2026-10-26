@@ -115,10 +115,14 @@ async function build(server, user, pass, kind) {
       }
     }
   } catch (e) { console.log(`[tmdb] lists: ${e.message}`); }
+  // Every copy of a title (4K, HD, per-platform…), for the details page's "Versions" choice.
+  const byTitle = new Map();
+  for (const it of items) { const k = titleKey(it); if (!k) continue; const l = byTitle.get(k); if (l) l.push(it); else byTitle.set(k, [it]); }
+  const catNames = new Map(cats.map(c => [String(c.category_id), str(c.category_name, 120)]));
   const names = items.map(it => (it.name || '').toLowerCase());
   console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${trend.length} trending matched, ${tmdbCats.length} TMDB groups (${tmdbCats.map(c => `${c.name} ${c.count}`).join(', ')})`);
   console.log(`[vod] ${kind}: built, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  return { items, names, byCat, tmdbGroups, overview: JSON.stringify({ at: Date.now(), v: 4, cats: catList, recent, top, fresh, trending: trend, tmdbCats, total: items.length }) };
+  return { items, names, byCat, tmdbGroups, byTitle, catNames, overview: JSON.stringify({ at: Date.now(), v: 4, cats: catList, recent, top, fresh, trending: trend, tmdbCats, total: items.length }) };
 }
 
 export async function handleCatalog(req, res, url, send, allowed) {
@@ -145,6 +149,10 @@ export async function handleCatalog(req, res, url, send, allowed) {
     const t = String(q.q).toLowerCase().slice(0, 80), out = [];
     for (let i = 0; i < data.names.length && out.length < 400; i++) if (data.names[i].includes(t)) out.push(data.items[i]);
     body = JSON.stringify({ items: out });
+  } else if (q.versions) {
+    const k = titleKey({ name: String(q.versions).slice(0, 200) });
+    const list = (data.byTitle?.get(k) || []).slice(0, 12).map(it => ({ ...it, category_name: data.catNames?.get(String(it.category_id)) || '' }));
+    body = JSON.stringify({ items: list });
   } else if (q.tmdb) {
     body = JSON.stringify({ items: data.tmdbGroups?.get(String(q.tmdb)) || [] });
   } else if (q.group !== undefined && q.group !== null) {

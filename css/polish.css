@@ -753,3 +753,20 @@ button.cw-x { border: 0; padding: 0; margin: 0; -webkit-appearance: none; appear
   .home-top .home-search, #home-results { display: none; }   /* the top bar has it */
   .home-top { margin-top: 10px; }
 }
+
+/* Versions */
+.vbanner { display: flex; align-items: center; gap: 12px; width: 100%; margin: 10px 0 4px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); text-align: left; cursor: pointer; font-size: 14px; }
+.vbanner.up { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
+.vbanner > span:nth-child(2) { flex: 1; min-width: 0; }
+.vbanner .ico { width: 18px; height: 18px; color: var(--muted); }
+.vq { flex: none; display: grid; place-items: center; min-width: 52px; height: 30px; padding: 0 8px; border-radius: 8px; font-weight: 800; font-size: 13px; letter-spacing: .02em; background: rgba(255,255,255,.08); }
+.vbanner.up .vq, .vrow.best .vq { background: var(--accent); color: #fff; }
+.vlist { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.vrow { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--text); text-align: left; cursor: pointer; }
+.vrow:hover { background: var(--surface-2); }
+.vrow.best { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.vtext { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.vtext b { font-size: 14.5px; }
+.vtext b em { font-style: normal; font-size: 11px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; margin-left: 6px; padding: 2px 6px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 25%, transparent); color: color-mix(in srgb, var(--accent) 70%, #fff); }
+.vtext .muted { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vrow > .ico { width: 18px; height: 18px; color: var(--accent); fill: var(--accent); stroke: none; }
