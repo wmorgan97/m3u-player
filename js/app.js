@@ -4641,8 +4641,10 @@ const perfTimer = setInterval(() => {
 if (isTV) {
   document.documentElement.classList.add('tv');
   const RAIL = '#mainnav a, #tq, #actions button';
-  const PICKABLE = 'a[href], button:not([disabled]), input:not([type=hidden]), select, textarea, [tabindex], .scard, .svc, .hero-slide, .row, .hs-row, .cw, [data-see], [data-resume]';
-  const CARDISH = '.scard, .svc, .hero-slide, .row, .hs-row, .cw';
+  const PICKABLE = 'a[href], button:not([disabled]), input:not([type=hidden]), select, textarea, [tabindex], .scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, [data-go], [data-see], [data-resume]';
+  const CARDISH = '.scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card';
+  // Section-header links ("Browse all", "See all 133") aren't stops: the side menu and each row's "+ more" tile cover them.
+  const SKIP = '.hero-dots, a.link, .shelf-head, .row-head';
   const visible = el => {
     const r = el.getBoundingClientRect();
     return r.width > 4 && r.height > 4 && !el.closest('[hidden]') && getComputedStyle(el).visibility !== 'hidden';
@@ -4652,7 +4654,7 @@ if (isTV) {
   // Everything you can pick on the page (or in an open sheet), minus the small buttons inside cards (hold OK for those).
   const picks = () => {
     const root = sheetOpen() ? $('#sheet') : $('#view');
-    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && !el.closest('.hero-dots') && visible(el));   // banner slides are one row: left/right change slide
+    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && !el.closest(SKIP) && visible(el));   // banner slides are one row: left/right change slide
   };
   const railPicks = () => [...document.querySelectorAll(RAIL)].filter(visible);
   // Rows: things whose tops line up (a shelf, even the part scrolled off to the side, a grid line, a row of buttons).
@@ -4678,6 +4680,8 @@ if (isTV) {
   const enterRail = () => { const a = $('#mainnav a.active') || railPicks()[0]; if (a) focusEl(a); };
   const leaveRail = () => {
     if (lastContent && lastContent.isConnected && visible(lastContent)) return focusEl(lastContent);
+    const hero = [...$('#view').querySelectorAll('.hero-slide')].find(visible);   // a page with a banner starts on it
+    if (hero && !sheetOpen()) return focusEl(hero);
     const first = lines(picks()).find(r => r.top >= 0)?.items[0]?.el;
     if (first) focusEl(first);
   };
