@@ -4713,7 +4713,11 @@ if (isTV) {
   const focusEl = el => {
     if (!el.matches('a[href], button, input, select, textarea') && !el.hasAttribute('tabindex')) el.tabIndex = -1;
     el.focus({ preventScroll: true });
-    if (inRail(el)) { document.body.classList.add('rail-open'); return; }
+    if (inRail(el)) {
+      document.body.classList.add('rail-open');
+      if (el.closest('#ts-results')) { el.scrollIntoView({ block: 'nearest' }); lastSeen = { text: (el.textContent || '').trim().slice(0, 60), results: true }; }
+      return;
+    }
     document.body.classList.remove('rail-open');
     if (!el.closest('#sheet')) lastContent = el;   // what to come back to when a details page or menu closes
     const lr = el.getBoundingClientRect();
@@ -4817,8 +4821,18 @@ if (isTV) {
     }
     if (!/^Arrow(Up|Down|Left|Right)$/.test(e.key)) return;
     if (typing && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;   // moving the cursor in a search box
-    if (e.target.closest('#topsearch') && !$('#ts-results').hidden && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return;   // the search drop-down moves itself
     e.preventDefault(); e.stopImmediatePropagation();
+    // Search results: a list of their own (they redraw as the server's matches arrive, so the place is kept by name).
+    const box = $('#ts-results'), act = document.activeElement;
+    if (!box.hidden && (act?.closest('#topsearch') || ((!act || act === document.body) && lastSeen?.results))) {
+      const rows = [...box.querySelectorAll('.hs-row')].filter(visible);
+      let i = rows.indexOf(act);
+      if (i < 0 && lastSeen?.results) i = rows.findIndex(r => (r.textContent || '').trim().slice(0, 60) === lastSeen.text);
+      if (e.key === 'ArrowDown') { const n = rows[act?.id === 'tq' ? 0 : i + 1]; if (n) focusEl(n); }
+      else if (e.key === 'ArrowUp') { if (i > 0) focusEl(rows[i - 1]); else { lastSeen = null; $('#tq').focus(); } }
+      else if (e.key === 'ArrowRight') { box.hidden = true; lastSeen = null; leaveRail(); }
+      return;
+    }
     const t0 = performance.now();
     move(e.key);
     window.__tvMoveMs = Math.round(performance.now() - t0);
@@ -4851,7 +4865,7 @@ if (isTV) {
   // Back on the remote (MainActivity asks this first): true = handled here, false = leave the app.
   window.__tvBack = () => {
     if (sheetOpen()) { closeSheet(); setTimeout(leaveRail, 30); return true; }
-    if (!$('#ts-results').hidden) { $('#ts-results').hidden = true; $('#tq').focus(); return true; }
+    if (!$('#ts-results').hidden) { $('#ts-results').hidden = true; lastSeen = null; $('#tq').focus(); return true; }
     if (inRail(document.activeElement) && location.hash && location.hash !== '#/') { leaveRail(); return true; }
     if (location.hash && location.hash !== '#/' && location.hash !== '#') { history.back(); return true; }
     if (!inRail(document.activeElement)) { enterRail(); return true; }   // Home: Back opens the menu, Back again leaves
