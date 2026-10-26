@@ -4772,8 +4772,16 @@ if (isTV) {
     return false;
   };
   // A menu or details sheet opens with its first option picked.
-  new MutationObserver(() => { if (sheetOpen()) setTimeout(() => { if (!$('#sheet').contains(document.activeElement)) { const f = lines(picks())[0]?.items[0]?.el; if (f) focusEl(f); } }, 60); })
-    .observe($('#sheet'), { attributes: true, attributeFilter: ['hidden'] });
+  // Details fill in after the sheet opens (and redraw), so this re-runs whenever its content changes; Play comes first.
+  let sheetTimer = 0;
+  new MutationObserver(() => {
+    clearTimeout(sheetTimer);
+    sheetTimer = setTimeout(() => {
+      if (!sheetOpen() || $('#sheet').contains(document.activeElement)) return;
+      const f = [...$('#sheet').querySelectorAll('.detail-actions .btn.primary, .menu-item')].find(visible) || lines(picks())[0]?.items[0]?.el;
+      if (f) { focusEl(f); f.scrollIntoView({ block: 'nearest' }); }
+    }, 80);
+  }).observe($('#sheet'), { attributes: true, attributeFilter: ['hidden'], childList: true, subtree: true });
   // A new page starts with its first row picked, so the remote always has somewhere to go.
   addEventListener('hashchange', () => setTimeout(() => { if (!inRail(document.activeElement) && !sheetOpen()) leaveRail(); }, 400));
   setTimeout(() => { if (document.activeElement === document.body) leaveRail(); }, 1500);

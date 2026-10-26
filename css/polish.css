@@ -852,6 +852,17 @@ html.tv #view.pl.vod .filters { display: none; }
 html.tv #view.pl .filters .search { display: none; }
 html.tv .list:not(.grid):not(.discover) { grid-template-columns: minmax(0, 1fr) !important; }
 
+/* Details and menus: details are a full page beside the side menu (as on Google TV), menus a centred panel. */
+html.tv .sheet { left: calc(var(--rail) - 1px) !important; right: 0 !important; top: 0 !important; bottom: 0 !important; width: auto !important; max-width: none !important;
+  height: auto !important; max-height: none !important; margin: 0 !important; border-radius: 0 !important; transform: none !important; padding: 0 48px 40px !important; overflow-y: auto; background: var(--bg) !important; border: 0 !important; }
+html.tv .sheet:has(> .menu), html.tv .sheet:has(.menu) { left: 50% !important; right: auto !important; top: 50% !important; bottom: auto !important; width: 520px !important; transform: translate(-50%, -50%) !important;
+  border-radius: 18px !important; padding: 20px !important; background: var(--surface) !important; }
+html.tv .sheet .sheet-grip { display: none; }
+html.tv .sheet .film-hero { height: 300px; margin: 0 -48px 0; }
+html.tv .sheet .detail-top { margin-top: -120px; position: relative; }
+html.tv .sheet .detail-actions .btn { height: 46px; padding: 0 22px; font-size: 16px; }
+html.tv .sheet .detail-plot { font-size: 17px; line-height: 1.5; max-width: 900px; }
+
 /* What the remote is on: unmistakable, never clipped (drawn inside the edge). */
 html.tv :focus { outline: 3px solid var(--accent); outline-offset: -3px; }
 html.tv .hero-slide:focus, html.tv .svc:focus { outline: 4px solid #fff; outline-offset: -4px; }
