@@ -4723,13 +4723,14 @@ if (isTV) {
     if (inner.length) return menu(null, [...(el.matches('button') ? [] : [{ label: 'Open', fn: () => el.click() }]), ...inner.map(x => ({ label: x.label, fn: () => x.b.click() }))]);
     el.click();
   };
-  let okDown = 0, okLong = false;
+  let okLong = false;
   document.addEventListener('keydown', e => {
     const typing = e.target.matches('input:not([readonly]), textarea, select');
     if (e.key === 'Enter' && !typing) {
       e.preventDefault(); e.stopImmediatePropagation();
-      if (!e.repeat) { okDown = Date.now(); okLong = false; }
-      else if (!okLong && Date.now() - okDown > 550) { okLong = true; const el = document.activeElement; if (el && el !== document.body) options(el); }
+      // Android only repeats a key once it's been held (~0.5s): the first repeat is the long press.
+      if (!e.repeat) okLong = false;
+      else if (!okLong) { okLong = true; const el = document.activeElement; if (el && el !== document.body) options(el); }
       return;
     }
     if (!/^Arrow(Up|Down|Left|Right)$/.test(e.key)) return;
