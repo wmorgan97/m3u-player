@@ -155,11 +155,16 @@ function sessionKey(href, p) {
   const au = ['none', 'copy'].includes(p.get('audio')) ? p.get('audio') : 'aac';
   const tr = Math.max(0, Math.min(15, Number(p.get('track')) || 0));
   const av = avOf(p);
-  return sessionId((st ? `${href}#${st}` : href) + (au !== 'aac' ? `#${au}` : '') + (tr ? `#a${tr}` : '') + (p.get('enc') === '1' ? '#enc' : '') + (av ? `#av${av}` : ''));
+  return sessionId((st ? `${href}#${st}` : href) + (au !== 'aac' ? `#${au}` : '') + (tr ? `#a${tr}` : '') + (p.get('enc') === '1' ? '#enc' : '') + (av ? `#av${av}` : '') + (p.get('fmp4') === '1' && p.get('enc') !== '1' ? '#f4' : ''));
 }
 const avOf = p => Math.max(-3000, Math.min(3000, Math.round((Number(p.get('av')) || 0) / 50) * 50));
 
-function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0, subs = [], enc = false, height = 0, vinfo = null, segLen = VOD_SEG_S, fast = false, av = 0 } = {}) {
+// fmp4: HEVC for Safari. Apple's players only take HEVC in fragmented-MP4 segments with the hvc1 tag, never in
+// MPEG-TS, so the untouched video is packaged that way instead of being converted.
+function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', track = 0, subs = [], enc = false, height = 0, vinfo = null, segLen = VOD_SEG_S, fast = false, av = 0, fmp4 = false } = {}) {
+  // init.mp4 by full path: on Windows a bare name lands in the server's own folder.
+  const segType = fmp4 && !enc ? ['-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', join(dir, 'init.mp4')] : ['-hls_segment_type', 'mpegts'];
+  const ext = fmp4 && !enc ? 'm4s' : 'ts';
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
     '-user_agent', 'Mozilla/5.0', '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1', '-reconnect_delay_max', '2',
@@ -183,19 +188,19 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
       : REENCODE
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
          '-g', '25', '-keyint_min', '25', '-sc_threshold', '0', '-crf', '22', '-maxrate', '5M', '-bufsize', '10M', '-threads', '4']
-      : ['-c:v', 'copy']),
+      : ['-c:v', 'copy', ...(fmp4 ? ['-tag:v', 'hvc1'] : [])]),
     ...audioArgs(audio, av),
     '-flush_packets', '1', '-muxdelay', '0',
     ...(vod
       // A seek run keeps the file's own timestamps (copyts) so segment N holds time N*4s onwards. The run from
       // the start doesn't: copyts there leaves the first B-frames with negative times, which stalls players.
       ? [...(fromIdx > 0 ? ['-copyts'] : []), '-f', 'hls', '-hls_time', String(segLen), '-hls_list_size', '0', '-start_number', String(fromIdx),
-         '-hls_flags', 'split_by_time+temp_file', '-hls_segment_type', 'mpegts']
+         '-hls_flags', 'split_by_time+temp_file', ...segType]
       // ~45 minutes of segments stay on disk (delete_segments trims older ones): pause, rewind and
       // jump-back work in the app; the player still starts near the live edge (EXT-X-START).
       : ['-f', 'hls', '-hls_time', REENCODE ? '1' : '2', '-hls_init_time', '1', '-hls_list_size', '1000',
-         '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments', '-hls_segment_type', 'mpegts']),
-    '-hls_segment_filename', join(dir, 'seg%d.ts'), join(dir, 'index.m3u8'),
+         '-hls_flags', 'delete_segments+append_list+omit_endlist+independent_segments', ...segType]),
+    '-hls_segment_filename', join(dir, `seg%d.${ext}`), join(dir, 'index.m3u8'),
     // VOD: every text subtitle stream is written alongside as WebVTT from the same pass (no second download
     // of the file, no second provider connection). One file per run, merged when served.
     ...(vod ? subs.flatMap(i => ['-map', `0:s:${i}`, '-c:s', 'webvtt', '-f', 'webvtt', '-y', join(dir, `subs${i}-${fromIdx}.vtt`)]) : []),
@@ -206,7 +211,7 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
 // the first picture arrives in a few seconds, then (once that head is done) a normal-quality run from where
 // the head stopped. The session always points at the live process.
 function spawnRun(s, fromIdx, { fast = s.enc } = {}) {
-  const opts = { vod: s.vod, fromIdx, audio: s.audio, track: s.track, subs: s.subs || [], enc: s.enc, height: s.height, vinfo: s.vinfo, segLen: s.segLen, fast: s.enc && fast, av: s.av };
+  const opts = { vod: s.vod, fromIdx, audio: s.audio, track: s.track, subs: s.subs || [], enc: s.enc, height: s.height, vinfo: s.vinfo, segLen: s.segLen, fast: s.enc && fast, av: s.av, fmp4: s.fmp4 };
   const proc = spawn(FFMPEG, ffmpegArgs(s.dir, s.target, opts), { windowsHide: true });
   Object.assign(s, { proc, exited: false, errTail: '', startedAt: Date.now(), runStart: fromIdx, runAt: Date.now() });
   proc.stderr.on('data', d => { s.errTail = (s.errTail + d).slice(-1500); });
@@ -221,7 +226,7 @@ function spawnRun(s, fromIdx, { fast = s.enc } = {}) {
   return proc;
 }
 
-async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0, enc = false, ua = '', av = 0) {
+async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0, enc = false, ua = '', av = 0, fmp4 = false) {
   // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
   const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
   await fs.mkdir(dir, { recursive: true });
@@ -229,7 +234,10 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
   const subs = (probe?.subs || []).filter(s => s.text).map(s => s.i);
   const height = probe?.video?.height || 0;
   const session = { id, proc: null, dir, lastAccess: Date.now(), exited: false, errTail: '', startedAt: Date.now(), vod, start, host: new URL(target).hostname, target, runStart: 0,
-    duration: probe?.duration || 0, audio, track, subs, enc, height, vinfo: probe?.video, segLen: enc ? ENC_SEG_S : VOD_SEG_S, ua, av };
+    duration: probe?.duration || 0, audio, track, subs, enc, height, vinfo: probe?.video, segLen: enc ? ENC_SEG_S : VOD_SEG_S, ua, av,
+    // fMP4 only for HEVC (films: known from the probe; live: the app asks after a TS attempt showed no picture).
+    fmp4: fmp4 && !enc && (!vod || probe?.video?.codec === 'hevc') };
+  if (session.fmp4) console.log(`[hls] ${id}: HEVC untouched in fMP4 for Safari`);
   // A film whose sound is already AAC keeps it untouched (full quality, surround kept, nothing to drift).
   if (vod && audio === 'aac' && !av && probe?.audio?.[track]?.codec === 'aac') session.audio = 'copy';
   sessions.set(id, session);
@@ -237,7 +245,7 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
   console.log(`[hls] start ${id} ${target.slice(0, 100)}${session.ua ? ` [${session.ua}]` : ''}`);
   if (vod) spawnRun(session, 0);
   else {
-    const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod: false, audio, track, enc, height, vinfo: probe?.video, av }), { windowsHide: true });
+    const proc = spawn(FFMPEG, ffmpegArgs(dir, target, { vod: false, audio, track, enc, height, vinfo: probe?.video, av, fmp4: session.fmp4 }), { windowsHide: true });
     session.proc = proc;
     proc.stderr.on('data', d => { session.errTail = (session.errTail + d).slice(-1500); });
     proc.on('exit', () => { session.exited = true; });
@@ -256,19 +264,20 @@ function restartRun(s, n) {
 async function producedUpTo(s) {
   try {
     const t = await fs.readFile(join(s.dir, 'index.m3u8'), 'utf8');
-    const m = [...t.matchAll(/seg(\d+)\.ts/g)];
+    const m = [...t.matchAll(/seg(\d+)\.(?:ts|m4s)/g)];
     return m.length ? Number(m[m.length - 1][1]) : s.runStart - 1;
   } catch { return s.runStart - 1; }
 }
 
 // The whole film as a VOD playlist: N fixed-length segments and an end marker. Segments that don't
 // exist yet are made on request (see the segment branch of handleHls).
-function vodManifest(id, duration, segLen = VOD_SEG_S) {
+function vodManifest(id, duration, segLen = VOD_SEG_S, fmp4 = false) {
   const n = Math.ceil(duration / segLen);
-  let out = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:${segLen + 1}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
+  let out = `#EXTM3U\n#EXT-X-VERSION:${fmp4 ? 7 : 3}\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:${segLen + 1}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
+  if (fmp4) out += `#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI="/hls/${id}/init.mp4"\n`;
   for (let i = 0; i < n; i++) {
     const len = i === n - 1 ? Math.max(0.5, duration - i * segLen) : segLen;
-    out += `#EXTINF:${len.toFixed(3)},\n/hls/${id}/seg${i}.ts\n`;
+    out += `#EXTINF:${len.toFixed(3)},\n/hls/${id}/seg${i}.${fmp4 ? 'm4s' : 'ts'}\n`;
   }
   return out + '#EXT-X-ENDLIST\n';
 }
@@ -392,8 +401,12 @@ export async function handleHls(req, res, url) {
     const f = join(s.dir, name);
     if (!f.startsWith(s.dir + sep)) return send(res, 400, 'Bad path');
     let st;
-    try { st = await fs.stat(f); } catch {
-      const seg = s.vod && /^seg(\d+)\.ts$/.exec(name);
+    if (name === 'init.mp4') {   // fMP4 header: written as the run starts
+      for (let i = 0; i < 250 && !st && sessions.get(id) === s; i++) { try { st = await fs.stat(f); } catch { await new Promise(r => setTimeout(r, 120)); } }
+      if (!st) return send(res, 404, 'Not ready');
+    }
+    if (!st) try { st = await fs.stat(f); } catch {
+      const seg = s.vod && /^seg(\d+)\.(?:ts|m4s)$/.exec(name);
       if (!seg) return send(res, 404, 'Not ready');
       // Not made yet. If it's just ahead of the current run, wait for it; otherwise restart the run there.
       const n = Number(seg[1]);
@@ -473,7 +486,7 @@ export async function handleHls(req, res, url) {
     // second ffmpeg is orphaned holding the only provider connection.
     if (!starting.has(id)) {
       const ua = /iPhone|iPad/.test(req.headers['user-agent'] || '') ? 'iPhone' : /Macintosh/.test(req.headers['user-agent'] || '') ? 'Mac' : 'other';
-      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio, track, enc, `${ua}${warm ? ' warm' : ''}`, av); })().finally(() => starting.delete(id)));
+      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio, track, enc, `${ua}${warm ? ' warm' : ''}`, av, url.searchParams.get('fmp4') === '1'); })().finally(() => starting.delete(id)));
     }
     s = await starting.get(id);
   }
@@ -489,7 +502,7 @@ export async function handleHls(req, res, url) {
     if (s.duration > 0) {   // the playlist doesn't depend on any segment existing yet (they're made on request)
       console.log(`[hls] vod playlist ${id}`);
       res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
-      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration, s.segLen));
+      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration, s.segLen, s.fmp4));
     }
   }
   const ok = await waitForPlaylist(s.dir, START_TIMEOUT_MS, () => sessions.get(id) === s, ready);
@@ -505,7 +518,7 @@ export async function handleHls(req, res, url) {
     if (!s.duration) s.duration = await probeDuration(t.href);
     if (s.duration > 0) {
       res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'access-control-allow-origin': '*', 'cache-control': 'no-store' });
-      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration, s.segLen));
+      return res.end(req.method === 'HEAD' ? undefined : vodManifest(id, s.duration, s.segLen, s.fmp4));
     }
     // unknown length (probe failed): fall through and serve ffmpeg's growing playlist as before
   }
@@ -516,6 +529,7 @@ export async function handleHls(req, res, url) {
   // with each segment path made absolute to this session.
   let body = manifest.split('\n').map(line => {
     const t = line.trim();
+    if (t.startsWith('#EXT-X-MAP:')) return line.replace(/URI="[^"]*"/, `URI="/hls/${id}/init.mp4"`);   // fMP4 header
     return (!t || t.startsWith('#')) ? line : `/hls/${id}/${t}`;
   }).join('\n');
   // Start a few seconds behind the live edge so the player always has segments in hand (no edge-chasing rebuffers).

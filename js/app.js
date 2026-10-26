@@ -317,6 +317,7 @@ function noteStall() {
 }
 let transcodeVod = false;   // set per play: movies, episodes and catch-up get an on-demand (seekable) stream
 const liveEnc = new Set();  // live channel urls that showed no picture: converted to H.264 from then on
+const liveFmp4 = new Set(); // Safari: live channels that showed no picture in TS: re-packaged as fMP4 (HEVC), untouched
 // The server hands VOD over as a complete playlist with the real length, so the video element's own
 // time and duration are the truth; seeking anywhere is a plain seek (the server makes segments on demand).
 let vodTrack = 0, vodInfo = null, subTrackEl = null, vodEnc = false, vodInfoFor = '';   // audio track in use, the file's probe, subtitles, "convert video for this device"
@@ -328,6 +329,7 @@ function canDecode(v) {
   if (v.codec === 'h264') return !v.bit10;
   // Only Apple's own player is trusted with HEVC/10-bit. Chrome claims support, then plays sound with no picture.
   if (!IS_SAFARI) return false;
+  if (v.codec === 'hevc') return true;   // Safari plays HEVC (8- and 10-bit) as it is: the server packages it as fMP4
   const type = v.codec === 'hevc' ? `video/mp4; codecs="${v.bit10 ? 'hvc1.2.4.L153.B0' : 'hvc1.1.6.L123.B0'}"`
     : v.codec === 'av1' ? `video/mp4; codecs="av01.0.08M.${v.bit10 ? '10' : '08'}"` : v.codec === 'vp9' ? `video/mp4; codecs="vp09.00.10.${v.bit10 ? '10' : '08'}"` : '';
   return !!type && !!video.canPlayType(type);
@@ -490,7 +492,7 @@ function transcodeUrl(url) {
   if (serverProxy.needsKey && !key) return null;
   const b = bufferLevel();
   if (/^blob:/.test(url)) return null;       // a downloaded file plays from storage
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}${vodEnc ? '&enc=1' : ''}` : liveEnc.has(url) ? '&enc=1' : ''}${avSyncFor(url) ? `&av=${avSyncFor(url)}` : ''}&url=${encodeURIComponent(url)}`;
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}${vodEnc ? '&enc=1' : IS_SAFARI && vodInfo?.video?.codec === 'hevc' ? '&fmp4=1' : ''}` : liveEnc.has(url) ? '&enc=1' : liveFmp4.has(url) ? '&fmp4=1' : ''}${avSyncFor(url) ? `&av=${avSyncFor(url)}` : ''}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -3982,6 +3984,12 @@ function bindPlayer() {
     if (Date.now() - blankSince < 8000 || video.currentTime - blankFrom < 6) return;
     blankSince = 0;
     if (isLiveChannel(c) ? liveEnc.has(c.url) : vodEnc) return;   // already converting: nothing more we can do
+    // Safari never converts: first the same stream untouched in fMP4 (how Apple takes HEVC), then a choice.
+    if (IS_SAFARI) {
+      if (isLiveChannel(c) && !liveFmp4.has(c.url)) { liveFmp4.add(c.url); toast('Switching to Safari’s HEVC format…'); playChannel(state.playing.list, state.playing.index); return; }
+      showPlayerError(c, new Error('Safari can’t show this stream’s picture. VLC plays it untouched.'));
+      return;
+    }
     if (isLiveChannel(c)) liveEnc.add(c.url); else vodEnc = true;
     toast('No picture from this stream: converting it for your device…');
     playChannel(state.playing.list, state.playing.index);
