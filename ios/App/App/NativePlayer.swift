@@ -198,6 +198,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private let prevButton = UIButton(type: .system)
     private let nextButton = UIButton(type: .system)
     private let listButton = UIButton(type: .system)
+    private let aspectButton = UIButton(type: .system)
     private let lockButton = UIButton(type: .system)
     private let unlockButton = UIButton(type: .system)   // the only control while the screen is locked
 
@@ -210,6 +211,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private var scrubbing = false
     private var finished = false
     private var locked = false
+    // Picture shape, like VLC's: tap to cycle. Kept for the next channel / episode.
+    private static let aspectModes = ["Best fit", "Fill screen", "Stretch", "16:9", "4:3", "2.35:1"]
+    private var aspectMode = 0
     private let spacer = UIView()   // takes the spare width when the slider is hidden (live), so "LIVE" stays small
 
     init(item: Item, onEvent: @escaping ([String: Any]) -> Void) {
@@ -286,6 +290,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         gradient.frame = overlay.bounds
+        if aspectMode == 1 || aspectMode == 2 { applyAspect() }   // fill / stretch follow the screen's shape when it turns
     }
 
     // MARK: stream
@@ -372,6 +377,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         case .opening, .buffering:
             if !player.isPlaying { spinner.startAnimating() }
         case .playing:
+            applyAspect()
             spinner.stopAnimating()
             statusLabel.text = ""
         case .error:
@@ -424,7 +430,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         style(prevButton, "backward.end.fill", 24)
         style(nextButton, "forward.end.fill", 24)
         style(listButton, "list.bullet")
-        style(lockButton, "lock.open", 20)
+        style(aspectButton, "aspectratio", 20)
+        aspectButton.setImage(Self.aspectIcon(), for: .normal)
+        aspectButton.accessibilityLabel = "Picture size"
+        aspectButton.addTarget(self, action: #selector(aspectTapped), for: .touchUpInside)
+        style(lockButton, "lock", 20)
         lockButton.accessibilityLabel = "Lock screen"
         style(unlockButton, "lock.fill", 22)
         unlockButton.accessibilityLabel = "Unlock"
@@ -493,7 +503,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         middle.alignment = .center
         middle.spacing = 22
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bottom = UIStackView(arrangedSubviews: [lockButton, liveBadge, elapsedLabel, slider, timeLabel, spacer, listButton])
+        let bottom = UIStackView(arrangedSubviews: [liveBadge, elapsedLabel, slider, timeLabel, spacer])
         bottom.alignment = .center
         bottom.spacing = 12
         // The slider takes all the spare width (it collapsed to its thumb before); labels keep their size.
@@ -504,6 +514,13 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             v.translatesAutoresizingMaskIntoConstraints = false
             overlay.addSubview(v)
         }
+        // Tools row just above the bar, like VLC-style players: picture size left, lock centre, list right.
+        for b in [aspectButton, lockButton, listButton] { overlay.addSubview(b) }
+        NSLayoutConstraint.activate([
+            aspectButton.leadingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.leadingAnchor, constant: 6),
+            lockButton.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            listButton.trailingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.trailingAnchor, constant: -6),
+        ] + [aspectButton, lockButton, listButton].map { $0.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: 2) })
         unlockButton.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(unlockButton)
         let g = overlay.safeAreaLayoutGuide
@@ -580,6 +597,54 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         present(sheet, animated: true)
         showOverlay(keep: true)
     }
+    /// The picture-size icon: a filled screen with a small panel cut into its lower-right corner (VLC-style).
+    private static func aspectIcon() -> UIImage {
+        let size = CGSize(width: 24, height: 20)
+        return UIGraphicsImageRenderer(size: size).image { ctx in
+            let c = ctx.cgContext
+            UIColor.white.setFill()
+            UIBezierPath(roundedRect: CGRect(x: 1, y: 2, width: 22, height: 16), cornerRadius: 2.5).fill()
+            c.setBlendMode(.clear)   // cut the panel's outline out of the filled screen
+            let panel = UIBezierPath(roundedRect: CGRect(x: 10.5, y: 8.5, width: 11, height: 8), cornerRadius: 1.2)
+            panel.lineWidth = 1.6
+            panel.stroke()
+            UIBezierPath(rect: CGRect(x: 1, y: 6.4, width: 9.5, height: 1.5)).fill()   // the bar along the top-left, as in the original
+        }.withRenderingMode(.alwaysTemplate)
+    }
+
+    @objc private func aspectTapped() {
+        aspectMode = (aspectMode + 1) % Self.aspectModes.count
+        applyAspect()
+        statusLabel.text = Self.aspectModes[aspectMode]
+        let shown = statusLabel.text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in if self?.statusLabel.text == shown { self?.statusLabel.text = "" } }
+        showOverlay()
+    }
+    /// Best fit: VLC's own. Fill screen: crop to the screen's shape (no bars, edges cut). Stretch: the picture is
+    /// told it has the screen's shape (no bars, nothing cut, faces get wider). The rest force a film shape.
+    private func applyAspect() {
+        let b = view.bounds
+        let screen = "\(Int(b.width.rounded())):\(Int(b.height.rounded()))"
+        let (ratio, crop): (String?, String?) = {
+            switch aspectMode {
+            case 1: return (nil, screen)
+            case 2: return (screen, nil)
+            case 3: return ("16:9", nil)
+            case 4: return ("4:3", nil)
+            case 5: return ("235:100", nil)
+            default: return (nil, nil)
+            }
+        }()
+        setVLCString(ratio) { self.player.videoAspectRatio = $0 }
+        setVLCString(crop) { self.player.videoCropGeometry = $0 }
+    }
+    /// VLC copies these strings when they're set, so a temporary C copy is freed straight after.
+    private func setVLCString(_ value: String?, _ assign: (UnsafeMutablePointer<CChar>?) -> Void) {
+        guard let value = value, let c = strdup(value) else { return assign(nil) }
+        assign(c)
+        free(c)
+    }
+
     // Screen lock: hides every control and ignores taps and swipes (pocket, bed, kids); a touch shows one
     // unlock button for a few seconds.
     private var unlockTimer: Timer?
