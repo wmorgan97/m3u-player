@@ -894,10 +894,12 @@ function homeShelfHtml(sh) {
 function onNowHtml({ c, now }, k) {
   const pct = ((Date.now() - now[0]) / (now[1] - now[0])) * 100;
   const img = now[4]?.img;
-  return `<li class="onnow" data-k="${k}" style="--hue:${hueOf(c.name)}">
-    <span class="on-art">${img ? `<img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}<span class="live-badge">LIVE</span></span>
-    <span class="on-text"><b>${esc(now[2])}</b><span class="muted">${esc(c.name)} · until ${fmtTime(now[1])}</span></span>
-    <span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span></li>`;
+  // Compact and calm: the channel's logo whole (never cropped into a picture), what's on, until when.
+  void img;
+  return `<li class="onnow nc" data-k="${k}">
+    <span class="nc-logo">${logoHtml(c)}</span>
+    <span class="nc-text"><b>${esc(now[2])}</b><span class="muted">${esc(c.name)}</span><span class="nc-time"><i class="nc-dot"></i>until ${fmtTime(now[1])}</span></span>
+    <span class="bar nc-bar"><i style="width:${pct.toFixed(1)}%"></i></span></li>`;
 }
 let heroTimer = 0;
 function heroHtml(items) {
