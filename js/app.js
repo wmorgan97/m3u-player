@@ -4692,7 +4692,8 @@ if (isTV) {
       const row = rows[rows.length - 1];
       if (row && Math.abs(el.r.top - row.top) < Math.min(row.h, el.r.height) / 2) row.items.push(el); else rows.push({ top: el.r.top, h: el.r.height, items: [el] });
     }
-    for (const row of rows) row.items.sort((a, b) => a.r.left - b.r.left);
+    // (in the Guide the channel name always leads its row, even when the programme on now starts off screen)
+    for (const row of rows) row.items.sort((a, b) => (b.el.classList.contains('gch') - a.el.classList.contains('gch')) || a.r.left - b.r.left);
     return rows;
   };
   let memX = null, lastContent = null, lastSeen = null;
