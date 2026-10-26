@@ -4631,86 +4631,130 @@ const perfTimer = setInterval(() => {
 }, 30_000);
 
 // ---- Android TV (NVIDIA Shield) ----
-// The remote has arrows, OK and Back. Arrows move to the nearest thing you can pick in that direction (posters,
-// rows, buttons), OK picks it, Back closes what's open (sheet, player) and then goes back a page. While something
-// plays, the player's own keys apply (up/down channel, left/right skip, OK pause), as on TiviMate.
+// Laid out like Android TV apps (TiviMate): a side menu on the left that opens out when you move onto it, the page
+// to its right. The remote moves in rows, never by guesswork:
+//   left / right  move along the row you're in; left from the start of a row opens the side menu
+//   up / down     go to the row above / below, landing in the same column
+//   OK            opens what's picked; hold OK for its options (remove from Continue watching, favourites…)
+//   Back          closes what's open, then goes back a page
+// Films and channels play in the TV's own player (PlayerActivity), which has its own remote keys.
 if (isTV) {
   document.documentElement.classList.add('tv');
+  const RAIL = '#mainnav a, #tq, #actions button';
   const PICKABLE = 'a[href], button:not([disabled]), input:not([type=hidden]), select, textarea, [tabindex], .scard, .svc, .hero-slide, .row, .hs-row, .cw, [data-see], [data-resume]';
+  const CARDISH = '.scard, .svc, .hero-slide, .row, .hs-row, .cw';
   const visible = el => {
     const r = el.getBoundingClientRect();
-    return r.width > 4 && r.height > 4 && !el.closest('[hidden], .hidden') && getComputedStyle(el).visibility !== 'hidden';
+    return r.width > 4 && r.height > 4 && !el.closest('[hidden]') && getComputedStyle(el).visibility !== 'hidden';
   };
+  const inRail = el => !!el?.closest('.topbar');
+  const sheetOpen = () => !$('#sheet').hidden;
+  // Everything you can pick on the page (or in an open sheet), minus the small buttons inside cards (hold OK for those).
   const picks = () => {
-    const root = !$('#sheet').hidden ? $('#sheet') : document;   // an open sheet keeps the focus inside it
-    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest('.scard, .svc, .hero-slide, .row, .hs-row, .cw') && visible(el));
+    const root = sheetOpen() ? $('#sheet') : $('#view');
+    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && visible(el));
   };
-  // Instant, and the picked row kept mid-screen: holding an arrow never queues up animations, and the sticky top bar
-  // never covers what's picked.
-  let last = null;   // where the highlight was (page coordinates): rows that redraw themselves (Home refreshing) replace it
+  const railPicks = () => [...document.querySelectorAll(RAIL)].filter(visible);
+  // Rows: things whose tops line up (a shelf, even the part scrolled off to the side, a grid line, a row of buttons).
+  const lines = items => {
+    const rows = [];
+    for (const el of items.map(el => ({ el, r: el.getBoundingClientRect() })).sort((a, b) => a.r.top - b.r.top || a.r.left - b.r.left)) {
+      const row = rows[rows.length - 1];
+      if (row && Math.abs(el.r.top - row.top) < Math.min(row.h, el.r.height) / 2) row.items.push(el); else rows.push({ top: el.r.top, h: el.r.height, items: [el] });
+    }
+    for (const row of rows) row.items.sort((a, b) => a.r.left - b.r.left);
+    return rows;
+  };
+  let memX = null, lastContent = null;
   const focusEl = el => {
     if (!el.matches('a[href], button, input, select, textarea') && !el.hasAttribute('tabindex')) el.tabIndex = -1;
     el.focus({ preventScroll: true });
-    el.scrollIntoView({ block: el.closest('.topbar') ? 'nearest' : 'center', inline: 'nearest' });
-    const r = el.getBoundingClientRect();
-    last = { x: r.left + r.width / 2 + scrollX, y: r.top + r.height / 2 + scrollY, hash: location.hash };
+    if (inRail(el)) { document.body.classList.add('rail-open'); return; }
+    document.body.classList.remove('rail-open');
+    lastContent = el;
+    // Instant (holding a key never queues animations) and kept mid-screen, clear of the edges.
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
   };
-  // The redrawn item in the same spot, so the next press carries on from there instead of jumping to the top.
-  const recover = all => {
-    if (!last || last.hash !== location.hash) return null;
-    let best = null, d = Infinity;
-    for (const el of all) {
-      const r = el.getBoundingClientRect(), dx = r.left + r.width / 2 + scrollX - last.x, dy = r.top + r.height / 2 + scrollY - last.y, dd = dx * dx + dy * dy;
-      if (dd < d) { d = dd; best = el; }
-    }
-    return d < 120 * 120 ? best : null;
+  const enterRail = () => { const a = $('#mainnav a.active') || railPicks()[0]; if (a) focusEl(a); };
+  const leaveRail = () => {
+    if (lastContent && lastContent.isConnected && visible(lastContent)) return focusEl(lastContent);
+    const first = lines(picks()).find(r => r.top >= 0)?.items[0]?.el;
+    if (first) focusEl(first);
   };
-  let memX = null;   // the column you were in: down/up go to the poster below it, not to a "See all" button off to the side
   const move = dir => {
     const cur = document.activeElement && document.activeElement !== document.body && visible(document.activeElement) ? document.activeElement : null;
-    const all = picks();
-    if (!cur) {
-      const back = recover(all);
-      if (back) { focusEl(back); if (!/^Arrow/.test(dir)) return; return move(dir); }
-      const first = all.find(el => el.getBoundingClientRect().top >= 60) || all[0]; if (first) focusEl(first); return;
+    if (inRail(cur)) {
+      const rail = railPicks(), i = rail.indexOf(cur);
+      if (dir === 'ArrowDown' && i < rail.length - 1) focusEl(rail[i + 1]);
+      else if (dir === 'ArrowUp' && i > 0) focusEl(rail[i - 1]);
+      else if (dir === 'ArrowRight') leaveRail();
+      return;
     }
-    const sideways = dir === 'ArrowRight' || dir === 'ArrowLeft';
-    const a = cur.getBoundingClientRect(), ax = a.left + a.width / 2, ay = a.top + a.height / 2;
-    const refX = !sideways && memX != null ? memX : ax;
-    let best = null, bestScore = Infinity;
-    for (const el of all) {
-      if (el === cur || cur.contains(el)) continue;
-      const b = el.getBoundingClientRect(), bx = b.left + b.width / 2, by = b.top + b.height / 2;
-      const ahead = dir === 'ArrowRight' ? bx > ax + 2 : dir === 'ArrowLeft' ? bx < ax - 2 : dir === 'ArrowDown' ? by > ay + 2 : by < ay - 2;
-      if (!ahead) continue;
-      const gap = dir === 'ArrowRight' ? b.left - a.right : dir === 'ArrowLeft' ? a.left - b.right : dir === 'ArrowDown' ? b.top - a.bottom : a.top - b.bottom;
-      const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0;
-      const across = sideways ? (overlapY ? 0 : Math.abs(by - ay)) : Math.abs(bx - refX);
-      const score = Math.max(0, gap) + across * (sideways ? 3 : 1.2);
-      if (score < bestScore) { bestScore = score; best = el; }
+    const rows = lines(picks());
+    if (!rows.length) return;
+    let ri = -1, ci = -1;
+    if (cur) rows.forEach((row, i) => { const j = row.items.findIndex(x => x.el === cur); if (j >= 0) { ri = i; ci = j; } });
+    if (ri < 0) {   // nothing picked (or the page redrew under it): start at the first row on screen
+      const row = rows.find(r => r.top >= 0) || rows[0];
+      return focusEl(row.items[0].el);
     }
-    if (!best) return;
-    focusEl(best);
-    if (sideways || memX == null) { const r = best.getBoundingClientRect(); memX = r.left + r.width / 2; }
+    const row = rows[ri];
+    if (dir === 'ArrowLeft') { if (ci > 0) { focusEl(row.items[ci - 1].el); memX = null; } else if (!sheetOpen()) enterRail(); return; }
+    if (dir === 'ArrowRight') { if (ci < row.items.length - 1) { focusEl(row.items[ci + 1].el); memX = null; } return; }
+    const target = rows[ri + (dir === 'ArrowDown' ? 1 : -1)];
+    if (!target) return;
+    const r = cur.getBoundingClientRect(), x = memX ?? r.left + r.width / 2;
+    let best = target.items[0], d = Infinity;
+    for (const it of target.items) { const dd = Math.abs(it.r.left + it.r.width / 2 - x) + (it.r.right < 0 || it.r.left > innerWidth ? 2000 : 0); if (dd < d) { d = dd; best = it; } }
+    memX = x;
+    focusEl(best.el);
   };
+  // Hold OK: the picked item's options.
+  const options = el => {
+    if (el.matches('.cw')) {
+      const x = el.querySelector('[data-cw-x]');
+      return menu(el.querySelector('.cw-name, b, strong')?.textContent?.trim() || 'Continue watching', [
+        { label: 'Play', fn: () => el.click() },
+        x && { label: 'Remove from Continue watching', danger: true, fn: () => x.click() },
+      ]);
+    }
+    if (el.matches('.row') && el.dataset.i !== undefined && state.filtered[+el.dataset.i]) return channelMenu(state.filtered[+el.dataset.i]);
+    const inner = [...el.querySelectorAll('button')].filter(b => b.getAttribute('aria-label'));
+    if (inner.length) return menu(null, [{ label: 'Open', fn: () => el.click() }, ...inner.map(b => ({ label: b.getAttribute('aria-label'), fn: () => b.click() }))]);
+    el.click();
+  };
+  let okDown = 0, okLong = false;
   document.addEventListener('keydown', e => {
     const typing = e.target.matches('input, textarea, select');
-    const arrow = /^Arrow(Up|Down|Left|Right)$/.test(e.key);
-    if (state.playing && $('#sheet').hidden && !typing) return;   // the player's own keys
-    if (arrow) {
-      if (typing && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;   // moving the cursor in a search box
+    if (e.key === 'Enter' && !typing) {
       e.preventDefault(); e.stopImmediatePropagation();
-      move(e.key);
-    } else if ((e.key === 'Enter' || e.key === ' ') && !typing) {
-      const el = document.activeElement;
-      if (el && el !== document.body && !el.matches('a[href], button, input, select, textarea, summary')) { e.preventDefault(); el.click(); }
+      if (!e.repeat) { okDown = Date.now(); okLong = false; }
+      else if (!okLong && Date.now() - okDown > 550) { okLong = true; const el = document.activeElement; if (el && el !== document.body) options(el); }
+      return;
     }
+    if (!/^Arrow(Up|Down|Left|Right)$/.test(e.key)) return;
+    if (typing && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;   // moving the cursor in a search box
+    e.preventDefault(); e.stopImmediatePropagation();
+    move(e.key);
   }, true);
+  document.addEventListener('keyup', e => {
+    if (e.key !== 'Enter' || e.target.matches('input, textarea, select')) return;
+    e.preventDefault();
+    if (okLong) { okLong = false; return; }
+    const el = document.activeElement;
+    if (el && el !== document.body) el.click();
+  }, true);
+  // Search in the side menu: the results open to its right.
+  $('#tq')?.addEventListener('focus', () => document.body.classList.add('rail-open'));
   // Back on the remote (MainActivity asks this first): true = handled here, false = leave the app.
   window.__tvBack = () => {
-    if (!$('#sheet').hidden) { closeSheet(); return true; }
-    if (state.playing) { stopPlaying(); return true; }
+    if (sheetOpen()) { closeSheet(); return true; }
+    if (inRail(document.activeElement) && location.hash && location.hash !== '#/') { leaveRail(); return true; }
     if (location.hash && location.hash !== '#/' && location.hash !== '#') { history.back(); return true; }
+    if (!inRail(document.activeElement)) { enterRail(); return true; }   // Home: Back opens the menu, Back again leaves
     return false;
   };
+  // A new page starts with its first row picked, so the remote always has somewhere to go.
+  addEventListener('hashchange', () => setTimeout(() => { if (!inRail(document.activeElement) && !sheetOpen()) leaveRail(); }, 400));
+  setTimeout(() => { if (document.activeElement === document.body) leaveRail(); }, 1500);
 }

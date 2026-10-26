@@ -805,23 +805,52 @@ button.cw-x { border: 0; padding: 0; margin: 0; -webkit-appearance: none; appear
 #ctl-live:not(.on) { color: rgba(255,255,255,.7); }
 
 /* ---------- Android TV (Shield) ----------
-   A 10-foot screen driven by a remote: no hover effects, no live blur or shadows (the Shield's WebView repaints them on
-   every move), the page exactly as wide as the TV, and Movies / Series as full-width shelves with the top bar's
-   search only (the shelves are the menu, so no group column or second search box). */
+   Laid out like Android TV apps (TiviMate): a slim side menu of icons that opens out with labels when the remote
+   moves onto it, and the page beside it. No hover effects, live blur or shadows (the Shield's WebView repaints them
+   on every move); Movies / Series are full-width shelves (the shelves are the menu, so no group column). */
+html.tv { --rail: 84px; --chrome-h: 0px; }
 html.tv, html.tv body { overflow-x: hidden; }
+html.tv body { padding-left: var(--rail); }
 html.tv *, html.tv *::before, html.tv *::after { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
-html.tv .topbar, html.tv .mainnav, html.tv #view .filters { background: var(--bg) !important; }
 html.tv .poster-img, html.tv .cw-img, html.tv .hero-car, html.tv .svc, html.tv .onnow.nc, html.tv .search { box-shadow: none !important; }
 html.tv .hub-sec, html.tv .discover > .shelf { content-visibility: auto; contain-intrinsic-size: auto 340px; }
-html.tv .topsearch { flex: 0 1 230px; }
-html.tv .topsearch kbd, html.tv .topbar h1 { display: none; }
-html.tv #view.pl.vod { grid-template-columns: minmax(0, 1fr); max-width: none; }
+html.tv #view .filters { background: var(--bg) !important; }
+
+/* Side menu */
+html.tv .chrome { position: static; height: 0; }
+html.tv .topbar { position: fixed !important; top: 0; bottom: 0; left: 0; z-index: 60; width: var(--rail); height: auto; display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+  padding: 22px 12px; background: #0a0c10 !important; border-right: 1px solid var(--line); overflow: hidden; transition: width .14s ease; }
+html.tv body.rail-open .topbar { width: 260px; box-shadow: 30px 0 60px rgba(0, 0, 0, .65); }
+html.tv .topbar > .icon-btn, html.tv .topbar h1, html.tv .topsearch kbd { display: none !important; }
+html.tv .topbar .brand { flex: none; margin: 0 0 18px 6px; }
+html.tv .topsearch { order: 0; display: block !important; flex: none; width: 100%; margin: 0 0 12px; }
+html.tv .ts-box { height: 48px; padding: 0 16px; border-radius: 12px; background: var(--surface); }
+html.tv .ts-box:focus-within { background: #fff; color: #0e1014; }
+html.tv .ts-box:focus-within input { color: #0e1014; }
+html.tv .ts-box input { font-size: 16px; }
+html.tv #ts-results { position: fixed; left: 276px; top: 22px; width: min(640px, calc(100vw - 300px)); max-height: calc(100vh - 44px); overflow: auto; }
+html.tv .mainnav { order: 1; position: static !important; display: flex !important; flex-direction: column; gap: 4px; width: 100%; height: auto; margin: 0; padding: 0; border: 0; background: none !important; transform: none !important; }
+html.tv .mainnav a { display: flex; flex-direction: row; align-items: center; justify-content: flex-start; gap: 18px; width: 100%; height: auto; padding: 12px 18px; border-radius: 12px; font-size: 17px; font-weight: 600; white-space: nowrap; color: var(--muted); background: none; }
+html.tv .mainnav a .nv-ico svg, html.tv .mainnav a .ico { width: 24px; height: 24px; flex: none; }
+html.tv .mainnav a > span:last-child { opacity: 0; transition: opacity .1s; }
+html.tv body.rail-open .mainnav a > span:last-child { opacity: 1; }
+html.tv .mainnav a.active { color: #fff; background: var(--surface-2); }
+html.tv .mainnav a:focus { color: #0e1014; background: #fff; outline: none; }
+html.tv .actions { order: 2; margin-top: auto; display: flex; flex-direction: column; gap: 4px; }
+html.tv .actions .icon-btn { width: 48px; height: 48px; margin-left: 6px; }
+
+/* Pages beside the menu */
+html.tv #view { max-width: none !important; padding-left: 32px; padding-right: 32px; }
+html.tv #view.pl.vod { grid-template-columns: minmax(0, 1fr); }
 html.tv #view.pl.vod > * { grid-column: 1; }
 html.tv #view.pl.vod .filters { display: none; }
 html.tv #view.pl .filters .search { display: none; }
-/* A clear highlight on whatever the remote has picked. */
-html.tv :focus { outline: 3px solid var(--accent); outline-offset: -3px; }   /* drawn inside: rows and banners clip anything outside */
+html.tv .list:not(.grid):not(.discover) { grid-template-columns: minmax(0, 1fr) !important; }
+
+/* What the remote is on: unmistakable, never clipped (drawn inside the edge). */
+html.tv :focus { outline: 3px solid var(--accent); outline-offset: -3px; }
 html.tv .hero-slide:focus, html.tv .cw:focus, html.tv .svc:focus { outline: 4px solid #fff; outline-offset: -4px; }
 html.tv .scard:focus { outline: none; }
 html.tv .scard:focus .poster-img { outline: 4px solid #fff; outline-offset: -4px; transform: scale(1.04); }
-html.tv .row:focus, html.tv .hs-row:focus { background: var(--surface-2); }
+html.tv .row:focus, html.tv .hs-row:focus { background: var(--surface-2); outline: 3px solid #fff; }
+html.tv .btn:focus, html.tv .chip:focus, html.tv .menu-item:focus { background: #fff !important; color: #0e1014 !important; outline: none; }
