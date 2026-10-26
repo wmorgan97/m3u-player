@@ -1267,7 +1267,10 @@ function m3uKinds(p) {
 function showPlaylist(p) {
   state.current = p;
   state.tab = 'live';
-  const memo = !pendingGroup && !pendingQuery ? viewMemo.get(location.hash) : null;
+  // A tab picked from the main navigation (Live TV / Movies / Series) always opens at the top; only coming
+  // back to the same page (Back, reopening it) restores where you were.
+  const fromNav = !!pendingTab;
+  const memo = !pendingGroup && !pendingQuery && !fromNav ? viewMemo.get(location.hash) : null;
   // A remembered group only comes back for Live TV; Movies and Series always open on their front page.
   state.group = pendingGroup ?? (memo && (memo.tab || 'live') === 'live' ? memo.group : null) ?? null; pendingGroup = null;
   state.query = pendingQuery ? pendingQuery.toLowerCase() : memo?.query || '';
