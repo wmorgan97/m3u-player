@@ -16,7 +16,9 @@ class MainViewController: CAPBridgeViewController {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-testStream"), i + 1 < args.count, let url = URL(string: args[i + 1]), presentedViewController == nil else { return }
         let live = args.contains("-testLive")
-        let item = VLCPlayerController.Item(url: url, title: "Test stream", subtitle: "Player check", info: "", live: live, start: 0, headers: ["X-Test-Mute": "1"], hasPrev: true, hasNext: true)
+        var item = VLCPlayerController.Item(url: url, title: "Test stream", subtitle: "Player check", info: "", live: live, start: 0, headers: ["X-Test-Mute": "1"], hasPrev: true, hasNext: true)
+        item.list = (1...12).map { ("Episode \($0)", "S1 E\($0)") }
+        item.current = 2
         let controller = VLCPlayerController(item: item) { event in print("[player] \(event)") }
         controller.modalPresentationStyle = .fullScreen
         present(controller, animated: false)
@@ -79,11 +81,15 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
         for (key, value) in call.getObject("headers") ?? [:] {
             if let value = value as? String { headers[key] = value }
         }
-        let item = VLCPlayerController.Item(
+        var item = VLCPlayerController.Item(
             url: url, title: call.getString("title") ?? "", subtitle: call.getString("subtitle") ?? "",
             info: call.getString("info") ?? "",
             live: call.getBool("live") ?? true, start: call.getDouble("start") ?? 0, headers: headers,
             hasPrev: call.getBool("hasPrev") ?? false, hasNext: call.getBool("hasNext") ?? false)
+        item.list = (call.getArray("list") ?? []).compactMap { $0 as? [String: Any] }.map { (($0["t"] as? String) ?? "", ($0["s"] as? String) ?? "") }
+        item.listStart = call.getInt("listStart") ?? 0
+        item.current = call.getInt("current") ?? 0
+        item.listTitle = call.getString("listTitle") ?? "Episodes"
         DispatchQueue.main.async {
             // Already open (channel up/down, next episode): swap the stream in place.
             if let open = self.vlcController, open.presentingViewController != nil {
@@ -160,6 +166,12 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         let headers: [String: String]
         let hasPrev: Bool
         let hasNext: Bool
+        /// The episodes (or channels) around this one, for the list button: titles, optional second lines,
+        /// the index of the first one in the app's own list, and which one is playing.
+        var list: [(title: String, detail: String)] = []
+        var listStart = 0
+        var current = 0
+        var listTitle = "Episodes"
     }
 
     private let player = VLCMediaPlayer()
@@ -168,7 +180,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private let gradient = CAGradientLayer()
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
-    private let timeLabel = UILabel()
+    private let timeLabel = UILabel()      // total length, right of the bar
+    private let elapsedLabel = UILabel()   // time played, left of the bar
+    private let qualityBadge = UILabel()   // SD / HD / 4K, from the picture VLC is actually showing
     private let statusLabel = UILabel()
     private let liveBadge = UILabel()
     private let slider = UISlider()
@@ -183,6 +197,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private let forwardButton = UIButton(type: .system)
     private let prevButton = UIButton(type: .system)
     private let nextButton = UIButton(type: .system)
+    private let listButton = UIButton(type: .system)
+    private let lockButton = UIButton(type: .system)
+    private let unlockButton = UIButton(type: .system)   // the only control while the screen is locked
 
     private var item: Item
     private let onEvent: ([String: Any]) -> Void
@@ -192,6 +209,8 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private var lastTime: Int32 = -1
     private var scrubbing = false
     private var finished = false
+    private var locked = false
+    private let spacer = UIView()   // takes the spare width when the slider is hidden (live), so "LIVE" stays small
 
     init(item: Item, onEvent: @escaping ([String: Any]) -> Void) {
         self.item = item
@@ -246,6 +265,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     // MARK: touch
     private var touchStart: (point: CGPoint, time: TimeInterval)?
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if locked { showUnlock(); return super.touchesBegan(touches, with: event) }   // locked: a touch only offers the unlock button
         if let t = touches.first, !isOnControl(t) { touchStart = (t.location(in: view), ProcessInfo.processInfo.systemUptime) }
         super.touchesBegan(touches, with: event)
     }
@@ -278,10 +298,14 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         statusLabel.text = ""
         liveBadge.isHidden = !next.live
         slider.isHidden = next.live
-        (slider.superview as? UIStackView)?.arrangedSubviews.last?.isHidden = !next.live
+        spacer.isHidden = !next.live
         backButton.isHidden = next.live
         forwardButton.isHidden = next.live
         timeLabel.isHidden = next.live
+        elapsedLabel.isHidden = next.live
+        qualityBadge.isHidden = true
+        listButton.isHidden = next.list.count < 2
+        listButton.accessibilityLabel = next.listTitle
         infoButton.isHidden = next.info.isEmpty
         prevButton.isEnabled = next.hasPrev
         nextButton.isEnabled = next.hasNext
@@ -323,10 +347,19 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         if now != lastTime && player.isPlaying { spinner.stopAnimating() }
         lastTime = now
         if !item.live && !scrubbing && d > 0 { slider.value = Float(t / d) }
-        if !item.live { timeLabel.text = "\(clock(t)) / \(clock(d))" }
+        if !item.live && !scrubbing { elapsedLabel.text = clock(t); timeLabel.text = clock(d) }
+        updateQuality()
         playButton.setImage(UIImage(systemName: player.isPlaying ? "pause.fill" : "play.fill"), for: .normal)
         ticks += 1
         if !item.live && d > 0 && ticks % 5 == 0 { onEvent(["type": "progress", "t": t, "d": d]) }
+    }
+
+    private func updateQuality() {
+        let size = player.videoSize
+        guard size.width > 0, size.height > 0 else { return }
+        let w = max(size.width, size.height), h = min(size.width, size.height)
+        let label = w >= 3200 || h >= 1800 ? "4K" : w >= 1200 || h >= 700 ? "HD" : "SD"
+        if qualityBadge.text != " \(label) " || qualityBadge.isHidden { qualityBadge.text = " \(label) "; qualityBadge.isHidden = false }
     }
 
     private func clock(_ seconds: Double) -> String {
@@ -390,6 +423,17 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         style(forwardButton, "goforward.30", 26)
         style(prevButton, "backward.end.fill", 24)
         style(nextButton, "forward.end.fill", 24)
+        style(listButton, "list.bullet")
+        style(lockButton, "lock.open", 20)
+        lockButton.accessibilityLabel = "Lock screen"
+        style(unlockButton, "lock.fill", 22)
+        unlockButton.accessibilityLabel = "Unlock"
+        unlockButton.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        unlockButton.layer.cornerRadius = 23
+        unlockButton.alpha = 0
+        listButton.addTarget(self, action: #selector(showList), for: .touchUpInside)
+        lockButton.addTarget(self, action: #selector(lockTapped), for: .touchUpInside)
+        unlockButton.addTarget(self, action: #selector(unlockTapped), for: .touchUpInside)
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
         audioButton.addTarget(self, action: #selector(pickAudio), for: .touchUpInside)
         subsButton.addTarget(self, action: #selector(pickSubtitles), for: .touchUpInside)
@@ -407,8 +451,22 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         statusLabel.font = .systemFont(ofSize: 14, weight: .medium)
         statusLabel.textColor = .white
         statusLabel.textAlignment = .center
-        timeLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
-        timeLabel.textColor = .white
+        for l in [timeLabel, elapsedLabel] {
+            l.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
+            l.textColor = .white
+            l.setContentHuggingPriority(.required, for: .horizontal)
+            l.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+        timeLabel.textColor = UIColor.white.withAlphaComponent(0.75)
+        // Quiet outlined tag, like the HD mark on a TV guide.
+        qualityBadge.font = .systemFont(ofSize: 10, weight: .bold)
+        qualityBadge.textColor = .white
+        qualityBadge.layer.borderColor = UIColor.white.withAlphaComponent(0.8).cgColor
+        qualityBadge.layer.borderWidth = 1
+        qualityBadge.layer.cornerRadius = 3
+        qualityBadge.isHidden = true
+        qualityBadge.setContentHuggingPriority(.required, for: .horizontal)
+        qualityBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
         // Small and quiet: a red dot and "LIVE", no coloured bar.
         let live = NSMutableAttributedString(string: "● ", attributes: [.foregroundColor: UIColor(red: 1, green: 0.27, blue: 0.3, alpha: 1), .font: UIFont.systemFont(ofSize: 10, weight: .bold)])
         live.append(NSAttributedString(string: "LIVE", attributes: [.foregroundColor: UIColor.white, .font: UIFont.systemFont(ofSize: 12, weight: .semibold), .kern: 0.8]))
@@ -419,30 +477,35 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         slider.addTarget(self, action: #selector(scrubMoved), for: .valueChanged)
         slider.addTarget(self, action: #selector(scrubEnd), for: [.touchUpInside, .touchUpOutside, .touchCancel])
 
-        let titles = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
+        let titleRow = UIStackView(arrangedSubviews: [qualityBadge, titleLabel])
+        titleRow.spacing = 6
+        titleRow.alignment = .center
+        let titles = UIStackView(arrangedSubviews: [titleRow, subtitleLabel])
         titles.axis = .vertical
         titles.spacing = 2
-        let top = UIStackView(arrangedSubviews: [titles, UIView(), infoButton, audioButton, subsButton, rotateButton, closeButton])
+        let gap = UIView()   // the title gets the room first; the gap only takes what's left
+        gap.setContentHuggingPriority(.init(1), for: .horizontal)
+        gap.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        let top = UIStackView(arrangedSubviews: [titles, gap, infoButton, audioButton, subsButton, rotateButton, closeButton])
         top.alignment = .center
         top.spacing = 4
         let middle = UIStackView(arrangedSubviews: [prevButton, backButton, playButton, forwardButton, nextButton])
         middle.alignment = .center
         middle.spacing = 22
-        let spacer = UIView()   // takes the spare width when the slider is hidden (live), so "LIVE" stays small
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bottom = UIStackView(arrangedSubviews: [liveBadge, slider, timeLabel, spacer])
+        let bottom = UIStackView(arrangedSubviews: [lockButton, liveBadge, elapsedLabel, slider, timeLabel, spacer, listButton])
         bottom.alignment = .center
         bottom.spacing = 12
         // The slider takes all the spare width (it collapsed to its thumb before); labels keep their size.
         slider.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
-        timeLabel.setContentHuggingPriority(.required, for: .horizontal)
-        timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         liveBadge.setContentHuggingPriority(.required, for: .horizontal)
         slider.heightAnchor.constraint(equalToConstant: 34).isActive = true
         for v in [top, middle, bottom, statusLabel] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             overlay.addSubview(v)
         }
+        unlockButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(unlockButton)
         let g = overlay.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
             top.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 16),
@@ -456,12 +519,15 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
             statusLabel.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
             statusLabel.topAnchor.constraint(equalTo: middle.bottomAnchor, constant: 18),
+            unlockButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            unlockButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
             spinner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: view.centerYAnchor),
         ])
     }
 
     private func showOverlay(keep: Bool = false) {
+        if locked { return }
         hideTimer?.invalidate()
         overlay.isUserInteractionEnabled = true
         UIView.animate(withDuration: 0.2) { self.overlay.alpha = 1 }
@@ -514,6 +580,40 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         present(sheet, animated: true)
         showOverlay(keep: true)
     }
+    // Screen lock: hides every control and ignores taps and swipes (pocket, bed, kids); a touch shows one
+    // unlock button for a few seconds.
+    private var unlockTimer: Timer?
+    @objc private func lockTapped() {
+        locked = true
+        hideOverlay()
+        showUnlock()
+    }
+    private func showUnlock() {
+        unlockTimer?.invalidate()
+        UIView.animate(withDuration: 0.2) { self.unlockButton.alpha = 1 }
+        unlockTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+            UIView.animate(withDuration: 0.25) { self?.unlockButton.alpha = 0 }
+        }
+    }
+    @objc private func unlockTapped() {
+        locked = false
+        unlockTimer?.invalidate()
+        unlockButton.alpha = 0
+        showOverlay()
+    }
+
+    /// Episodes (or channels) list: pick one to play it here.
+    @objc private func showList() {
+        let picker = EpisodeListController(title: item.listTitle, rows: item.list, current: item.current - item.listStart) { [weak self] row in
+            guard let self = self else { return }
+            self.onEvent(["type": "jump", "index": self.item.listStart + row])
+        }
+        let nav = UINavigationController(rootViewController: picker)
+        nav.overrideUserInterfaceStyle = .dark
+        if #available(iOS 15.0, *), let sheet = nav.sheetPresentationController { sheet.detents = [.medium(), .large()]; sheet.prefersGrabberVisible = true }
+        present(nav, animated: true)
+        showOverlay(keep: true)
+    }
     @objc private func prevTapped() { onEvent(["type": "step", "dir": -1]); showOverlay() }
     @objc private func nextTapped() { onEvent(["type": "step", "dir": 1]); showOverlay() }
 
@@ -537,7 +637,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     }
     @objc private func scrubMoved() {
         let d = Double(player.media?.length.intValue ?? 0) / 1000
-        if d > 0 { timeLabel.text = "\(clock(Double(slider.value) * d)) / \(clock(d))" }
+        if d > 0 { elapsedLabel.text = clock(Double(slider.value) * d) }
     }
 
     @objc private func pickAudio() { pickTrack(title: "Audio", names: player.audioTrackNames, ids: player.audioTrackIndexes, current: player.currentAudioTrackIndex, source: audioButton) { [weak self] id in self?.player.currentAudioTrackIndex = id } }
@@ -557,5 +657,48 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         sheet.popoverPresentationController?.sourceRect = source.bounds
         present(sheet, animated: true)
         showOverlay(keep: true)
+    }
+}
+
+/// The list behind the player's list button: one row per episode / channel, the playing one ticked and in view.
+final class EpisodeListController: UITableViewController {
+    private let rows: [(title: String, detail: String)]
+    private let current: Int
+    private let onPick: (Int) -> Void
+
+    init(title: String, rows: [(title: String, detail: String)], current: Int, onPick: @escaping (Int) -> Void) {
+        self.rows = rows
+        self.current = current
+        self.onPick = onPick
+        super.init(style: .plain)
+        self.title = title
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(close))
+    }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if rows.indices.contains(current) { tableView.scrollToRow(at: IndexPath(row: current, section: 0), at: .middle, animated: false) }
+    }
+    @objc private func close() { dismiss(animated: true) }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows.count }
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "row") ?? UITableViewCell(style: .subtitle, reuseIdentifier: "row")
+        let row = rows[indexPath.row]
+        cell.textLabel?.text = row.title
+        cell.textLabel?.font = .systemFont(ofSize: 16, weight: indexPath.row == current ? .semibold : .regular)
+        cell.detailTextLabel?.text = row.detail
+        cell.detailTextLabel?.textColor = .secondaryLabel
+        cell.accessoryType = indexPath.row == current ? .checkmark : .none
+        return cell
+    }
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        let row = indexPath.row
+        dismiss(animated: true) { [onPick] in onPick(row) }
     }
 }
