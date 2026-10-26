@@ -4135,7 +4135,7 @@ function setStatus(text, isError = false) {
   if (!text && c) {
     const g = isLiveChannel(c) && guideFor(c);
     const now = g && g.nowNext(c).now;
-    text = now ? `${now[2]} · ${fmtRange(now)}` : c.group || '';
+    text = now ? `${now[2]} · ${fmtRange(now)}` : isLiveChannel(c) ? prettyGroup(c.group) || '' : vodLine(c);
     if (state.sleepAt) text = `${text ? `${text} · ` : ''}Sleep in ${Math.ceil((state.sleepAt - Date.now()) / MINUTE)} min`;
   }
   el.textContent = text || '';
@@ -4355,12 +4355,19 @@ function playNative(list, index, c) {
   const pr = state.progress[c.pkey || c.url];
   const start = !live && pr && !pr.done && pr.t > 30 ? pr.t : 0;
   nativeVlc({
-    url: c.url, title: c.name, live, start,
-    subtitle: now ? `${now[2]} · ends ${fmtTime(now[1])}` : prettyGroup(c.group) || '',
+    url: c.url, title: niceName(c), live, start,
+    subtitle: now ? `${now[2]} · ends ${fmtTime(now[1])}` : live ? prettyGroup(c.group) || '' : vodLine(c),
     info: now ? now[3] || '' : c.plot || '',
     headers: headersFromOpts(c.opts), hasPrev: index > 0, hasNext: index < list.length - 1,
     ...nativeList(list, index, live),
   }).catch(e => toast(e.message || 'Couldn’t open the player'));
+}
+// Second line under a film / episode title in the player: the episode's own name, or rating and length.
+// Never the provider's group ("EN - NETFLIX MOVIES"): that's filing, not information.
+function vodLine(c) {
+  const ep = c.kind === 'episode' ? String(c.name).split(/\bS\d+\s*E\d+\s*[-–:]?\s*/i).pop().trim() : '';
+  const bits = [ep && ep !== c.name ? ep : '', c.rating && c.rating < 9.5 ? `★ ${Number(c.rating).toFixed(1)}` : '', c.duration || ''];
+  return bits.filter(Boolean).join(' · ');
 }
 // The player's list button: up to 300 episodes / channels around the one playing (a full channel list can be thousands).
 function nativeList(list, index, live) {
@@ -4373,7 +4380,7 @@ function nativeList(list, index, live) {
       return { t: n != null ? `${n}. ${ep && ep !== x.name ? ep : `Episode ${n}`}` : x.name, s: [m.season ? `Season ${m.season}` : '', x.duration || ''].filter(Boolean).join(' · ') };
     }
     if (isLiveChannel(x)) { const g = guideFor(x), now = g && g.nowNext(x).now; return { t: x.name, s: now ? now[2] : prettyGroup(x.group) || '' }; }
-    return { t: niceName(x), s: prettyGroup(x.group) || '' };
+    return { t: niceName(x), s: vodLine(x) };
   };
   return { list: part.map(row), listStart: from, current: index, listTitle: live ? 'Channels' : list[index]?.kind === 'episode' ? 'Episodes' : 'Up next' };
 }
@@ -4461,7 +4468,7 @@ function playChannel(list, index) {
   tuneFrom = prev;
   try {
     if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({ title: c.name, artist: c.group || 'M3U Player', artwork: c.logo ? [{ src: c.logo }] : [] });
+      navigator.mediaSession.metadata = new MediaMetadata({ title: niceName(c), artist: isLiveChannel(c) ? prettyGroup(c.group) || 'Live TV' : vodLine(c) || 'M3U Player', artwork: c.logo ? [{ src: c.logo }] : [] });
     }
   } catch {}
   clearTimeout(tuneTimer);
