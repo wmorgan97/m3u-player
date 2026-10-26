@@ -960,8 +960,8 @@ function showHome() {
   const resumeLive = resumeChannel ? (() => {
     const c = resumeChannel, g = guideFor(c), now = g && g.nowNext(c).now;
     const pct = now ? ((Date.now() - now[0]) / (now[1] - now[0])) * 100 : 0;
-    return `<button class="cw cw-live" data-resume style="--hue:${hueOf(c.name)}"><span class="cw-x" data-cw-x="live" role="button" aria-label="Remove from Continue watching">${icon('close')}</span><span class="cw-img">${now?.[4]?.img ? `<img src="${esc(now[4].img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}<span class="live-badge">LIVE</span><span class="cw-play">${icon('play')}</span>${now ? `<span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}</span>
-      <span class="cw-name">${esc(c.name)}</span><span class="muted">${now ? esc(now[2]) : 'Live channel'}</span></button>`;
+    return `<div class="cw cw-live" data-resume role="button" tabindex="0" style="--hue:${hueOf(c.name)}"><button type="button" class="cw-x" data-cw-x="live" aria-label="Remove from Continue watching">${icon('close')}</button><span class="cw-img">${now?.[4]?.img ? `<img src="${esc(now[4].img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}<span class="live-badge">LIVE</span><span class="cw-play">${icon('play')}</span>${now ? `<span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}</span>
+      <span class="cw-name">${esc(c.name)}</span><span class="muted">${now ? esc(now[2]) : 'Live channel'}</span></div>`;
   })() : '';
   // Snapshot: playing a channel moves it to the front of state.recents, so tiles must keep their own channel.
   const recentStrip = state.recents.filter(isLiveChannel).slice(0, 14);
@@ -1001,9 +1001,9 @@ function showHome() {
       </ul></div><div id="home-results" class="home-results" hidden></div>` : ''}
     ${hub.hero.length ? heroHtml(hub.hero) : ''}
     ${resumeChannel || cw.length ? `<section class="hub-sec"><div class="hub-head"><h2>Continue watching</h2></div>
-      <div class="cont-row">${resumeLive}${cw.map((e, i) => `<button class="cw" data-cw="${i}"><span class="cw-x" data-cw-x="${i}" role="button" aria-label="Remove from Continue watching">${icon('close')}</span>
+      <div class="cont-row">${resumeLive}${cw.map((e, i) => `<div class="cw" data-cw="${i}" role="button" tabindex="0"><button type="button" class="cw-x" data-cw-x="${i}" aria-label="Remove from Continue watching">${icon('close')}</button>
         <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="cw-play">${icon('play')}</span><span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
-        <span class="cw-name">${esc(cwTitle(e.item))}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></button>`).join('')}</div></section>` : ''}
+        <span class="cw-name">${esc(cwTitle(e.item))}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></div>`).join('')}</div></section>` : ''}
     ${browse.length || pinnedAny || state.recents.length ? `<section class="hub-sec"><div class="hub-head"><h2>Live TV</h2><span class="hub-links">${browseEdit}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>
     ${hub.onNow.length ? `<div class="row-head"><h3>On now</h3></div><ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul>` : ''}
     ${state.recents.length ? `<div class="row-head"><h3>Your channels</h3></div><div class="strip recent-strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
@@ -1058,7 +1058,10 @@ function showHome() {
         if (entry) { state.progress[entry.item.url] = { ...state.progress[entry.item.url], hidden: true, at: Date.now() }; db.set('progress', state.progress).catch(() => {}); syncSoon(); }
       }
       toast('Removed from Continue watching');
-      const y = scrollY; showHome(); scrollTo(0, y);
+      // Take just this card out (no redraw: the other cards and their buttons stay exactly as they are).
+      const card = x.closest('.cw'), row = card?.parentNode;
+      card?.remove();
+      if (row && !row.querySelector('.cw')) row.closest('.hub-sec')?.remove();
       return;
     }
     const c = e.target.closest('[data-cw]');

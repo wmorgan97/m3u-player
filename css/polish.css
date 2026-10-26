@@ -718,3 +718,6 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
 .cw-x .ico { width: 14px; height: 14px; stroke: #fff; }
 .cw-x:hover { background: rgba(0,0,0,.85); }
 @media (hover: hover) and (pointer: fine) { .cw-x { opacity: 0; transition: opacity .15s; } .cw:hover .cw-x { opacity: 1; } }
+
+div.cw { cursor: pointer; text-align: left; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+button.cw-x { border: 0; padding: 0; margin: 0; -webkit-appearance: none; appearance: none; touch-action: manipulation; }
