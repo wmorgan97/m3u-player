@@ -3984,6 +3984,7 @@ function updateControls() {
   if (!seek.matches(':active')) {
     if (live) { if (r && r.end > r.start) seek.value = Math.round(((video.currentTime - r.start) / (r.end - r.start)) * 1000); }
     else if (total) seek.value = Math.round((pos / total) * 1000);
+    seek.style.setProperty('--p', `${seek.value / 10}%`);   // the filled part of the custom track
   }
   $('#ctl-time').textContent = live ? (atLive ? '' : `-${fmtDur(behind)}`) : `${fmtDur(pos)} / ${fmtDur(total)}`;
   const lv = $('#ctl-live');
@@ -4045,6 +4046,7 @@ function bindControls() {
     if (isLiveChannel(nowChannel())) { const r = seekRange(); if (r) video.currentTime = r.start + (seek.value / 1000) * (r.end - r.start); }
     showControls();
   });
+  seek.addEventListener('input', () => seek.style.setProperty('--p', `${seek.value / 10}%`));
   seek.addEventListener('change', () => { if (!isLiveChannel(nowChannel())) { const total = vodTotal(); if (total) seekVod((seek.value / 1000) * total); } });
   video.addEventListener('pause', () => { showControls(); clearTimeout(ctlHide); releaseOnPause(); });
   video.addEventListener('play', () => { clearTimeout(pauseTimer); showControls(); });
