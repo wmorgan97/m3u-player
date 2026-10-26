@@ -4920,8 +4920,6 @@ if (isTV) {
   // A page that redraws itself (a category opened, a sort changed) takes the highlight with it: pick up its first item.
   let redraw = 0;
   new MutationObserver(() => { clearTimeout(redraw); redraw = setTimeout(() => { if (lost() && !sheetOpen()) { n = 0; tryFocus(); } }, 200); })
-    .observe($('#view'), { childList: true });
-  new MutationObserver(() => { clearTimeout(redraw); redraw = setTimeout(() => { if (lost() && !sheetOpen()) { n = 0; tryFocus(); } }, 200); })
-    .observe($('#list') || $('#view'), { childList: true });
+    .observe($('#view'), { childList: true, subtree: true });   // (the check is one comparison, so watching the whole page is cheap)
   setTimeout(() => { if (document.activeElement === document.body) leaveRail(); }, 1500);
 }
