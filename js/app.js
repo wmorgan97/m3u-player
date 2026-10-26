@@ -1470,6 +1470,7 @@ async function requestVod(p, tab, { group, q }) {
   vodPending.add(tag);
   let unchanged = false;   // the row already shows exactly these titles (from the saved copy): nothing to redraw
   try {
+    if (!detectedServer) await Promise.race([serverReady, new Promise(r => setTimeout(r, 10000))]);   // cold start: rows can ask before the server is found
     const cat = q === undefined ? entry.cats.find(c => (c.category_name || '') === group) : null;
     const isTm = q === undefined && String(group).startsWith('tmdb:');
     const d = await vodApi(p, tab, q !== undefined ? { q } : isTm ? { tmdb: group.split(':').slice(2).join(':') } : { group: cat?.category_id ?? '' });
