@@ -956,7 +956,7 @@ function showHome() {
   shelfItems.set('home-watch', watchlist);
   const hub = homeHub(pl);
   resumeCardHtml(state.recents[0]);   // sets resumeChannel when the last thing watched was a live channel
-  if (resumeChannel && resumeChannel.url === cwLiveHidden) resumeChannel = null;   // removed from the row
+  resumeChannel = null;   // Home's Continue watching is films and episodes only (the last channel isn't pushed at you)
   const resumeLive = resumeChannel ? (() => {
     const c = resumeChannel, g = guideFor(c), now = g && g.nowNext(c).now;
     const pct = now ? ((Date.now() - now[0]) / (now[1] - now[0])) * 100 : 0;
@@ -1004,10 +1004,8 @@ function showHome() {
       <div class="cont-row">${resumeLive}${cw.map((e, i) => `<div class="cw" data-cw="${i}" role="button" tabindex="0"><button type="button" class="cw-x" data-cw-x="${i}" aria-label="Remove from Continue watching">${icon('close')}</button>
         <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="cw-play">${icon('play')}</span><span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
         <span class="cw-name">${esc(cwTitle(e.item))}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></div>`).join('')}</div></section>` : ''}
-    ${browse.length || pinnedAny || state.recents.length ? `<section class="hub-sec"><div class="hub-head"><h2>Live TV</h2><span class="hub-links">${browseEdit}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>
-    ${hub.onNow.length ? `<div class="row-head"><h3>On now</h3></div><ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul>` : ''}
-    ${state.recents.length ? `<div class="row-head"><h3>Your channels</h3></div><div class="strip recent-strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
-    ${browse.length ? `<div class="row-head"><h3>Groups</h3></div><div class="gchips">${browse.map(b => `<button class="gchip" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}"><i></i><span>${esc(prettyGroup(b.name))}</span><b>${b.count.toLocaleString()}</b></button>`).join('')}</div>` : ''}</section>` : ''}
+    ${hub.onNow.length ? `<section class="hub-sec"><div class="hub-head"><h2>On now</h2><span class="hub-links">${pl.length ? `<button class="link" data-edit-groups="${esc((liveSource() || pl[0]).id)}">Choose channels</button>` : ''}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>
+      <ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul></section>` : ''}
     ${hub.shelves.movies.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Movies</h2><span class="hub-links"><a class="link" href="#/movies">Browse all</a></span></div>${hub.shelves.movies.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading movies…</p>'}${servicesHtml(hub.services)}</section>` : ''}
     ${hub.shelves.series.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Series</h2><span class="hub-links"><a class="link" href="#/series">Browse all</a></span></div>${hub.shelves.series.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading series…</p>'}</section>` : ''}
     ${watchlist.length ? `<section class="hub-sec"><div class="hub-head"><h2>Watchlist</h2></div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul></section>` : ''}
