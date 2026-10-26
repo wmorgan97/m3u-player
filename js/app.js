@@ -688,7 +688,7 @@ function card(target, ic, title, sub, menuId) {
 }
 
 function continueWatching() {
-  return Object.values(state.progress).filter(e => !e.done && e.t > 30).sort((a, b) => b.at - a.at).slice(0, 20);
+  return Object.values(state.progress).filter(e => !e.done && !e.hidden && e.t > 30).sort((a, b) => b.at - a.at).slice(0, 20);
 }
 
 // A display name for a playlist — never a raw URL/host (which is what a nameless
@@ -718,6 +718,8 @@ function playlistSub(p) {
 
 // TiviMate-style "pick up where you left off": the last channel, what's on it now, one tap to play.
 let resumeChannel = null;
+let cwLiveHidden = '';
+db.get('cwLiveHidden').then(v => { cwLiveHidden = v || ''; }).catch(() => {});
 function resumeCardHtml(c) {
   resumeChannel = null;
   if (!c || state.settings.resumeCard === false || !isLiveChannel(c)) return '';
@@ -954,10 +956,11 @@ function showHome() {
   shelfItems.set('home-watch', watchlist);
   const hub = homeHub(pl);
   resumeCardHtml(state.recents[0]);   // sets resumeChannel when the last thing watched was a live channel
+  if (resumeChannel && resumeChannel.url === cwLiveHidden) resumeChannel = null;   // removed from the row
   const resumeLive = resumeChannel ? (() => {
     const c = resumeChannel, g = guideFor(c), now = g && g.nowNext(c).now;
     const pct = now ? ((Date.now() - now[0]) / (now[1] - now[0])) * 100 : 0;
-    return `<button class="cw cw-live" data-resume style="--hue:${hueOf(c.name)}"><span class="cw-img">${now?.[4]?.img ? `<img src="${esc(now[4].img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}<span class="live-badge">LIVE</span><span class="cw-play">${icon('play')}</span>${now ? `<span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}</span>
+    return `<button class="cw cw-live" data-resume style="--hue:${hueOf(c.name)}"><span class="cw-x" data-cw-x="live" role="button" aria-label="Remove from Continue watching">${icon('close')}</span><span class="cw-img">${now?.[4]?.img ? `<img src="${esc(now[4].img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}<span class="live-badge">LIVE</span><span class="cw-play">${icon('play')}</span>${now ? `<span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}</span>
       <span class="cw-name">${esc(c.name)}</span><span class="muted">${now ? esc(now[2]) : 'Live channel'}</span></button>`;
   })() : '';
   // Snapshot: playing a channel moves it to the front of state.recents, so tiles must keep their own channel.
@@ -998,7 +1001,7 @@ function showHome() {
       </ul></div><div id="home-results" class="home-results" hidden></div>` : ''}
     ${hub.hero.length ? heroHtml(hub.hero) : ''}
     ${resumeChannel || cw.length ? `<section class="hub-sec"><div class="hub-head"><h2>Continue watching</h2></div>
-      <div class="cont-row">${resumeLive}${cw.map((e, i) => `<button class="cw" data-cw="${i}">
+      <div class="cont-row">${resumeLive}${cw.map((e, i) => `<button class="cw" data-cw="${i}"><span class="cw-x" data-cw-x="${i}" role="button" aria-label="Remove from Continue watching">${icon('close')}</span>
         <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="cw-play">${icon('play')}</span><span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
         <span class="cw-name">${esc(cwTitle(e.item))}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></button>`).join('')}</div></section>` : ''}
     ${browse.length || pinnedAny || state.recents.length ? `<section class="hub-sec"><div class="hub-head"><h2>Live TV</h2><span class="hub-links">${browseEdit}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>
@@ -1045,6 +1048,19 @@ function showHome() {
     }
     const m = e.target.closest('[data-menu]');
     if (m) return playlistMenu(byId(m.dataset.menu));
+    const x = e.target.closest('[data-cw-x]');
+    if (x) {
+      e.stopPropagation();
+      if (x.dataset.cwX === 'live') { cwLiveHidden = resumeChannel?.url || ''; db.set('cwLiveHidden', cwLiveHidden).catch(() => {}); }
+      else {
+        const entry = cw[+x.dataset.cwX];
+        // Hidden, not forgotten: the resume point stays, and playing it again brings it back. Syncs to your other devices.
+        if (entry) { state.progress[entry.item.url] = { ...state.progress[entry.item.url], hidden: true, at: Date.now() }; db.set('progress', state.progress).catch(() => {}); syncSoon(); }
+      }
+      toast('Removed from Continue watching');
+      const y = scrollY; showHome(); scrollTo(0, y);
+      return;
+    }
     const c = e.target.closest('[data-cw]');
     if (c) { const entry = cw[+c.dataset.cw]; return playChannel([entry.item], 0); }
     if (e.target.closest('[data-resume]')) return playChannel(recentStrip, 0);

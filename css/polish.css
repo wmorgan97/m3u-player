@@ -710,3 +710,11 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
     margin: 0 calc(-12px - var(--safe-right)) 8px calc(-12px - var(--safe-left)); padding: 6px calc(12px + var(--safe-right)) 8px calc(12px + var(--safe-left));
     border-bottom: 1px solid var(--line); box-shadow: 0 8px 18px rgba(0,0,0,.35); }
 }
+
+/* Continue watching: remove button */
+.cont-row .cw { position: relative; }
+.cw-x { position: absolute; z-index: 4; top: 8px; right: 8px; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%;
+  background: rgba(0,0,0,.62); color: #fff; -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); cursor: pointer; }
+.cw-x .ico { width: 14px; height: 14px; stroke: #fff; }
+.cw-x:hover { background: rgba(0,0,0,.85); }
+@media (hover: hover) and (pointer: fine) { .cw-x { opacity: 0; transition: opacity .15s; } .cw:hover .cw-x { opacity: 1; } }
