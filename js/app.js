@@ -4652,7 +4652,7 @@ if (isTV) {
   const SKIP = '.hero-dots, a.link, .shelf-head, .row-head';
   const visible = el => {
     const r = el.getBoundingClientRect();
-    return r.width > 4 && r.height > 4 && !el.closest('[hidden]') && getComputedStyle(el).visibility !== 'hidden';
+    return r.width > 4 && r.height > 4 && (el.checkVisibility ? el.checkVisibility() : !el.closest('[hidden]'));
   };
   const inRail = el => !!el?.closest('.topbar');
   const sheetOpen = () => !$('#sheet').hidden;
@@ -4661,7 +4661,17 @@ if (isTV) {
   const picks = () => {
     const root = sheetOpen() ? $('#sheet') : $('#view');
     sideColumn = !sheetOpen() && sidePicks().length > 0;
-    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && !el.closest(SKIP) && (!el.closest(SIDE) || !sideColumn) && visible(el));   // banner slides are one row: left/right change slide
+    // Only what's on screen or within a screen of it (the Guide has thousands of programme cells, Movies ~1000 posters:
+    // measuring them all on every press made the remote lag). Position first (one layout pass), the costlier checks after.
+    const h = innerHeight, out = [];
+    for (const el of root.querySelectorAll(PICKABLE)) {
+      const r = el.getBoundingClientRect();
+      if (r.bottom < -h || r.top > 2 * h || r.width <= 4 || r.height <= 4) continue;
+      if (el.parentElement.closest(CARDISH) || el.closest(SKIP) || (sideColumn && el.closest(SIDE))) continue;
+      if (el.checkVisibility && !el.checkVisibility()) continue;
+      out.push(el);
+    }
+    return out;   // banner slides are one row: left/right change slide
   };
   const railPicks = () => [...document.querySelectorAll(RAIL)].filter(visible);
   // A page's own side list (Live TV groups) is a column of its own, like the menu: up/down within it, right into the page.
@@ -4775,7 +4785,9 @@ if (isTV) {
     if (!/^Arrow(Up|Down|Left|Right)$/.test(e.key)) return;
     if (typing && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;   // moving the cursor in a search box
     e.preventDefault(); e.stopImmediatePropagation();
+    const t0 = performance.now();
     move(e.key);
+    window.__tvMoveMs = Math.round(performance.now() - t0);
   }, true);
   document.addEventListener('keyup', e => {
     if (e.key !== 'Enter') return;
