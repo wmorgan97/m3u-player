@@ -62,6 +62,7 @@ function fmtDay(t) {
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = isNative || matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 if (isNative) document.documentElement.classList.add('native');
+if (/Mac/.test(navigator.platform) && matchMedia('(pointer: fine)').matches) document.documentElement.classList.add('mac');
 const isLiveChannel = c => !c.kind || c.kind === 'live';
 
 const byId = id => state.playlists.find(p => p.id === id);
@@ -912,7 +913,9 @@ function bindTopSearch() {
   q.addEventListener('focus', () => { if (q.value.trim().length >= 2 && box.innerHTML) box.hidden = false; });
   q.addEventListener('keydown', e => {
     if (e.key === 'Escape') { close(); q.blur(); }
-    if (e.key === 'Enter' && q.value.trim()) { close(); pendingQuery = q.value.trim(); location.hash = '#/all'; q.blur(); }
+    // Enter keeps the results (channels, films and series together) and moves into them; it used to open a
+    // channels-only page, which made search look like it only covered live TV.
+    if (e.key === 'Enter' && q.value.trim()) { e.preventDefault(); homeSearch(q.value.trim(), box); const f = () => box.querySelector('.hs-row')?.focus(); setTimeout(f, 300); setTimeout(f, 1500); }
     if (e.key === 'ArrowDown') { e.preventDefault(); box.querySelector('.hs-row')?.focus(); }
   });
   box.addEventListener('keydown', e => {
@@ -1083,7 +1086,7 @@ function showHome() {
     $('.banner').remove();
   });
   if ($('#home-q')) $('#home-q').onkeydown = (e => {
-    if (e.key === 'Enter' && e.target.value.trim()) { pendingQuery = e.target.value.trim(); location.hash = '#/all'; }
+    if (e.key === 'Enter' && e.target.value.trim()) { e.preventDefault(); homeSearch(e.target.value.trim()); e.target.blur(); }   // keep the mixed results; just put the keyboard away
   });
   if ($('#home-q') && !$('#home-q').oninput) $('#home-q').oninput = debounce(e => homeSearch(e.target.value.trim()), 250);
   view.onclick = e => {
