@@ -1656,6 +1656,7 @@ function applyFilter({ keep = false } = {}) {
     return;
   }
   shelfObserver?.disconnect();
+  $('#list')?.classList.remove('discover');   // leaving the front page: the grid/list layout takes over cleanly
   view.classList.toggle('vod', state.tab !== 'live' && p.kind === 'xtream');
   const q = state.query;
   const items = currentItems();
@@ -1711,6 +1712,7 @@ function applyFilter({ keep = false } = {}) {
 function renderMore() {
   const list = $('#list');
   if (!list || state.rendered >= state.filtered.length) return;
+  if (list.classList.contains('discover')) return;   // the Movies/Series front page has its own shelves, never the poster grid
   const end = Math.min(state.rendered + PAGE, state.filtered.length);
   const html = (state.tab === 'live' || state.current?.kind !== 'xtream') ? rowHtml : posterHtml;
   const shown = state.filtered.slice(state.rendered, end);
