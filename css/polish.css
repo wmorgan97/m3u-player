@@ -682,3 +682,4 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
 .rowwrap.at-start .row-arrow.l, .rowwrap.at-end .row-arrow.r { opacity: 0 !important; pointer-events: none; }
 .sheet-intro { margin: -4px 0 12px; line-height: 1.45; }
 .detail-tagline { font-style: italic; margin: 2px 0 6px; }
+.cw-play { color: #fff; } .cw-play .ico, .cw-play .ico .dot { fill: #fff; stroke: none; }
