@@ -104,11 +104,11 @@ function field(f) {
 }
 
 // Resolves to { [name]: trimmed value } or null if dismissed.
-export function formSheet({ title, fields, submit = 'Save' }) {
+export function formSheet({ title, fields, submit = 'Save', intro = '' }) {
   return new Promise(resolve => {
     let done = false;
     const finish = v => { if (!done) { done = true; resolve(v); } };
-    sheet(`<div class="sheet-title">${esc(title)}</div>
+    sheet(`<div class="sheet-title">${esc(title)}</div>${intro ? `<p class="muted sheet-intro">${esc(intro)}</p>` : ''}
       <form class="form">
         ${fields.map(field).join('')}
         <div class="form-actions"><button type="button" class="btn" data-cancel>Cancel</button><button class="btn primary">${esc(submit)}</button></div>

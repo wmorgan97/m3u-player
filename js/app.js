@@ -108,6 +108,7 @@ async function init() {
   }
   await detectServerProxy();
   detectedServer = true;
+  tmdbStatus();
   if (!state.current) homeRefresh();   // Home was drawn before the server was known: now fill Movies & Series
   // The first screen rendered before we knew the server was there: ask for its guide data now.
   if (state.current && !location.hash.startsWith('#/guide')) ensureGuide(state.filtered.slice(0, state.rendered));
@@ -182,6 +183,55 @@ async function syncNow() {
 const syncSoon = debounce(syncNow, 1500);
 const syncLater = debounce(syncNow, 20000);   // watch progress ticks every few seconds
 function favoritesChanged() { syncMeta.favAt = Date.now(); syncSoon(); }
+
+// ---------- TMDB: trending, backdrops, plots, cast, trailers (the key lives on your server) ----------
+let tmdbOn = null;   // null = unknown yet
+async function tmdbStatus() {
+  if (!canSync()) return false;
+  if (tmdbOn === null) { try { tmdbOn = !!(await (await fetch(serverApi('tmdb/status'), { cache: 'no-store' })).json()).configured; } catch { tmdbOn = false; } }
+  return tmdbOn;
+}
+async function tmdbSheet() {
+  if (!canSync()) { toast('Connect your server first'); return; }
+  const on = await tmdbStatus();
+  const v = await formSheet({
+    title: 'Film & TV info (TMDB)',
+    intro: `Adds what's trending this week, big backdrop images, plots, cast and trailers. Get a free key at themoviedb.org: Settings, API. Either the API Read Access Token (the long one) or the API Key works. It's kept on your server only.${on ? ' A key is already saved: enter a new one to replace it, or leave it empty to remove it.' : ''}`,
+    fields: [{ name: 'key', label: 'TMDB key', value: '', required: !on, placeholder: on ? 'Saved on your server' : 'Paste your TMDB key' }],
+    submit: 'Save',
+  });
+  if (!v) return;
+  toast('Checking the key with TMDB…', { busy: true });
+  try {
+    const res = await fetch(serverApi('tmdb/key'), { method: 'POST', body: JSON.stringify({ key: v.key.trim() }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(d.error || `The server replied ${res.status}`); return; }
+    tmdbOn = d.configured;
+    // Fresh overviews (with trending) for every catalogue.
+    vodCache.clear();
+    for (const p of state.playlists) for (const k of ['movies', 'series']) db.del(`vod:${vodKey(p, k)}`).catch(() => {});
+    toast(d.configured ? 'TMDB connected: trending and artwork are loading' : 'TMDB key removed');
+    rerender();
+  } catch (e) { toast(e.message); }
+}
+const tmdbInfoCache = new Map();
+async function tmdbInfo(it) {
+  if (!(await tmdbStatus())) return null;
+  const kind = it.kind === 'series' ? 'tv' : 'movie';
+  const name = displayTitle(it.name), year = Number(it.year) || vodMeta(it.name).year || '';
+  const k = `${kind}|${name}|${year}`;
+  if (!tmdbInfoCache.has(k)) tmdbInfoCache.set(k, fetch(`${serverApi('tmdb/info')}&kind=${kind}&name=${encodeURIComponent(name)}&year=${year}`).then(r => r.ok ? r.json() : null).then(d => (d?.tid ? d : null)).catch(() => null));
+  return tmdbInfoCache.get(k);
+}
+// Fill gaps in the provider's own details with TMDB's (the provider's stay when it has them).
+function withTmdb(i, t) {
+  if (!t) return i;
+  return { ...i, tmdb: t,
+    backdrop_path: t.backdrop ? [t.backdrop] : i.backdrop_path,
+    plot: i.plot || i.description || t.overview, genre: t.genres?.join(', ') || i.genre,
+    cast: i.cast || i.actors || t.cast?.join(', '), director: i.director || t.director,
+    youtube_trailer: i.youtube_trailer || t.trailer, duration: i.duration || (t.runtime ? fmtDur(t.runtime * 60) : '') };
+}
 
 async function enterServerKey() {
   const v = await formSheet({
@@ -693,10 +743,12 @@ function homeHub(pl) {
       hub.vodLink[tab] ||= `#/p/${p.id}`;
       const what = tab === 'movies' ? 'movies' : 'series';
       const withArt = l => (l || []).filter(it => it.logo);
+      if (e.trending?.length >= 5) hub.shelves[tab].push({ title: `Top 10 ${what} this week`, key: `h-trend-${tab}`, items: e.trending.slice(0, 10), top10: true });
+      if (e.trending?.length) hub.hero.push(...e.trending.filter(it => it.tm?.backdrop).slice(0, 4).map(it => ({ ...it, heroLabel: `#${e.trending.indexOf(it) + 1} trending ${tab === 'series' ? 'series' : 'movie'}` })));
       if (e.top?.length) hub.shelves[tab].push({ title: 'Popular now', key: `h-top-${tab}`, items: withArt(e.top).slice(0, 30) });
       const fresh = withArt(e.fresh).length >= 8 ? withArt(e.fresh) : withArt(e.recent);
       if (fresh.length) hub.shelves[tab].push({ title: withArt(e.fresh).length >= 8 ? 'New releases' : `Recently added ${what}`, key: `h-new-${tab}`, items: fresh.slice(0, 30) });
-      hub.hero.push(...withArt(e.top).slice(0, 4));
+      if (!e.trending?.length) hub.hero.push(...withArt(e.top).slice(0, 4));
     }
   }
   // Because you watched: the newest film or episode with progress, then more from its group.
@@ -735,6 +787,18 @@ function homeHub(pl) {
   hub.hero = mix.slice(0, 6);
   shelfItems.set('hero', hub.hero);
   for (const tab of ['movies', 'series']) for (const sh of hub.shelves[tab]) shelfItems.set(sh.key, sh.items);
+  // Streaming services: the provider's per-platform groups (Netflix, Disney+…) as one row of tiles.
+  hub.services = [];
+  for (const p of pl.filter(p => p.kind === 'xtream' && p.content !== 'live')) {
+    for (const tab of ['movies', 'series']) {
+      const e = vodCache.get(vodKey(p, tab));
+      if (!e || Array.isArray(e)) continue;
+      for (const [name, re, c1, c2] of SERVICES) {
+        const g = e.groupList.find(g => re.test(g.name) && !/kids|anime/i.test(g.name));
+        if (g && !hub.services.some(s => s.name === name && s.tab === tab)) hub.services.push({ name, c1, c2, tab, pid: p.id, group: g.name, count: g.count });
+      }
+    }
+  }
   return hub;
 }
 // "MobLand · S1 E1" instead of "EN - MobLand (2025) (GB) - S01E01 - Stick or Twist".
@@ -743,7 +807,43 @@ function cwTitle(it) {
   const m = vodMeta(it.name), t = displayTitle(it.name);
   return m.episode != null ? `${t} · S${m.season || 1} E${m.episode}` : t;
 }
+const SERVICES = [
+  ['Netflix', /netflix|^(4k-)?nf\b/i, '#e50914', '#5c0408'],
+  ['Disney+', /disney|^(4k-)?d\+/i, '#1f4fd8', '#0b1d5c'],
+  ['Apple TV+', /apple|^(4k-)?a\+/i, '#6b7280', '#1f2227'],
+  ['Prime Video', /prime|amazon|^(4k-)?amz/i, '#1aa3e8', '#0b3f5c'],
+  ['Max', /\bhbo\b|\bmax\b/i, '#6d35e8', '#251050'],
+  ['Paramount+', /paramount/i, '#0a64ff', '#062a6b'],
+  ['Hulu', /hulu/i, '#1ce783', '#0b4d2c'],
+  ['Peacock', /peacock/i, '#f2b705', '#4d3a02'],
+  ['Sky', /\bsky\b/i, '#00a3ff', '#0a2a5c'],
+];
+function servicesHtml(list) {
+  const tiles = list.filter(s => s.tab === 'movies').concat(list.filter(s => s.tab === 'series' && !list.some(m => m.tab === 'movies' && m.name === s.name)));
+  return tiles.length >= 2 ? `<div class="row-head"><h3>Streaming services</h3></div><ul class="shelf-row home-shelf services">${tiles.map((s, k) => `<li class="svc" data-svc="${k}" style="--c1:${s.c1};--c2:${s.c2}"><b>${esc(s.name)}</b><span>${s.count.toLocaleString()} ${s.tab === 'series' ? 'series' : 'titles'}</span></li>`).join('')}</ul>` : '';
+}
+// Mouse users: arrow buttons on side-scrolling rows (phones and trackpads just swipe).
+function addRowArrows(root) {
+  if (!matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  root.querySelectorAll('.home-shelf, .cont-row').forEach(row => {
+    if (row.parentNode.classList.contains('rowwrap')) return;
+    const w = document.createElement('div');
+    w.className = 'rowwrap';
+    row.before(w); w.append(row);
+    for (const d of [-1, 1]) {
+      const b = document.createElement('button');
+      b.className = `row-arrow ${d < 0 ? 'l' : 'r'}`; b.type = 'button'; b.setAttribute('aria-label', d < 0 ? 'Scroll left' : 'Scroll right');
+      b.innerHTML = icon(d < 0 ? 'prev' : 'next');
+      b.onclick = e => { e.stopPropagation(); row.scrollBy({ left: d * row.clientWidth * 0.85, behavior: 'smooth' }); };
+      w.append(b);
+    }
+    const upd = () => { w.classList.toggle('at-start', row.scrollLeft < 8); w.classList.toggle('at-end', row.scrollLeft + row.clientWidth >= row.scrollWidth - 8); };
+    row.addEventListener('scroll', upd, { passive: true });
+    requestAnimationFrame(upd);
+  });
+}
 function homeShelfHtml(sh) {
+  if (sh.top10) return `<div class="row-head"><h3>${esc(sh.title)}</h3><span class="muted small">from TMDB</span></div><ul class="shelf-row home-shelf top10">${sh.items.map((it, k) => `<li class="scard t10" data-shelf="${esc(sh.key)}" data-k="${k}"><span class="t10-n">${k + 1}</span>${cardHtml(it, sh.key, k).replace(/^<li[^>]*>|<\/li>$/g, '')}</li>`).join('')}</ul>`;
   return `<div class="row-head"><h3>${esc(sh.title)}</h3></div><ul class="shelf-row home-shelf">${sh.items.map((it, k) => cardHtml(it, sh.key, k)).join('')}</ul>`;
 }
 function onNowHtml({ c, now }, k) {
@@ -775,16 +875,16 @@ function heroHtml(items) {
     dots.addEventListener('click', e => { const d = e.target.closest('[data-dot]'); if (d) { e.stopPropagation(); go(car, +d.dataset.dot); } });
   });
   return `<div class="hero-wrap"><div class="hero-car">${items.map((it, k) => `<div class="hero-slide" data-shelf="hero" data-k="${k}" style="--hue:${hueOf(it.name)}">
-      <img class="hero-bg" src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">
+      ${it.tm?.backdrop ? `<img class="hero-bg sharp" src="${esc(it.tm.backdrop)}" alt="" onerror="this.remove()">` : `<img class="hero-bg" src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`}
       <div class="hero-body">
         <div class="hero-text">
-          <span class="hero-kicker">${icon(it.kind === 'series' ? 'grid' : 'film')} Popular ${it.kind === 'series' ? 'series' : 'movie'}</span>
+          <span class="hero-kicker">${icon(it.kind === 'series' ? 'grid' : 'film')} ${esc(it.heroLabel || `Popular ${it.kind === 'series' ? 'series' : 'movie'}`)}</span>
           <div class="hero-title">${esc(displayTitle(it.name))}</div>
-          <div class="hero-meta">${[it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : '', it.genre, prettyGroup(it.group)].filter(Boolean).map(x => `<span>${esc(x)}</span>`).join('')}</div>
-          ${it.plot ? `<p class="hero-plot">${esc(it.plot)}</p>` : ''}
+          <div class="hero-meta">${[it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : '', ...(it.tm?.genres?.length ? it.tm.genres.slice(0, 2) : [it.genre, prettyGroup(it.group)])].filter(Boolean).map(x => `<span>${esc(x)}</span>`).join('')}</div>
+          ${it.tm?.overview || it.plot ? `<p class="hero-plot">${esc(it.tm?.overview || it.plot)}</p>` : ''}
           <div class="hero-actions"><button class="btn primary" data-hero-play="${k}">${icon('play')} ${it.kind === 'series' ? 'Episodes' : 'Play'}</button><button class="btn">More info</button></div>
         </div>
-        <span class="poster-img hero-poster"><img src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>
+        ${it.tm?.backdrop ? '' : `<span class="poster-img hero-poster"><img src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>`}
       </div></div>`).join('')}</div>
     ${items.length > 1 ? `<div class="hero-dots">${items.map((_, k) => `<button data-dot="${k}" class="${k ? '' : 'on'}" aria-label="Slide ${k + 1}"></button>`).join('')}</div>` : ''}</div>`;
 }
@@ -862,7 +962,7 @@ function showHome() {
     ${hub.onNow.length ? `<div class="row-head"><h3>On now</h3></div><ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul>` : ''}
     ${state.recents.length ? `<div class="row-head"><h3>Your channels</h3></div><div class="strip recent-strip">${recentStrip.map((c, i) => `<button class="rc" data-recent="${i}">${logoHtml(c)}<span class="rc-name">${esc(c.name)}</span></button>`).join('')}</div>` : ''}
     ${browse.length ? `<div class="row-head"><h3>Groups</h3></div><div class="gchips">${browse.map(b => `<button class="gchip" data-browse="${esc(b.pid)}" data-group="${esc(b.name)}" style="--hue:${hueOf(b.name)}"><i></i><span>${esc(prettyGroup(b.name))}</span><b>${b.count.toLocaleString()}</b></button>`).join('')}</div>` : ''}</section>` : ''}
-    ${hub.shelves.movies.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Movies</h2><span class="hub-links"><a class="link" href="#/movies">Browse all</a></span></div>${hub.shelves.movies.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading movies…</p>'}</section>` : ''}
+    ${hub.shelves.movies.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Movies</h2><span class="hub-links"><a class="link" href="#/movies">Browse all</a></span></div>${hub.shelves.movies.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading movies…</p>'}${servicesHtml(hub.services)}</section>` : ''}
     ${hub.shelves.series.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Series</h2><span class="hub-links"><a class="link" href="#/series">Browse all</a></span></div>${hub.shelves.series.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading series…</p>'}</section>` : ''}
     ${watchlist.length ? `<section class="hub-sec"><div class="hub-head"><h2>Watchlist</h2></div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul></section>` : ''}
     ${pl.length ? '' : `<div class="empty">${icon('tv', 'big')}<p><b>No playlists yet</b></p>
@@ -871,6 +971,7 @@ function showHome() {
 
   $('#add-first')?.addEventListener('click', addPlaylistSheet);
   $('#server-key')?.addEventListener('click', enterServerKey);
+  addRowArrows(view);
   $('#tip-close')?.addEventListener('click', () => {
     try { localStorage.setItem('install-tip', 'off'); } catch {}
     $('.banner').remove();
@@ -882,6 +983,13 @@ function showHome() {
   view.onclick = e => {
     const hp = e.target.closest('[data-hero-play]');
     if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playChannel([it], 0); }
+    const sv = e.target.closest('[data-svc]');
+    if (sv) {
+      const all = hub.services, tiles = all.filter(s => s.tab === 'movies').concat(all.filter(s => s.tab === 'series' && !all.some(m => m.tab === 'movies' && m.name === s.name)));
+      const s = tiles[+sv.dataset.svc];
+      if (s) { pendingTab = s.tab; pendingGroup = s.group; location.hash = `#/p/${s.pid}`; }
+      return;
+    }
     const on = e.target.closest('.onnow');
     if (on) { const list = (shelfItems.get('onnow') || []).map(x => x.c); return playChannel(list, +on.dataset.k); }
     const sc = e.target.closest('.scard, .hs-row, .hero-slide');
@@ -1133,7 +1241,9 @@ function catalogueEntry(p, tab, d) {
   const keep = list => (en ? list.filter(it => ok.has(it.group || '')) : list);
   const sorted = en ? [...cats].sort((a, b) => groupRank(a.category_name) - groupRank(b.category_name) || b.count - a.count) : cats;
   return { cats: all, keep, total: en ? cats.reduce((n, c) => n + c.count, 0) : d.total || 0,
-    recent: keep(toItems(p, tab, all, d.recent || [])), top: keep(toItems(p, tab, all, d.top || [])), fresh: keep(toItems(p, tab, all, d.fresh || [])), groups: new Map(), searches: new Map(),
+    recent: keep(toItems(p, tab, all, d.recent || [])), top: keep(toItems(p, tab, all, d.top || [])), fresh: keep(toItems(p, tab, all, d.fresh || [])),
+    // Trending keeps TMDB's order (toItems sorts by group), and each title its TMDB extras.
+    trending: keep((d.trending || []).map(raw => { const it = toItems(p, tab, all, [raw])[0]; return it && { ...it, tm: raw.tm }; }).filter(Boolean)), groups: new Map(), searches: new Map(),
     groupList: sorted.map(c => ({ name: c.category_name || '', count: c.count, id: c.category_id })) };
 }
 async function requestVod(p, tab, { group, q }) {
@@ -1160,7 +1270,7 @@ async function loadVod(p, tab, { force = false } = {}) {
   if (vodCache.has(key) && !force) return;
   if (!force) {
     const cached = await db.get(`vod:${key}`);
-    if (cached && Date.now() - cached.at < DAY && (canSync() ? cached.overview?.v === 2 : cached.items)) {
+    if (cached && Date.now() - cached.at < DAY && (canSync() ? cached.overview?.v === 3 : cached.items)) {
       vodCache.set(key, cached.overview ? catalogueEntry(p, tab, cached.overview) : cached.items);
       if (state.current === p && state.tab === tab) refreshPlaylistView();
       return;
@@ -1223,7 +1333,7 @@ const discoverMode = () => {
 };
 function cardHtml(it, key, k) {
   return `<li class="scard" data-shelf="${esc(key)}" data-k="${k}">
-    <span class="poster-img" data-initials="${initials(displayTitle(it.name))}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.scard')?.classList.add('noart');this.remove()">` : ''}
+    <span class="poster-img${it.logo ? '' : ' no-img'}" data-initials="${initials(displayTitle(it.name))}" data-title="${esc(displayTitle(it.name))}" style="--hue:${hueOf(it.name)}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.scard')?.classList.add('noart');this.parentNode.classList.add('no-img');this.remove()">` : ''}
       ${it.rating && it.rating < 9.5 ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
     <span class="poster-name">${esc(it.kind === 'movie' || it.kind === 'series' ? displayTitle(it.name) : it.name)}</span>${it.year ? `<span class="muted">${esc(it.year)}</span>` : ''}</li>`;
 }
@@ -2146,7 +2256,7 @@ function download(file) {
 
 // ---------- movies & series ----------
 function detailHtml(m, info = {}) {
-  const i = info.info || {};
+  const i = withTmdb(info.info || {}, info.tmdb);
   const pr = state.progress[m.url];
   const resumable = pr && !pr.done && pr.t > 30;
   const meta = [String(i.releasedate || i.release_date || '').slice(0, 4) || m.year, i.duration, i.genre || m.genre].filter(Boolean);
@@ -2156,8 +2266,9 @@ function detailHtml(m, info = {}) {
     <div class="detail-top">
       <span class="detail-poster" data-initials="${initials(m.name)}">${(i.movie_image || i.cover_big || m.logo) ? `<img src="${esc(i.movie_image || i.cover_big || m.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
       <div class="detail-head">
-        <div class="detail-title">${esc(m.name)}</div>
-        <div class="film-meta">${meta.map(x => `<span class="pill">${esc(x)}</span>`).join('')}${m.rating ? `<span class="pill rating">★ ${m.rating.toFixed(1)}</span>` : ''}</div>
+        <div class="detail-title">${esc(displayTitle(m.name))}</div>
+        ${i.tmdb?.tagline ? `<div class="muted detail-tagline">${esc(i.tmdb.tagline)}</div>` : ''}
+        <div class="film-meta">${meta.map(x => `<span class="pill">${esc(x)}</span>`).join('')}${i.tmdb?.vote ? `<span class="pill rating">★ ${i.tmdb.vote.toFixed(1)} · ${i.tmdb.votes >= 1000 ? `${(i.tmdb.votes / 1000).toFixed(1)}k` : i.tmdb.votes} votes</span>` : m.rating ? `<span class="pill rating">★ ${m.rating.toFixed(1)}</span>` : ''}</div>
         ${pr && !pr.done && pr.t > 30 ? `<span class="bar film-bar"><i style="width:${Math.min(100, (pr.t / pr.d) * 100).toFixed(1)}%"></i></span><span class="muted">${fmtDur(pr.d - pr.t)} left</span>` : ''}
       </div>
     </div>
@@ -2169,6 +2280,7 @@ function detailHtml(m, info = {}) {
       ${resumable ? '<button class="btn" data-restart>Start over</button>' : ''}
       <button class="btn" data-fav>${favUrls.has(m.url) ? '★ Saved' : '☆ Save'}</button>
       ${canSync() && !m.offline ? '<button class="btn" data-dl>Download</button>' : ''}
+      ${i.youtube_trailer ? '<button class="btn" data-trailer>Trailer</button>' : ''}
       <button class="btn" data-more>More</button>
     </div>
   </div>`;
@@ -2183,6 +2295,7 @@ async function movieSheet(m) {
       el.querySelector('[data-restart]')?.addEventListener('click', () => { delete state.progress[m.url]; closeSheet(); playChannel([m], 0); });
       el.querySelector('[data-fav]').onclick = async () => { await toggleFavorite(m, null); open(true); };
       el.querySelector('[data-dl]')?.addEventListener('click', () => downloadMenu(m));
+      el.querySelector('[data-trailer]')?.addEventListener('click', () => { const k = withTmdb(info.info || {}, info.tmdb).youtube_trailer; if (k) window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(k)}`, '_blank'); });
       el.querySelector('[data-more]').onclick = () => menu(m.name, [
         info.info?.youtube_trailer && { label: 'Watch trailer', fn: () => window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(info.info.youtube_trailer)}`, '_blank') },
         ...externalItems(m),
@@ -2190,11 +2303,14 @@ async function movieSheet(m) {
     },
   });
   open();
+  const still = () => $('#sheet .detail')?.dataset.id === m.id;
+  tmdbInfo(m).then(t => { if (t) { info = { ...info, tmdb: t }; if (still()) open(true); } });
   const x = xtOf(playlistOf(m));
   if (!x || !m.sid) return;
   try {
-    info = await x.vodInfo(m.sid) || {};
-    if ($('#sheet .detail')?.dataset.id === m.id) open();
+    const pi = await x.vodInfo(m.sid) || {};
+    info = { ...pi, tmdb: info.tmdb };
+    if (still()) open(true);
   } catch {}
 }
 
@@ -2210,6 +2326,9 @@ async function seriesSheet(s) {
     return;
   }
   if ($('#sheet .detail')?.dataset.id !== s.id) return;
+  const tm = await Promise.race([tmdbInfo(s), new Promise(r => setTimeout(r, 2500))]).catch(() => null);
+  if ($('#sheet .detail')?.dataset.id !== s.id) return;
+  if (tm) info = { ...info, info: withTmdb(info.info || {}, tm) };
   const eps = info?.episodes || {};
   const seasons = Object.keys(eps).sort((a, b) => a - b);
   const episodesOf = season => (eps[season] || []).map(ep => s.seasons ? { ...ep, src: p.id, duration: '', group: `${s.name} · Season ${season}` } : ({
@@ -2238,7 +2357,7 @@ async function seriesSheet(s) {
       <div class="detail-top">
         <span class="detail-poster" data-initials="${initials(s.name)}">${(i.cover || s.logo) ? `<img src="${esc(i.cover || s.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
         <div class="detail-head">
-          <div class="detail-title">${esc(s.name)}</div>
+          <div class="detail-title">${esc(displayTitle(s.name))}</div>
           <div class="film-meta">${[s.year, i.genre || s.genre, plural(seasons.length, 'season'), plural(allEps.length, 'episode')].filter(Boolean).map(m => `<span class="pill">${esc(m)}</span>`).join('')}${s.rating ? `<span class="pill rating">★ ${s.rating.toFixed(1)}</span>` : ''}</div>
           ${watched ? `<span class="muted">${watched} of ${allEps.length} watched</span>` : ''}
         </div>
@@ -3349,6 +3468,7 @@ async function settingsSheet() {
           <label>Play live TV in${sel('livePlayer', s.livePlayer)}</label>
           <p class="muted small">Another player opens the provider's stream itself, untouched. ${/Macintosh/.test(navigator.userAgent) && !isIOS ? 'On a Mac, VLC gets a small playlist file: click it in your downloads and VLC plays the stream.' : ''}</p>`;
       })()}
+      ${canSync() ? `<label class="switch"><span><b>Film &amp; TV info (TMDB)</b><span class="muted">Trending this week, backdrops, plots, cast and trailers.</span></span><button type="button" class="btn small" id="tmdb-btn">${tmdbOn ? 'Connected' : 'Set up'}</button></label>` : ''}
       <label>Movies &amp; series languages<select name="vodLanguage">
         ${[['en', 'English only'], ['all', 'All languages']].map(([v, l]) => `<option value="${v}" ${(s.vodLanguage || 'en') === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
@@ -3370,6 +3490,7 @@ async function settingsSheet() {
     <div class="form-actions"><button class="btn danger" id="wipe">Erase all data</button></div>`, {
     onMount: el => {
       el.querySelector('#server-key-2')?.addEventListener('click', enterServerKey);
+      el.querySelector('#tmdb-btn')?.addEventListener('click', tmdbSheet);
       el.querySelector('form').onsubmit = async e => {
         e.preventDefault();
         const f = new FormData(e.target);

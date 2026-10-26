@@ -213,6 +213,7 @@ function spawnRun(s, fromIdx, { fast = s.enc } = {}) {
   proc.on('error', () => { if (s.proc === proc) s.exited = true; });
   proc.on('exit', code => {
     if (s.proc !== proc) return;                          // superseded by a seek
+    if (code) console.log(`[hls] ffmpeg run from ${fromIdx} exited ${code}: ${s.errTail.trim().split('\n').slice(-2).join(' | ').slice(0, 300)}`);
     if (opts.fast && code === 0 && sessions.get(s.id) === s) return spawnRun(s, fromIdx + HEAD_SEGS, { fast: false });   // head done: continue at quality
     s.exited = true;
   });

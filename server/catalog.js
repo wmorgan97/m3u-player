@@ -13,10 +13,12 @@
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { readBody } from './sync.js';
+import { trending, onTmdbChange } from './tmdb.js';
 
 const PROXY_KEY = process.env.PROXY_KEY || '';
 const TTL = 12 * 3600_000;
 const cache = new Map();   // key -> { at, job: Promise<{ raw, gz }> }
+onTmdbChange(() => cache.clear());   // a new TMDB key: rebuild overviews with trending lists
 
 const num = v => (v === null || v === undefined || v === '' ? undefined : Number(v) || undefined);
 // A 9.5-10 rating on a provider listing is almost always one or two votes: treat it as no rating.
@@ -74,9 +76,32 @@ async function build(server, user, pass, kind) {
     .map(it => [score(it), it]).sort((a, b) => b[0] - a[0]).map(x => x[1]), 120);
   // New releases: this year's and last year's titles, newest added first (not old films the provider just added).
   const fresh = uniq(byAdded.filter(it => art(it) && yearOf(it) >= nowYear - 1), 120);
+  // Trending this week (TMDB), matched to titles this provider actually has: title + year, else title alone
+  // when the years agree or the listing has none. Each match carries TMDB's backdrop, plot and rated votes.
+  const trend = [];
+  try {
+    const tm = await trending(kind === 'movies' ? 'movie' : 'tv');
+    if (tm.length) {
+      const bare = it => titleKey(it).replace(/(19|20)\d\d$/, '');
+      const byKey = new Map();
+      for (const it of items) {
+        if (!art(it)) continue;
+        for (const k of [titleKey(it), bare(it)]) if (k && !byKey.has(k)) byKey.set(k, it);
+      }
+      const seen = new Set();
+      for (const t of tm) {
+        const n = t.title.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '');
+        let it = byKey.get(n + t.year) || byKey.get(n);
+        if (it && yearOf(it) && t.year && Math.abs(yearOf(it) - t.year) > 1) it = null;
+        if (!it || seen.has(it)) continue;
+        seen.add(it);
+        trend.push({ ...it, ...(t.vote ? { rating: t.vote } : {}), tm: { tid: t.tid, backdrop: t.backdrop, overview: t.overview, votes: t.votes, genres: t.genres, year: t.year } });
+      }
+    }
+  } catch (e) { console.log(`[tmdb] trending: ${e.message}`); }
   const names = items.map(it => (it.name || '').toLowerCase());
-  console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  return { items, names, byCat, overview: JSON.stringify({ at: Date.now(), v: 2, cats: catList, recent, top, fresh, total: items.length }) };
+  console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${trend.length} trending matched, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  return { items, names, byCat, overview: JSON.stringify({ at: Date.now(), v: 3, cats: catList, recent, top, fresh, trending: trend, total: items.length }) };
 }
 
 export async function handleCatalog(req, res, url, send, allowed) {
