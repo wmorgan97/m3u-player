@@ -11,6 +11,10 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
         // Back on the TV remote: the page decides first (close a sheet, stop the player, go back a page);
         // only when it has nothing left to close does Back leave the app.
+        // Opened from the TV app for one page (settings, the TV guide): go straight there.
+        String hash = getIntent().getStringExtra("hash");
+        if (hash != null && !hash.isEmpty()) new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() ->
+            getBridge().getWebView().evaluateJavascript("location.hash = '" + hash.replace("'", "") + "'", null), 1500);
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {

@@ -52,7 +52,28 @@ public class NativePlayerPlugin extends Plugin {
     @PluginMethod
     public void share(PluginCall call) { call.reject("Sharing isn't available on the TV"); }
 
+    /** The native TV screens listen here when they started the player; otherwise events go to the web page. */
+    public interface Listener { void on(JSONObject event); }
+    public static Listener listener;
+
+    /** The web app hands over the server key once, so the TV's own screens can use the server too. */
+    @PluginMethod
+    public void tvConfig(PluginCall call) {
+        String key = call.getString("key", "");
+        if (key == null || key.isEmpty()) { call.resolve(); return; }
+        com.wmorgan97.m3uplayer.tv.Repo.INSTANCE.init(getContext());
+        boolean had = com.wmorgan97.m3uplayer.tv.Repo.INSTANCE.hasKey();
+        com.wmorgan97.m3uplayer.tv.Repo.INSTANCE.saveConfig(key, call.getString("server"));
+        call.resolve();
+        if (!had && getActivity().getIntent().getBooleanExtra("setup", false)) getActivity().runOnUiThread(() -> {
+            getActivity().startActivity(new Intent(getContext(), com.wmorgan97.m3uplayer.tv.TvActivity.class));
+            getActivity().finish();
+        });
+    }
+
     static void emit(JSONObject event) {
+        Listener l = listener;
+        if (l != null) { new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> l.on(event)); return; }
         NativePlayerPlugin p = instance;
         if (p == null || p.getBridge() == null) return;
         String js = "window.__nativePlayer && window.__nativePlayer(" + event + ")";

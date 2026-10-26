@@ -24,12 +24,22 @@
             android:launchMode="singleTask"
             android:exported="true">
 
+
+        </activity>
+
+        <!-- The TV app itself (Compose for TV): what the Shield's home screen opens. -->
+        <activity
+            android:name=".tv.TvActivity"
+            android:banner="@drawable/banner"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode|navigation"
+            android:launchMode="singleTask"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
-
         </activity>
 
         <!-- Full-screen player (remote controlled); landscape, never shown in recents on its own. -->

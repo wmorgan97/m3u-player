@@ -59,7 +59,7 @@ import org.json.JSONObject;
  */
 @OptIn(markerClass = UnstableApi.class)
 public class PlayerActivity extends AppCompatActivity {
-    static PlayerActivity current;
+    public static PlayerActivity current;
 
     private ExoPlayer player;
     private PlayerView playerView;
@@ -118,7 +118,7 @@ public class PlayerActivity extends AppCompatActivity {
 
     // ---------- stream ----------
 
-    void load(JSObject next) {
+    public void load(JSObject next) {
         item = next;
         live = next.optBoolean("live", true);
         finished = false;
