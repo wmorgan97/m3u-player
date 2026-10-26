@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens offline. Streams, logos and
 // playlist downloads (other origins) always go straight to the network.
 
-const CACHE = 'm3u-player-v156';
+const CACHE = 'm3u-player-v157';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/polish.css', 'css/desktop.css',
   'js/app.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/epg-worker.js', 'js/vod.js', 'js/native.js', 'vendor/hls.min.js',
@@ -14,7 +14,7 @@ self.addEventListener('install', e => {
 
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    .then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== 'm3u-img').map(k => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 
@@ -23,6 +23,20 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const req = e.request;
   const url = new URL(req.url);
+  // Poster thumbnails: cache first (they never change), in their own cache, trimmed now and then.
+  if (req.method === 'GET' && url.origin === location.origin && url.pathname === '/img') {
+    e.respondWith(caches.open('m3u-img').then(async cache => {
+      const hit = await cache.match(req);
+      if (hit) return hit;
+      const res = await fetch(req);
+      if (res.ok && res.type !== 'opaqueredirect') {
+        cache.put(req, res.clone());
+        if (Math.random() < 0.02) cache.keys().then(keys => { if (keys.length > 1500) keys.slice(0, keys.length - 1200).forEach(k => cache.delete(k)); });
+      }
+      return res;
+    }));
+    return;
+  }
   // Only the app's own files; never the proxy, transcode, sync or guide endpoints.
   if (req.method !== 'GET' || url.origin !== location.origin
       || url.pathname.endsWith('/proxy') || url.pathname === '/hls' || url.pathname.startsWith('/hls/')

@@ -23,6 +23,7 @@ import { handleSync } from './sync.js';
 import { handleGuide } from './guide.js';
 import { handleCatalog } from './catalog.js';
 import { handleTmdb } from './tmdb.js';
+import { handleImg } from './img.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const port = Number(process.env.PORT) || 8080;
@@ -177,6 +178,7 @@ export function createAppServer() {
     if (url.pathname.startsWith('/tmdb/')) return handleTmdb(req, res, url, send);
     if (url.pathname === '/download') return handleDownload(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
       .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
+    if (url.pathname === '/img') return handleImg(req, res, url, send, u => allowPrivate || !isPrivateHost(u.hostname));
     if (url.pathname === '/vod') return handleCatalog(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
       .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/guide') return handleGuide(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))

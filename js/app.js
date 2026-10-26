@@ -755,7 +755,7 @@ async function homeSearch(q, box = $('#home-results')) {
   shelfItems.set('hs-chan', chans);
   const section = (title, key, items, row) => items.length ? `<div class="hs-title">${title}</div>${items.map((it, k) => row(it, key, k)).join('')}` : '';
   const chanRow = (c, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}">${logoHtml(c)}<span class="row-text"><span class="row-name">${esc(c.name)}</span><span class="muted">${esc(prettyGroup(c.group) || '')}</span></span>${icon('play')}</div>`;
-  const vodRow = (it, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}"><span class="hs-poster">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span><span class="row-text"><span class="row-name">${esc(niceName(it))}</span><span class="muted">${[it.kind === 'series' ? 'Series' : 'Movie', it.rating && it.rating < 9.5 ? `★ ${it.rating.toFixed(1)}` : '', it.copies > 1 ? `${it.copies} versions` : ''].filter(Boolean).map(esc).join(' · ')}</span></span></div>`;
+  const vodRow = (it, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}"><span class="hs-poster">${it.logo ? `<img src="${esc(thumb(it.logo, 120))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span><span class="row-text"><span class="row-name">${esc(niceName(it))}</span><span class="muted">${[it.kind === 'series' ? 'Series' : 'Movie', it.rating && it.rating < 9.5 ? `★ ${it.rating.toFixed(1)}` : '', it.copies > 1 ? `${it.copies} versions` : ''].filter(Boolean).map(esc).join(' · ')}</span></span></div>`;
   box.innerHTML = section('Channels', 'hs-chan', chans, chanRow) || '<div class="muted hs-empty">Searching…</div>';
   box.hidden = false;
   if (!canSync()) { if (!chans.length) box.innerHTML = '<div class="muted hs-empty">No channels match.</div>'; return; }
@@ -967,7 +967,7 @@ function heroHtml(items) {
     dots.addEventListener('click', e => { const d = e.target.closest('[data-dot]'); if (d) { e.stopPropagation(); go(car, +d.dataset.dot); } });
   });
   return `<div class="hero-wrap"><div class="hero-car">${items.map((it, k) => `<div class="hero-slide" data-shelf="hero" data-k="${k}" style="--hue:${hueOf(it.name)}">
-      ${it.tm?.backdrop ? `<img class="hero-bg sharp" src="${esc(it.tm.backdrop)}" alt="" onerror="this.remove()">` : `<img class="hero-bg" src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`}
+      ${it.tm?.backdrop ? `<img class="hero-bg sharp" src="${esc(it.tm.backdrop)}" alt="" onerror="this.remove()">` : `<img class="hero-bg" src="${esc(thumb(it.logo, 300))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`}
       <div class="hero-body">
         <div class="hero-text">
           <span class="hero-kicker">${icon(it.kind === 'series' ? 'grid' : 'film')} ${esc(it.heroLabel || `Popular ${it.kind === 'series' ? 'series' : 'movie'}`)}</span>
@@ -976,7 +976,7 @@ function heroHtml(items) {
           ${it.tm?.overview || it.plot ? `<p class="hero-plot">${esc(it.tm?.overview || it.plot)}</p>` : ''}
           <div class="hero-actions"><button class="btn primary" data-hero-play="${k}">${icon('play')} ${it.kind === 'series' ? 'Episodes' : 'Play'}</button><button class="btn">More info</button></div>
         </div>
-        ${it.tm?.backdrop ? '' : `<span class="poster-img hero-poster"><img src="${esc(it.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>`}
+        ${it.tm?.backdrop ? '' : `<span class="poster-img hero-poster"><img src="${esc(thumb(it.logo, 500))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>`}
       </div></div>`).join('')}</div>
     ${items.length > 1 ? `<div class="hero-dots">${items.map((_, k) => `<button data-dot="${k}" class="${k ? '' : 'on'}" aria-label="Slide ${k + 1}"></button>`).join('')}</div>` : ''}</div>`;
 }
@@ -1073,7 +1073,7 @@ function showHome() {
     ${hub.hero.length ? heroHtml(hub.hero) : ''}
     ${resumeChannel || cw.length ? `<section class="hub-sec"><div class="hub-head"><h2>Continue watching</h2></div>
       <div class="cont-row">${resumeLive}${cw.map((e, i) => `<div class="cw" data-cw="${i}" role="button" tabindex="0"><button type="button" class="cw-x" data-cw-x="${i}" aria-label="Remove from Continue watching">${icon('close')}</button>
-        <span class="cw-img">${e.item.logo ? `<img src="${esc(e.item.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="cw-play">${icon('play')}</span><span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
+        <span class="cw-img">${e.item.logo ? `<img src="${esc(thumb(e.item.logo, 500))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="cw-play">${icon('play')}</span><span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
         <span class="cw-name">${esc(cwTitle(e.item))}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></div>`).join('')}</div></section>` : ''}
     ${hub.onNow.length ? `<section class="hub-sec"><div class="hub-head"><h2>On now</h2><span class="hub-links">${pl.length ? `<button class="link" data-edit-groups="${esc((liveSource() || pl[0]).id)}">Choose channels</button>` : ''}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>
       <ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul></section>` : ''}
@@ -1585,7 +1585,7 @@ const discoverMode = () => {
 };
 function cardHtml(it, key, k) {
   return `<li class="scard" data-shelf="${esc(key)}" data-k="${k}">
-    <span class="poster-img${it.logo ? '' : ' no-img'}" data-initials="${initials(displayTitle(it.name))}" data-title="${esc(displayTitle(it.name))}" style="--hue:${hueOf(it.name)}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.scard')?.classList.add('noart');this.parentNode.classList.add('no-img');this.remove()">` : ''}
+    <span class="poster-img${it.logo ? '' : ' no-img'}" data-initials="${initials(displayTitle(it.name))}" data-title="${esc(displayTitle(it.name))}" style="--hue:${hueOf(it.name)}">${it.logo ? `<img src="${esc(thumb(it.logo, 300))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.scard')?.classList.add('noart');this.parentNode.classList.add('no-img');this.remove()">` : ''}
       ${it.rating && it.rating < 9.5 ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
     <span class="poster-name">${esc(it.kind === 'movie' || it.kind === 'series' ? displayTitle(it.name) : it.name)}</span>${it.year ? `<span class="muted">${esc(it.year)}</span>` : ''}</li>`;
 }
@@ -2103,7 +2103,7 @@ function posterHtml(it, i) {
   const m = vodMeta(it.name);   // "TOP - Dune (2021) 4K (US)" -> "Dune", 2021
   const name = it.kind === 'episode' ? it.name : displayTitle(it.name), year = it.year ?? m.year;
   return `<li class="poster" data-i="${i}">
-    <span class="poster-img" data-initials="${initials(it.name)}">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+    <span class="poster-img" data-initials="${initials(it.name)}">${it.logo ? `<img src="${esc(thumb(it.logo, 300))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
       ${it.rating ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
     <span class="poster-name">${esc(name)}</span>
     ${year ? `<span class="muted">${esc(year)}</span>` : ''}
@@ -2581,6 +2581,12 @@ function oneOfEach(items) {
     by.set(k, best);
   }
   return [...by.values()];
+}
+// Posters through the server's thumbnail cache (small JPEGs at the size shown): smooth scrolling, instant repeats.
+function thumb(url, w = 300) {
+  if (!url || !/^https?:/i.test(url) || !canSync()) return url;
+  const base = serverApi('img');
+  return `${base}${base.includes('?') ? '&' : '?'}w=${w}&u=${encodeURIComponent(url)}`;
 }
 const versionsCache = new Map();
 async function versionsOf(m) {

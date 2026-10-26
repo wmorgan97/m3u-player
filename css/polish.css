@@ -770,3 +770,17 @@ button.cw-x { border: 0; padding: 0; margin: 0; -webkit-appearance: none; appear
 .vtext b em { font-style: normal; font-size: 11px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; margin-left: 6px; padding: 2px 6px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 25%, transparent); color: color-mix(in srgb, var(--accent) 70%, #fff); }
 .vtext .muted { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vrow > .ico { width: 18px; height: 18px; color: var(--accent); fill: var(--accent); stroke: none; }
+
+/* ---------- Touch screens: smooth scrolling ----------
+   Live blur (backdrop-filter) and per-poster shadows are repainted on every scroll frame on iPhone; they go,
+   and bars get solid backgrounds instead. Rows far off screen skip layout and painting until they come near. */
+@media (hover: none) {
+  *, *::before, *::after { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+  .mainnav { background: var(--bg) !important; }
+  #view.vod .filters, .topbar { background: var(--bg) !important; }
+  .toast { background: #222733 !important; }
+  .home-shelf .poster-img, .discover .shelf .scard .poster-img, .list.grid .poster-img, .cont-row .cw-img, .hero-car, .onnow.nc, .svc { box-shadow: none !important; }
+  .poster-img, .cw-img { transition: none !important; }
+  .hub-sec, .discover > .shelf { content-visibility: auto; contain-intrinsic-size: auto 340px; }
+  .shelf-row, .cont-row, .gchips, .quick { overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; }
+}
