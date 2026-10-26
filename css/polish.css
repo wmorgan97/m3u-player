@@ -820,7 +820,8 @@ html.tv #view.pl.vod > * { grid-column: 1; }
 html.tv #view.pl.vod .filters { display: none; }
 html.tv #view.pl .filters .search { display: none; }
 /* A clear highlight on whatever the remote has picked. */
-html.tv :focus { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 10px; }
+html.tv :focus { outline: 3px solid var(--accent); outline-offset: -3px; }   /* drawn inside: rows and banners clip anything outside */
+html.tv .hero-slide:focus, html.tv .cw:focus, html.tv .svc:focus { outline: 4px solid #fff; outline-offset: -4px; }
 html.tv .scard:focus { outline: none; }
-html.tv .scard:focus .poster-img { outline: 3px solid #fff; outline-offset: 2px; transform: scale(1.06); }
+html.tv .scard:focus .poster-img { outline: 4px solid #fff; outline-offset: -4px; transform: scale(1.04); }
 html.tv .row:focus, html.tv .hs-row:focus { background: var(--surface-2); }

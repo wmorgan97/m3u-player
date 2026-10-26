@@ -4647,16 +4647,33 @@ if (isTV) {
   };
   // Instant, and the picked row kept mid-screen: holding an arrow never queues up animations, and the sticky top bar
   // never covers what's picked.
+  let last = null;   // where the highlight was (page coordinates): rows that redraw themselves (Home refreshing) replace it
   const focusEl = el => {
     if (!el.matches('a[href], button, input, select, textarea') && !el.hasAttribute('tabindex')) el.tabIndex = -1;
     el.focus({ preventScroll: true });
     el.scrollIntoView({ block: el.closest('.topbar') ? 'nearest' : 'center', inline: 'nearest' });
+    const r = el.getBoundingClientRect();
+    last = { x: r.left + r.width / 2 + scrollX, y: r.top + r.height / 2 + scrollY, hash: location.hash };
+  };
+  // The redrawn item in the same spot, so the next press carries on from there instead of jumping to the top.
+  const recover = all => {
+    if (!last || last.hash !== location.hash) return null;
+    let best = null, d = Infinity;
+    for (const el of all) {
+      const r = el.getBoundingClientRect(), dx = r.left + r.width / 2 + scrollX - last.x, dy = r.top + r.height / 2 + scrollY - last.y, dd = dx * dx + dy * dy;
+      if (dd < d) { d = dd; best = el; }
+    }
+    return d < 120 * 120 ? best : null;
   };
   let memX = null;   // the column you were in: down/up go to the poster below it, not to a "See all" button off to the side
   const move = dir => {
     const cur = document.activeElement && document.activeElement !== document.body && visible(document.activeElement) ? document.activeElement : null;
     const all = picks();
-    if (!cur) { const first = all.find(el => el.getBoundingClientRect().top >= 60) || all[0]; if (first) focusEl(first); return; }
+    if (!cur) {
+      const back = recover(all);
+      if (back) { focusEl(back); if (!/^Arrow/.test(dir)) return; return move(dir); }
+      const first = all.find(el => el.getBoundingClientRect().top >= 60) || all[0]; if (first) focusEl(first); return;
+    }
     const sideways = dir === 'ArrowRight' || dir === 'ArrowLeft';
     const a = cur.getBoundingClientRect(), ax = a.left + a.width / 2, ay = a.top + a.height / 2;
     const refX = !sideways && memX != null ? memX : ax;
