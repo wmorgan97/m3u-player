@@ -4790,13 +4790,14 @@ if (isTV) {
     if (inner.length) return menu(null, [...(el.matches('button') ? [] : [{ label: 'Open', fn: () => el.click() }]), ...inner.map(x => ({ label: x.label, fn: () => x.b.click() }))]);
     el.click();
   };
-  let okHeld = false, okLong = false;
+  let okHeld = false, okLong = false, swallowUp = false;
   document.addEventListener('keydown', e => {
     // The keyboard's search key: close the keyboard and go into the results (films, series and channels), rather
     // than the computer version's all-channels page.
     if (e.key === 'Enter' && e.target.id === 'tq' && !e.target.readOnly) {
       e.preventDefault(); e.stopImmediatePropagation();
       e.target.blur();
+      swallowUp = true;   // this key's release must not open the result it lands on
       const into = (n = 0) => { const row = $('#ts-results:not([hidden]) .hs-row'); if (row) { row.focus(); document.body.classList.add('rail-open'); } else if (n < 40) setTimeout(() => into(n + 1), 100); };
       return into();
     }
@@ -4820,6 +4821,7 @@ if (isTV) {
   document.addEventListener('keyup', e => {
     if (e.key !== 'Enter') return;
     okHeld = false;
+    if (swallowUp) { swallowUp = false; e.preventDefault(); return; }
     if (e.target.matches('input, textarea, select')) return;   // (the search box opens its keyboard itself)
     e.preventDefault();
     if (okLong) { okLong = false; return; }
