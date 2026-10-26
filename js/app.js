@@ -4720,7 +4720,7 @@ if (isTV) {
   // Pages redraw under the remote (the Guide as time passes, Home as rows refresh): find the same item again, by its
   // name first and position second, so the next press carries on instead of restarting at the top.
   const recover = all => {
-    if (!lastSeen || lastSeen.sheet !== sheetOpen()) return null;
+    if (!lastSeen || lastSeen.sheet !== sheetOpen() || lastSeen.hash !== location.hash) return null;   // only on the same page
     let best = null, d = Infinity;
     for (const el of all) {
       const r = el.getBoundingClientRect(), dx = r.left + r.width / 2 - lastSeen.x, dy = r.top + r.height / 2 - lastSeen.y;
@@ -4741,7 +4741,7 @@ if (isTV) {
     document.body.classList.remove('rail-open');
     if (!el.closest('#sheet')) lastContent = el;   // what to come back to when a details page or menu closes
     const lr = el.getBoundingClientRect();
-    lastSeen = { text: (el.textContent || '').trim().slice(0, 60), x: lr.left + lr.width / 2, y: lr.top + lr.height / 2, sheet: !!el.closest('#sheet') };
+    lastSeen = { text: (el.textContent || '').trim().slice(0, 60), x: lr.left + lr.width / 2, y: lr.top + lr.height / 2, sheet: !!el.closest('#sheet'), hash: location.hash };
     if (!el.closest('#sheet') && !el.closest(SIDE)) lastMain = el;
     // Instant (holding a key never queues animations) and kept mid-screen, clear of the edges.
     el.scrollIntoView({ block: el.closest('#sheet') ? 'nearest' : 'center', inline: 'nearest' });   // a details page scrolls only as needed
@@ -4781,10 +4781,7 @@ if (isTV) {
     let ri = -1, ci = -1;
     if (!cur) { const back = recover(rows.flatMap(r => r.items.map(i => i.el))); if (back) cur = back; }
     if (cur) rows.forEach((row, i) => { const j = row.items.findIndex(x => x.el === cur); if (j >= 0) { ri = i; ci = j; } });
-    if (ri < 0) {   // nothing picked (or the page redrew under it): start at the first row on screen
-      const row = rows.find(r => r.top >= 0) || rows[0];
-      return focusEl(row.items[0].el);
-    }
+    if (ri < 0) return leaveRail();   // nothing picked (or the page redrew under it): the page's natural starting point
     const row = rows[ri];
     if (dir === 'ArrowLeft') {
       if (ci > 0) { focusEl(row.items[ci - 1].el); memX = null; return; }
@@ -4911,6 +4908,16 @@ if (isTV) {
     }, 80);
   }).observe($('#sheet'), { attributes: true, attributeFilter: ['hidden'], childList: true, subtree: true });
   // A new page starts with its first row picked, so the remote always has somewhere to go.
-  addEventListener('hashchange', () => setTimeout(() => { if (!inRail(document.activeElement) && !sheetOpen()) leaveRail(); }, 400));
+  // (pages that fetch their titles first get a few tries while they fill in)
+  addEventListener('hashchange', () => {
+    lastContent = null;
+    let n = 0;
+    const tryFocus = () => {
+      if (inRail(document.activeElement) || sheetOpen()) return;
+      if (document.activeElement === document.body || !document.activeElement || !visible(document.activeElement)) leaveRail();
+      if ((document.activeElement === document.body || !document.activeElement) && ++n < 12) setTimeout(tryFocus, 250);
+    };
+    setTimeout(tryFocus, 300);
+  });
   setTimeout(() => { if (document.activeElement === document.body) leaveRail(); }, 1500);
 }
