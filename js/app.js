@@ -4723,13 +4723,14 @@ if (isTV) {
     if (inner.length) return menu(null, [...(el.matches('button') ? [] : [{ label: 'Open', fn: () => el.click() }]), ...inner.map(x => ({ label: x.label, fn: () => x.b.click() }))]);
     el.click();
   };
-  let okLong = false;
+  let okHeld = false, okLong = false;
   document.addEventListener('keydown', e => {
     const typing = e.target.matches('input:not([readonly]), textarea, select');
     if (e.key === 'Enter' && !typing) {
       e.preventDefault(); e.stopImmediatePropagation();
-      // Android only repeats a key once it's been held (~0.5s): the first repeat is the long press.
-      if (!e.repeat) okLong = false;
+      // Android only repeats a key once it's been held (~0.5s), so a second "down" before the "up" is the long press
+      // (the TV's WebView doesn't flag repeats, so they're counted here).
+      if (!okHeld) { okHeld = true; okLong = false; }
       else if (!okLong) { okLong = true; const el = document.activeElement; if (el && el !== document.body) options(el); }
       return;
     }
@@ -4739,7 +4740,9 @@ if (isTV) {
     move(e.key);
   }, true);
   document.addEventListener('keyup', e => {
-    if (e.key !== 'Enter' || e.target.matches('input, textarea, select')) return;   // (the search box opens its keyboard itself)
+    if (e.key !== 'Enter') return;
+    okHeld = false;
+    if (e.target.matches('input, textarea, select')) return;   // (the search box opens its keyboard itself)
     e.preventDefault();
     if (okLong) { okLong = false; return; }
     const el = document.activeElement;
