@@ -14,8 +14,8 @@ c = json.load(open(p))
 c['server'] = {'url': 'https://win-69ffbub31ra.tail0f14c6.ts.net:8443/', 'androidScheme': 'https'}
 json.dump(c, open(p, 'w'), indent=2)
 PY
-(cd android && ./gradlew -q assembleDebug)
-APK=android/app/build/outputs/apk/debug/app-debug.apk
+(cd android && ./gradlew -q assembleRelease)
+APK=android/app/build/outputs/apk/release/app-release.apk
 ls -la "$APK"
 if [ -n "$1" ]; then
   adb connect "$1"

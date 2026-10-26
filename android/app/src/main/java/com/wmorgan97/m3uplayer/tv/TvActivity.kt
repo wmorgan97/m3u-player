@@ -2,23 +2,25 @@ package com.wmorgan97.m3uplayer.tv
 
 import android.content.Intent
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.focus.focusProperties
-import androidx.compose.foundation.focusGroup
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
@@ -26,6 +28,8 @@ import androidx.tv.material3.*
 import com.wmorgan97.m3uplayer.MainActivity
 import com.wmorgan97.m3uplayer.NativePlayerPlugin
 import com.wmorgan97.m3uplayer.PlayerActivity
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -33,28 +37,24 @@ import org.json.JSONObject
 /** Where you are in the TV app. Back goes one step up this stack. */
 sealed class Screen {
     data object Home : Screen()
-    data object Live : Screen()
+    data class Live(val group: String? = null) : Screen()
     data class Vods(val kind: String) : Screen()          // movies | series
     data object Search : Screen()
     data class Details(val vod: Vod) : Screen()
     data class Grid(val kind: String, val id: String, val title: String) : Screen()
+    data class Guide(val group: String? = null) : Screen()
+    data object Settings : Screen()
 }
-
-val Bg = Color(0xFF0E1014)
-val Surface1 = Color(0xFF181B22)
-val Surface2 = Color(0xFF232733)
-val Accent = Color(0xFF5B93FF)
-val Muted = Color(0xFF9AA3B5)
 
 /**
  * The Shield's own app (Compose for TV): a side menu that opens out on focus, and native screens for Home,
- * Live TV, Movies, Series, search and details. Playback is PlayerActivity (ExoPlayer). The web app is still
- * there for setup and settings.
+ * Live TV, the guide, Movies, Series, search, details and settings. Playback is PlayerActivity (ExoPlayer).
  */
 class TvActivity : ComponentActivity() {
     private val stack = mutableStateListOf<Screen>(Screen.Home)
-    var refresh by mutableIntStateOf(0)
-    private var focusTick by mutableIntStateOf(0)   // bumped to pull the highlight back into the page   // bumped when history / progress change (after watching)
+    var refresh by mutableIntStateOf(0)                 // bumped when history / progress change (after watching)
+    private var focusTick by mutableIntStateOf(0)       // bumped to pull the highlight back into the page
+    private var zap by mutableStateOf("")               // digits typed on the remote
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,8 +65,9 @@ class TvActivity : ComponentActivity() {
         }
         Repo.cachedSync()
         lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
+        lifecycleScope.launch { runCatching { Repo.liveChannels() } }   // channels ready before Live TV is opened
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme(primary = Accent, background = Bg, surface = Surface1, onSurface = Color.White, onBackground = Color.White)) {
+            MaterialTheme(colorScheme = darkColorScheme(primary = Tv.accent, background = Tv.bg, surface = Tv.surface, onSurface = Tv.text, onBackground = Tv.text, surfaceVariant = Tv.surface2)) {
                 App()
             }
         }
@@ -75,6 +76,18 @@ class TvActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (Repo.hasKey()) lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
+        testHook(intent)
+    }
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); testHook(intent) }
+
+    /** Test hook (adb only): `--es testStream <url> --ei testIndex n` plays a pretend channel list on that stream, so the
+     *  player's channel panel, last-channel entry and zapping can be checked without touching the provider. */
+    private fun testHook(i: Intent?) {
+        val url = i?.getStringExtra("testStream") ?: return
+        i.removeExtra("testStream")
+        val names = listOf("Sky Sports Main Event", "Sky Sports F1", "BBC One HD", "BBC Two HD", "ITV1 HD", "Channel 4 HD", "Channel 5 HD", "Sky Atlantic")
+        val chans = names.mapIndexed { k, n -> Channel(n, "$url#$k", "Test", "", "", "", k + 1) }
+        lifecycleScope.launch { delay(800); playLive(chans, i.getIntExtra("testIndex", 2)) }
     }
 
     fun go(s: Screen) { stack += s }
@@ -84,6 +97,23 @@ class TvActivity : ComponentActivity() {
     }
     fun root(s: Screen) { stack.clear(); stack += s }
     fun openWeb(hash: String = "") { startActivity(Intent(this, MainActivity::class.java).putExtra("hash", hash)) }
+
+    // Number keys zap to a channel, as on any TV: the digits show for a moment, then it tunes.
+    private var zapJob: Job? = null
+    override fun dispatchKeyEvent(e: KeyEvent): Boolean {
+        if (e.action == KeyEvent.ACTION_DOWN && e.keyCode in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 && stack.last() !is Screen.Search && stack.last() !is Screen.Settings) {
+            zap = (zap + (e.keyCode - KeyEvent.KEYCODE_0)).takeLast(4)
+            zapJob?.cancel()
+            zapJob = lifecycleScope.launch {
+                delay(1300)
+                val n = zap.toIntOrNull(); zap = ""
+                val c = n?.let { Repo.channelByNumber(it) }
+                if (c != null) playLive(Repo.live?.channels ?: listOf(c), Repo.live?.channels?.indexOf(c)?.coerceAtLeast(0) ?: 0)
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(e)
+    }
 
     @Composable
     private fun App() {
@@ -99,33 +129,31 @@ class TvActivity : ComponentActivity() {
         val saveable = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
         NavigationDrawer(
             drawerState = drawer,
-            drawerContent = { state ->
-                // Moving into the menu lands on the section you're in.
-                val current = remember { FocusRequester() }
-                Column(Modifier.fillMaxHeight().background(Color(0xFF0A0C10)).padding(horizontal = 12.dp, vertical = 24.dp).focusProperties { enter = { current } }.focusGroup(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            drawerContent = {
+                val current = remember { FocusRequester() }   // moving into the menu lands on the section you're in
+                Column(Modifier.fillMaxHeight().background(Tv.rail).padding(horizontal = 12.dp, vertical = 24.dp).focusProperties { enter = { current } }.focusGroup(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     val item: @Composable (String, ImageVector, Boolean, () -> Unit) -> Unit = { label, icon, selected, onClick ->
-                        // Choosing a section closes the menu and moves into the page (see LaunchedEffect(screen) below).
                         NavigationDrawerItem(selected = selected, onClick = { drawer.setValue(DrawerValue.Closed); onClick(); if (selected) focusTick++ }, leadingContent = { Icon(icon, null) },
-                            modifier = if (selected) Modifier.focusRequester(current) else Modifier) { Text(label, fontSize = 17.sp) }
+                            modifier = if (selected) Modifier.focusRequester(current) else Modifier) { Text(label, fontSize = Tv.body, fontWeight = FontWeight.Medium) }
                     }
                     item("Search", Icons.Default.Search, screen is Screen.Search) { root(Screen.Search) }
                     item("Home", Icons.Default.Home, section is Screen.Home && screen !is Screen.Search) { root(Screen.Home) }
-                    item("Live TV", Icons.Default.LiveTv, section is Screen.Live) { root(Screen.Live) }
+                    item("Live TV", Icons.Default.LiveTv, section is Screen.Live) { root(Screen.Live()) }
+                    item("TV Guide", Icons.Default.CalendarViewWeek, section is Screen.Guide) { root(Screen.Guide()) }
                     item("Movies", Icons.Default.Movie, (section as? Screen.Vods)?.kind == "movies") { root(Screen.Vods("movies")) }
                     item("Series", Icons.Default.VideoLibrary, (section as? Screen.Vods)?.kind == "series") { root(Screen.Vods("series")) }
-                    item("TV Guide", Icons.Default.CalendarViewWeek, false) { openWeb("#/tvguide") }
                     Spacer(Modifier.weight(1f))
-                    item("Settings", Icons.Default.Settings, false) { openWeb("#/settings") }
+                    item("Settings", Icons.Default.Settings, section is Screen.Settings) { root(Screen.Settings) }
                 }
             },
         ) {
-            Box(Modifier.fillMaxSize().background(Bg).focusRequester(contentFocus).onFocusChanged { contentHasFocus = it.hasFocus }) {
+            Box(Modifier.fillMaxSize().background(Tv.bg).focusRequester(contentFocus).onFocusChanged { contentHasFocus = it.hasFocus }) {
                 // Each page starts with the remote on its content (not the menu): retried while its rows load in.
                 val fromBack = focusTick > 0
                 LaunchedEffect(screen, focusTick) {
                     repeat(20) {
-                        kotlinx.coroutines.delay(150)
+                        delay(150)
                         if (drawer.currentValue == DrawerValue.Open && !fromBack) return@LaunchedEffect
                         if (contentHasFocus) return@LaunchedEffect
                         if (Nav.restoreKey != null && it < 6) return@repeat   // the card it came from takes the highlight itself
@@ -136,13 +164,22 @@ class TvActivity : ComponentActivity() {
                 key(screen) { saveable.SaveableStateProvider(screen.toString()) {
                     when (screen) {
                         Screen.Home -> HomeScreen(this@TvActivity)
-                        Screen.Live -> LiveScreen(this@TvActivity)
+                        is Screen.Live -> LiveScreen(this@TvActivity, screen.group)
                         is Screen.Vods -> VodScreen(this@TvActivity, screen.kind)
                         Screen.Search -> SearchScreen(this@TvActivity)
                         is Screen.Details -> DetailsScreen(this@TvActivity, screen.vod)
                         is Screen.Grid -> GridScreen(this@TvActivity, screen.kind, screen.id, screen.title)
+                        is Screen.Guide -> GuideScreen(this@TvActivity, screen.group)
+                        Screen.Settings -> SettingsScreen(this@TvActivity)
                     }
                 } }
+                if (screen !is Screen.Details) Clock(Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = Tv.margin))
+                if (zap.isNotEmpty()) Box(Modifier.align(Alignment.TopEnd).padding(top = 70.dp, end = Tv.margin).background(Tv.surface, RoundedCornerShape(10.dp)).padding(horizontal = 18.dp, vertical = 8.dp)) {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(zap, fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Tv.text)
+                        Text(Repo.channelByNumber(zap.toIntOrNull() ?: -1)?.name ?: "No channel $zap", fontSize = Tv.label, color = Tv.muted)
+                    }
+                }
             }
         }
     }
@@ -151,6 +188,25 @@ class TvActivity : ComponentActivity() {
 
     private var playList: List<JSONObject> = emptyList()   // the items up/down / next episode step through
     private var playIndex = 0
+    private var lastLive: Pair<List<JSONObject>, Int>? = null   // for "last channel"
+
+    /** Live TV: plays one of a list of channels, preferring the 4K copy when that setting is on. */
+    fun playLive(chans: List<Channel>, index: Int) {
+        var list = chans; var i = index
+        if (Repo.fourKFirst) {
+            val c = chans[index]
+            if (quality(c.name, c.group) != "4K") {
+                val base = normName(c.name)
+                Repo.live?.channels?.firstOrNull { quality(it.name, it.group) == "4K" && normName(it.name) == base }?.let { uhd -> list = chans.toMutableList().also { it[index] = uhd }; i = index }
+            }
+        }
+        val items = list.map { channelItem(it) }
+        val prev = lastLive?.let { (l, k) -> l.getOrNull(k) }
+        if (prev != null && prev.optString("url") != items[i].optString("url")) items[i].put("last", prev.optString("title"))
+        Repo.lastChannelUrl = list[i].url
+        play(items, i)
+        lastLive = items to i
+    }
 
     /** Plays one of a list (channels of a group, episodes of a season) in the TV player. */
     fun play(items: List<JSONObject>, index: Int) {
@@ -177,8 +233,10 @@ class TvActivity : ComponentActivity() {
 
     private fun onPlayerEvent(e: JSONObject) {
         when (e.optString("type")) {
-            "step" -> { val n = playIndex + e.optInt("dir"); if (n in playList.indices) play(playList, n) }
-            "jump" -> { val n = e.optInt("index"); if (n in playList.indices && n != playIndex) play(playList, n) }
+            "step" -> { val n = playIndex + e.optInt("dir"); if (n in playList.indices) { if (playList[n].optBoolean("live")) lastLive = playList to playIndex; play(playList, n) } }
+            "jump" -> { val n = e.optInt("index"); if (n in playList.indices && n != playIndex) { if (playList[n].optBoolean("live")) lastLive = playList to playIndex; play(playList, n) } }
+            "last" -> lastLive?.let { (l, k) -> val cur = playList to playIndex; lastLive = cur; play(l, k) }
+            "zap" -> { val c = Repo.channelByNumber(e.optInt("num")); if (c != null) playLive(Repo.live?.channels ?: listOf(c), Repo.live?.channels?.indexOf(c)?.coerceAtLeast(0) ?: 0) }
             "progress", "closed" -> {
                 val cur = playList.getOrNull(playIndex) ?: return
                 if (!cur.optBoolean("live")) lifecycleScope.launch {

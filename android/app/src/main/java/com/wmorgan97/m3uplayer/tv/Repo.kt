@@ -6,6 +6,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -64,6 +65,15 @@ object Repo {
     fun hasKey() = key.isNotEmpty()
     fun saveConfig(key: String, server: String?) { prefs.edit().putString("key", key).apply { if (!server.isNullOrBlank()) putString("server", server) }.apply() }
 
+    // Settings kept on the TV (the rest live in the web app's Settings)
+    var englishOnly: Boolean get() = prefs.getBoolean("englishOnly", true); set(v) { prefs.edit().putBoolean("englishOnly", v).apply(); overviews.clear(); groupCache.clear() }
+    var fourKFirst: Boolean get() = prefs.getBoolean("fourK", true); set(v) = prefs.edit().putBoolean("fourK", v).apply()
+    var lastChannelUrl: String? get() = prefs.getString("lastChannel", null); set(v) = prefs.edit().putString("lastChannel", v).apply()
+    /** Bumped whenever favourites / cached data change, so screens showing them redraw. */
+    private val versionState = androidx.compose.runtime.mutableIntStateOf(0)
+    var version: Int get() = versionState.intValue; set(v) { versionState.intValue = v }
+    fun clearCache() { app.filesDir.listFiles()?.forEach { if (it.name.startsWith("vod-") || it.name.startsWith("live-")) it.delete() }; overviews.clear(); groupCache.clear(); live = null; version++ }
+
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
     fun api(path: String) = "$server/$path?key=${enc(key)}"
     fun img(url: String?, w: Int = 300): String? = if (url.isNullOrBlank()) null else if (!url.startsWith("http")) url else "$server/img?key=${enc(key)}&w=$w&u=${enc(url)}"
@@ -85,6 +95,7 @@ object Repo {
     suspend fun sync(): JSONObject = withContext(Dispatchers.IO) {
         val d = JSONObject(http(api("sync")))
         syncData = d
+        version++
         File(app.filesDir, "sync.json").writeText(d.toString())
         d
     }
@@ -122,6 +133,18 @@ object Repo {
         val f = syncData.optJSONArray("favorites") ?: return emptyList()
         return (0 until f.length()).mapNotNull { f.optJSONObject(it) }
     }
+    fun isFavourite(url: String) = favorites().any { it.optString("url") == url }
+    /** Adds or removes a channel from the favourites every device shares. */
+    suspend fun toggleFavourite(c: Channel) = withContext(Dispatchers.IO) {
+        val list = favorites().filter { it.optString("url") != c.url }.toMutableList()
+        if (!isFavourite(c.url)) list += JSONObject().put("kind", "live").put("name", c.name).put("url", c.url).put("logo", c.logo).put("group", c.group).put("tvgId", c.tvgId)
+        val body = JSONObject().put("favorites", JSONArray(list)).put("favAt", System.currentTimeMillis())
+        syncData.put("favorites", JSONArray(list)).put("favAt", System.currentTimeMillis())
+        try { syncData = JSONObject(http(api("sync"), body.toString())) } catch (_: Exception) {}
+        version++
+    }
+    fun channelByUrl(url: String): Channel? = live?.channels?.firstOrNull { it.url == url }
+    fun channelByNumber(n: Int): Channel? = live?.channels?.firstOrNull { it.num == n }
 
     /** Saves where you are in a film / episode (every device sees it). */
     suspend fun saveProgress(url: String, t: Double, d: Double, item: JSONObject, hide: Boolean = false) = withContext(Dispatchers.IO) {
@@ -234,8 +257,16 @@ object Repo {
         return (if (i >= 0 && l[i].end > t) l[i] else null) to l.getOrNull(i + 1)
     }
 
-    /** Asks the server for the guide of these channels (the ones on screen), 3-hourly at most per channel. */
-    suspend fun loadGuide(channels: List<Channel>): Boolean = withContext(Dispatchers.IO) {
+    /** Bumped when guide data arrives: anything showing what's on redraws. */
+    private val guideState = androidx.compose.runtime.mutableIntStateOf(0)
+    val guideVersion: Int get() = guideState.intValue
+    private val guideScope = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+
+    /** Asks the server for the guide of these channels (the ones on screen), 3-hourly at most per channel. Runs in its
+     *  own scope, so moving to another group never cancels a download half-way (which left channels marked as asked). */
+    fun requestGuide(channels: List<Channel>) { guideScope.launch { if (loadGuide(channels)) guideState.intValue++ } }
+
+    suspend fun loadGuide(channels: List<Channel>): Boolean = withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
         val urls = live?.epgUrls ?: return@withContext false
         if (urls.isEmpty()) return@withContext false
         val now = System.currentTimeMillis()
@@ -280,7 +311,7 @@ object Repo {
     private fun tidy(list: List<Vod>): List<Vod> {
         val by = LinkedHashMap<String, Vod>()
         for (v in list) {
-            if (!isEnglishGroup(v.group)) continue
+            if (englishOnly && !isEnglishGroup(v.group)) continue
             val k = v.title.lowercase().replace("&", "and").replace(Regex("[^a-z0-9]+"), "") + "|" + (v.year ?: "")
             val prev = by[k]
             by[k] = if (prev == null) v else if (qualityScore(v.name, v.group) > qualityScore(prev.name, prev.group)) v.copy(copies = prev.copies + 1, backdrop = v.backdrop.ifEmpty { prev.backdrop }) else prev.copy(copies = prev.copies + 1)
@@ -289,11 +320,19 @@ object Repo {
     }
     private fun arr(o: JSONObject, k: String, kind: String, cats: Map<String, String>) = o.optJSONArray(k)?.let { a -> (0 until a.length()).map { toVod(kind, a.getJSONObject(it), cats) } } ?: emptyList()
 
+    private val refreshing = ConcurrentHashMap<String, Boolean>()
+    /** The saved copy at once (instant first screen); a fresh one is fetched behind it when it's over 3 hours old. */
     suspend fun overview(kind: String): Overview? = withContext(Dispatchers.IO) {
         overviews[kind]?.let { return@withContext it }
         val x = xtream() ?: return@withContext null
         val file = File(app.filesDir, "vod-$kind.json")
-        val text = try { http(api("vod"), vodBody(x, kind).toString(), 120_000).also { file.writeText(it) } } catch (e: Exception) { if (file.exists()) file.readText() else throw e }
+        val fresh = file.exists() && System.currentTimeMillis() - file.lastModified() < 3 * 3600_000L
+        val text = if (file.exists()) {
+            if (!fresh && refreshing.putIfAbsent(kind, true) == null) kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+                try { file.writeText(http(api("vod"), vodBody(x, kind).toString(), 120_000)); overviews.remove(kind); groupCache.clear(); version++ } catch (_: Exception) {} finally { refreshing.remove(kind) }
+            }
+            file.readText()
+        } else http(api("vod"), vodBody(x, kind).toString(), 120_000).also { file.writeText(it) }
         val d = JSONObject(text)
         val ca = d.optJSONArray("cats") ?: JSONArray()
         val cats = (0 until ca.length()).associate { ca.getJSONObject(it).optString("category_id") to ca.getJSONObject(it).optString("category_name") }

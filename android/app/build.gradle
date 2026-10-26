@@ -19,9 +19,12 @@ android {
         }
     }
     buildFeatures { compose true }
-    kotlinOptions { jvmTarget = '21'; freeCompilerArgs += ['-opt-in=androidx.tv.material3.ExperimentalTvMaterial3Api', '-opt-in=androidx.compose.ui.ExperimentalComposeUiApi'] }
+    kotlinOptions { jvmTarget = '21'; freeCompilerArgs += ['-opt-in=androidx.tv.material3.ExperimentalTvMaterial3Api', '-opt-in=androidx.compose.ui.ExperimentalComposeUiApi', '-opt-in=androidx.compose.foundation.ExperimentalFoundationApi'] }
     buildTypes {
         release {
+            // Installed on the Shield from this machine (no store): signed with the debug key so adb can install it.
+            // Release matters for feel: debug Compose runs its layout and draw with checks on and no optimisation.
+            signingConfig signingConfigs.debug
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

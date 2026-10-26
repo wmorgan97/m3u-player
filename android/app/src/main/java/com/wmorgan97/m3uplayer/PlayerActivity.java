@@ -70,6 +70,7 @@ public class PlayerActivity extends AppCompatActivity {
 
     private View overlay, nextPanel;
     private android.widget.ListView channelList;   // live TV: TiviMate-style channel panel on OK
+    private TextView clockLabel;
     private TextView title, subtitle, badge, liveTag, elapsed, total, hud, status, nextCount, nextName;
     private SeekBar seek;
     private ProgressBar spinner;
@@ -84,6 +85,11 @@ public class PlayerActivity extends AppCompatActivity {
     private final Runnable tick = new Runnable() { public void run() { onTick(); ui.postDelayed(this, 1000); } };
     private final Runnable commitSeek = () -> { if (pendingSeek >= 0 && player != null) { player.seekTo(pendingSeek); pendingSeek = -1; } };
     private final Runnable hudOff = () -> hud.setVisibility(View.GONE);
+    private String zapDigits = "";
+    private final Runnable zapRun = () -> {
+        try { NativePlayerPlugin.emit(new JSONObject().put("type", "zap").put("num", Integer.parseInt(zapDigits))); } catch (Exception ignored) {}
+        zapDigits = "";
+    };
     private final Runnable countdownRun = new Runnable() { public void run() {
         countdown--;
         nextCount.setText("Next episode in " + countdown);
@@ -99,6 +105,8 @@ public class PlayerActivity extends AppCompatActivity {
         player = new ExoPlayer.Builder(this, new DefaultRenderersFactory(this).setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER))
             .setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000).build();
         playerView.setPlayer(player);
+        // Captions off until asked for (broadcast captions were coming on by themselves); the subtitles button turns them on.
+        player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build());
         player.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int state) {
                 spinner.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
@@ -186,6 +194,7 @@ public class PlayerActivity extends AppCompatActivity {
 
     private void onTick() {
         if (player == null) return;
+        clockLabel.setText(new java.text.SimpleDateFormat("HH:mm", Locale.UK).format(new java.util.Date()));
         long t = Math.max(0, player.getCurrentPosition()), d = Math.max(0, player.getDuration());
         if (!live && d > 0) {
             if (pendingSeek < 0 && !seek.isPressed()) { seek.setMax((int) (d / 1000)); seek.setProgress((int) (t / 1000)); elapsed.setText(clock(t / 1000)); }
@@ -218,6 +227,12 @@ public class PlayerActivity extends AppCompatActivity {
         if (e.getAction() != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(e);
         boolean shown = overlay.getVisibility() == View.VISIBLE;
         if (shown) bumpHide();
+        if (live && k >= KeyEvent.KEYCODE_0 && k <= KeyEvent.KEYCODE_9) {
+            zapDigits = (zapDigits + (k - KeyEvent.KEYCODE_0)); if (zapDigits.length() > 4) zapDigits = zapDigits.substring(zapDigits.length() - 4);
+            showHud(zapDigits);
+            ui.removeCallbacks(zapRun); ui.postDelayed(zapRun, 1300);
+            return true;
+        }
         switch (k) {
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE: case KeyEvent.KEYCODE_MEDIA_PLAY: case KeyEvent.KEYCODE_MEDIA_PAUSE:
                 togglePlay(); return true;
@@ -289,6 +304,7 @@ public class PlayerActivity extends AppCompatActivity {
     private void showOverlay(boolean keep) {
         boolean was = overlay.getVisibility() == View.VISIBLE;
         overlay.setVisibility(View.VISIBLE);
+        if (playerView.getSubtitleView() != null) playerView.getSubtitleView().setBottomPaddingFraction(0.22f);   // subtitles sit above the controls
         if (!was) playBtn.requestFocus();
         ui.removeCallbacks(hideRun);
         if (!keep) ui.postDelayed(hideRun, 5000);
@@ -297,7 +313,10 @@ public class PlayerActivity extends AppCompatActivity {
         ui.removeCallbacks(hideRun);
         if (player != null && player.isPlaying()) ui.postDelayed(hideRun, 5000);
     }
-    private void hideOverlay() { overlay.setVisibility(View.GONE); ui.removeCallbacks(hideRun); }
+    private void hideOverlay() {
+        overlay.setVisibility(View.GONE); ui.removeCallbacks(hideRun);
+        if (playerView.getSubtitleView() != null) playerView.getSubtitleView().setBottomPaddingFraction(0.08f);
+    }
 
     // ---------- next episode ----------
 
@@ -366,12 +385,15 @@ public class PlayerActivity extends AppCompatActivity {
     /** Live TV: the channels down the left, the one playing picked; up/down browse, OK switches, Back / right close. */
     private void openChannels() {
         JSArray l = list();
-        final int cur = Math.max(0, item.optInt("current") - item.optInt("listStart"));
+        final String last = item.optString("last", "");
+        final int off = last.isEmpty() ? 0 : 1;   // "Last channel" sits above the list
+        final int cur = Math.max(0, item.optInt("current") - item.optInt("listStart")) + off;
         List<String> rows = new ArrayList<>();
+        if (!last.isEmpty()) rows.add("↩  Last channel\n" + last);
         for (int i = 0; i < l.length(); i++) {
             JSONObject r = l.optJSONObject(i);
             String t = r == null ? "" : r.optString("t"), d = r == null ? "" : r.optString("s");
-            rows.add((i == cur ? "▶  " : "") + (d.isEmpty() ? t : t + "\n" + d));
+            rows.add((i + off == cur ? "▶  " : "") + (d.isEmpty() ? t : t + "\n" + d));
         }
         channelList.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, rows) {
             @Override public View getView(int pos, View convert, ViewGroup parent) {
@@ -583,6 +605,9 @@ public class PlayerActivity extends AppCompatActivity {
         titleRow.addView(liveTag, ll);
         title = text(26, Color.WHITE, true);
         titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        clockLabel = text(16, 0xCCFFFFFF, false);
+        clockLabel.setPadding(dp(16), 0, 0, 0);
+        titleRow.addView(clockLabel);
         top.addView(titleRow);
         subtitle = text(16, 0xCCFFFFFF, false);
         top.addView(subtitle);
@@ -689,8 +714,12 @@ public class PlayerActivity extends AppCompatActivity {
         channelList.setVisibility(View.GONE);
         channelList.setOnItemClickListener((parent, v, pos, id) -> {
             closeChannels();
-            if (pos == item.optInt("current") - item.optInt("listStart")) return;
-            try { NativePlayerPlugin.emit(new JSONObject().put("type", "jump").put("index", item.optInt("listStart") + pos)); } catch (Exception ignored) {}
+            int off = item.optString("last", "").isEmpty() ? 0 : 1;
+            try {
+                if (pos < off) { NativePlayerPlugin.emit(new JSONObject().put("type", "last")); return; }
+                if (pos - off == item.optInt("current") - item.optInt("listStart")) return;
+                NativePlayerPlugin.emit(new JSONObject().put("type", "jump").put("index", item.optInt("listStart") + pos - off));
+            } catch (Exception ignored) {}
         });
         root.addView(channelList, new FrameLayout.LayoutParams(dp(420), -1, Gravity.START));
 
