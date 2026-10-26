@@ -837,7 +837,8 @@ html.tv body.rail-open .mainnav a > span:last-child { opacity: 1; }
 html.tv .mainnav a.active { color: #fff; background: var(--surface-2); }
 html.tv .mainnav a:focus { color: #0e1014; background: #fff; outline: none; }
 html.tv .actions { order: 2; margin-top: auto; display: flex; flex-direction: column; gap: 4px; }
-html.tv .actions .icon-btn { width: 100%; height: 48px; justify-content: flex-start; gap: 18px; padding: 0 18px; border-radius: 12px; color: var(--muted); }
+html.tv .actions .icon-btn { display: flex; align-items: center; width: 100%; height: 48px; margin: 0; justify-content: flex-start; gap: 18px; padding: 0 18px; border-radius: 12px; color: var(--muted); }
+html.tv .actions .icon-btn .ico, html.tv .actions .icon-btn svg { width: 24px; height: 24px; flex: none; }
 html.tv .actions .icon-btn::after { content: attr(aria-label); font-size: 17px; font-weight: 600; white-space: nowrap; opacity: 0; }
 html.tv body.rail-open .actions .icon-btn::after { opacity: 1; }
 html.tv .actions .icon-btn:focus { background: #fff; color: #0e1014; outline: none; }
@@ -852,8 +853,14 @@ html.tv .list:not(.grid):not(.discover) { grid-template-columns: minmax(0, 1fr) 
 
 /* What the remote is on: unmistakable, never clipped (drawn inside the edge). */
 html.tv :focus { outline: 3px solid var(--accent); outline-offset: -3px; }
-html.tv .hero-slide:focus, html.tv .cw:focus, html.tv .svc:focus { outline: 4px solid #fff; outline-offset: -4px; }
-html.tv .scard:focus { outline: none; }
-html.tv .scard:focus .poster-img { outline: 4px solid #fff; outline-offset: -4px; transform: scale(1.04); }
+html.tv .hero-slide:focus, html.tv .svc:focus { outline: 4px solid #fff; outline-offset: -4px; }
+/* Posters and Continue watching: a white frame drawn over the picture (an outline would sit under the image), and a
+   slight lift, the usual Android TV "this one" cue. */
+html.tv .scard:focus, html.tv .cw:focus { outline: none; }
+html.tv .poster-img, html.tv .cw-img { position: relative; }
+html.tv .scard:focus .poster-img, html.tv .cw:focus .cw-img { transform: scale(1.05); z-index: 2; }
+html.tv .scard:focus .poster-img::after, html.tv .cw:focus .cw-img::after { content: ''; position: absolute; inset: 0; z-index: 5; border: 4px solid #fff; border-radius: inherit; pointer-events: none; }
+html.tv .scard:focus .poster-name, html.tv .cw:focus .cw-name { color: #fff; }
+html.tv .cw .cw-x { display: none; }   /* hold OK to remove instead */
 html.tv .row:focus, html.tv .hs-row:focus { background: var(--surface-2); outline: 3px solid #fff; }
 html.tv .btn:focus, html.tv .chip:focus, html.tv .menu-item:focus { background: #fff !important; color: #0e1014 !important; outline: none; }
