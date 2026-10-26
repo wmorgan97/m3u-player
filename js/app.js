@@ -4805,7 +4805,7 @@ if (isTV) {
       // Results draw in twice (this device's matches, then the server's): keep landing on the first one until they settle.
       const into = (n = 0) => {
         const row = $('#ts-results:not([hidden]) .hs-row'), lost = document.activeElement === document.body || !document.activeElement;
-        if (row && lost) { row.focus(); document.body.classList.add('rail-open'); }
+        if (row && lost) focusEl(row);
         if (n < 40 && (lost || n < 25)) setTimeout(() => into(n + 1), 120);
       };
       return into();
