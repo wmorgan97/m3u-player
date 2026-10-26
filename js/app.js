@@ -118,6 +118,8 @@ async function init() {
   if (resumeChannel) ensureGuide([resumeChannel]);
   syncNow();
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); } });
+  // The saved guides load once the first screen is up and the remote is responsive, not during it.
+  await new Promise(r => setTimeout(r, 600));
   await Promise.all(state.playlists.map(p => loadGuide(p.id)));
   rerenderRows();
   backgroundRefresh();
@@ -2779,7 +2781,10 @@ async function loadGuide(pid) {
   if (guides.has(pid)) return guides.get(pid);
   try {
     const data = await db.get(`epg:${pid}`);
-    if (data) guides.set(pid, new Guide(data));
+    if (data) {
+      guides.set(pid, new Guide(data));
+      if (!data.trimmed) persistGuide(pid);   // an old, untrimmed copy: save it trimmed once
+    }
   } catch {}
   return guides.get(pid);
 }
@@ -2868,7 +2873,22 @@ async function flushGuide() {
   }
 }
 
-const persistGuide = debounce(pid => { const g = guides.get(pid); if (g) db.set(`epg:${pid}`, { programmes: g.programmes, names: g.names, at: g.at }).catch(() => {}); }, 2000);
+// The saved copy only keeps what's on soon: from 3 hours ago to 30 hours ahead, descriptions for the next 6 hours.
+// The server sends a channel's full guide again whenever it's shown, so nothing is lost; without this the copy
+// only ever grew (38 MB for a 1,767-channel guide) and was decoded on every start, stalling the first screen.
+function trimGuide(programmes, now = Date.now()) {
+  const out = {};
+  for (const [k, list] of Object.entries(programmes)) {
+    const keep = [];
+    for (const p of list) {
+      if (p[1] < now - 3 * HOUR || p[0] > now + 30 * HOUR) continue;
+      keep.push(p[0] > now + 6 * HOUR && p[3] ? [p[0], p[1], p[2], '', ...p.slice(4)] : p);
+    }
+    if (keep.length) out[k] = keep;
+  }
+  return out;
+}
+const persistGuide = debounce(pid => { const g = guides.get(pid); if (g) db.set(`epg:${pid}`, { programmes: trimGuide(g.programmes), names: g.names, at: g.at, trimmed: 1 }).catch(() => {}); }, 2000);
 const refreshAfterGuide = debounce(pid => {
   if (location.hash === `#/guide/${pid}`) {
     // Only rebuild the grid while it's still loading, or before you've started using it.
