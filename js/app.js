@@ -1463,8 +1463,20 @@ async function requestVod(p, tab, { group, q }) {
     toast(err.message);
   } finally {
     vodPending.delete(tag);
-    if (state.current === p && state.tab === tab) applyFilter({ keep: true });
-    homeRefresh();
+    if (state.current === p && state.tab === tab) {
+      // On the Movies/Series front page only the row that just loaded is redrawn. Redrawing the whole page here
+      // rebuilt ~1000 posters every time a row loaded while scrolling: the stutter on iPhone.
+      const shelf = q === undefined && discoverMode() && [...document.querySelectorAll('#list > .shelf[data-group]')].find(el => el.dataset.group === group);
+      if (shelf) {
+        const g = entry.groupList.find(x => x.name === group) || (entry.moreGroups || []).find(x => x.name === group);
+        const t = document.createElement('template');
+        t.innerHTML = shelfHtml(groupLabel(group), 'g:' + group, (entry.groups.get(group) || []).slice(0, 24), { total: g?.count || 0, group }).trim();
+        const fresh = t.content.firstElementChild;
+        shelf.replaceWith(fresh);
+        addRowArrows(fresh);
+      } else if (!discoverMode() || q !== undefined) applyFilter({ keep: true });
+    }
+    if (!state.current) homeRefresh();
   }
 }
 
