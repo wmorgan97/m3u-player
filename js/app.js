@@ -4715,7 +4715,7 @@ if (isTV) {
     el.focus({ preventScroll: true });
     if (inRail(el)) {
       document.body.classList.add('rail-open');
-      if (el.closest('#ts-results')) { el.scrollIntoView({ block: 'nearest' }); lastSeen = { text: (el.textContent || '').trim().slice(0, 60), results: true }; }
+      if (el.closest('#ts-results')) { el.scrollIntoView({ block: 'nearest' }); lastSeen = { text: (el.textContent || '').trim().slice(0, 60), results: true, idx: [...$('#ts-results').querySelectorAll('.hs-row')].indexOf(el) }; }
       return;
     }
     document.body.classList.remove('rail-open');
@@ -4827,7 +4827,10 @@ if (isTV) {
     if (!box.hidden && (act?.closest('#topsearch') || ((!act || act === document.body) && lastSeen?.results))) {
       const rows = [...box.querySelectorAll('.hs-row')].filter(visible);
       let i = rows.indexOf(act);
-      if (i < 0 && lastSeen?.results) i = rows.findIndex(r => (r.textContent || '').trim().slice(0, 60) === lastSeen.text);
+      if (i < 0 && lastSeen?.results) {   // same place in the list if it still holds the same title, else that title
+        const same = r => r && (r.textContent || '').trim().slice(0, 60) === lastSeen.text;
+        i = same(rows[lastSeen.idx]) ? lastSeen.idx : rows.findIndex(same);
+      }
       if (e.key === 'ArrowDown') { const n = rows[act?.id === 'tq' ? 0 : i + 1]; if (n) focusEl(n); }
       else if (e.key === 'ArrowUp') { if (i > 0) focusEl(rows[i - 1]); else { lastSeen = null; $('#tq').focus(); } }
       else if (e.key === 'ArrowRight') { box.hidden = true; lastSeen = null; leaveRail(); }
