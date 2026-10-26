@@ -4803,6 +4803,7 @@ if (isTV) {
     }
     if (!/^Arrow(Up|Down|Left|Right)$/.test(e.key)) return;
     if (typing && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;   // moving the cursor in a search box
+    if (e.target.closest('#topsearch') && !$('#ts-results').hidden && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return;   // the search drop-down moves itself
     e.preventDefault(); e.stopImmediatePropagation();
     const t0 = performance.now();
     move(e.key);
