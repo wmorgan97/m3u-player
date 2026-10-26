@@ -13,7 +13,7 @@
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { readBody } from './sync.js';
-import { trending, onTmdbChange } from './tmdb.js';
+import { trending, collections, onTmdbChange } from './tmdb.js';
 
 const PROXY_KEY = process.env.PROXY_KEY || '';
 const TTL = 12 * 3600_000;
@@ -78,30 +78,47 @@ async function build(server, user, pass, kind) {
   const fresh = uniq(byAdded.filter(it => art(it) && yearOf(it) >= nowYear - 1), 120);
   // Trending this week (TMDB), matched to titles this provider actually has: title + year, else title alone
   // when the years agree or the listing has none. Each match carries TMDB's backdrop, plot and rated votes.
-  const trend = [];
+  let trend = [];
+  const tmdbGroups = new Map(), tmdbCats = [];
   try {
-    const tm = await trending(kind === 'movies' ? 'movie' : 'tv');
-    if (tm.length) {
+    const tkind = kind === 'movies' ? 'movie' : 'tv';
+    const [tm, cols] = await Promise.all([trending(tkind), collections(tkind).catch(() => [])]);
+    if (tm.length || cols.length) {
       const bare = it => titleKey(it).replace(/(19|20)\d\d$/, '');
+      // The same title often sits in several language groups: prefer the English copy (the app shows
+      // English groups by default), so a match isn't hidden by the language filter.
+      const catName = new Map(cats.map(c => [String(c.category_id), String(c.category_name || '')]));
+      const FOREIGN = /^(?:4K[- ]?)?(?:AR|FR|DE|IT|ES|TR|PT|BR|NL|PL|RU|IN|HI|KO|KR|JP|CN|GR|SE|SW|NO|DK|FI|RO|HU|CZ|AL|EX|LAT|LATAM|IR|AF|PK|BD|SO|KU|KUR|VN|TH|PH|ID|MY|IL|UA|BG|RS|HR|BA|MK|SI|SK|LT|LV|EE|AM|AZ|GE|ARM|PERSIAN|FARSI|ARABIC|FRENCH|GERMAN|SPANISH|ITALIAN|TURKISH|HINDI|PUNJABI|TAMIL|TELUGU|URDU|MALAYALAM|BANGLA|POLISH|DUTCH|RUSSIAN|PORTUGUESE|GREEK|ALBANIAN|SOMALI|KURDISH|AFRICA|AFR|ASIA|KOREAN|JAPANESE|CHINESE|THAI|VIET)\b|[^\x00-\x7F\u00C0-\u024F\u1D00-\u1DBF\u2070-\u209F]/i;
+      const foreign = it => FOREIGN.test(catName.get(String(it.category_id)) || '');
       const byKey = new Map();
       for (const it of items) {
         if (!art(it)) continue;
-        for (const k of [titleKey(it), bare(it)]) if (k && !byKey.has(k)) byKey.set(k, it);
+        for (const k of [titleKey(it), bare(it)]) if (k && (!byKey.has(k) || (foreign(byKey.get(k)) && !foreign(it)))) byKey.set(k, it);
       }
-      const seen = new Set();
-      for (const t of tm) {
-        const n = t.title.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '');
-        let it = byKey.get(n + t.year) || byKey.get(n);
-        if (it && yearOf(it) && t.year && Math.abs(yearOf(it) - t.year) > 1) it = null;
-        if (!it || seen.has(it)) continue;
-        seen.add(it);
-        trend.push({ ...it, ...(t.vote ? { rating: t.vote } : {}), tm: { tid: t.tid, backdrop: t.backdrop, overview: t.overview, votes: t.votes, genres: t.genres, year: t.year } });
+      // A TMDB list -> the provider's copies of those titles, in TMDB's order, with TMDB's extras.
+      const match = list => {
+        const seen = new Set(), out = [];
+        for (const t of list) {
+          const n = t.title.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '');
+          let it = byKey.get(n + t.year) || byKey.get(n);
+          if (it && yearOf(it) && t.year && Math.abs(yearOf(it) - t.year) > 1) it = null;
+          if (!it || seen.has(it)) continue;
+          seen.add(it);
+          out.push({ ...it, ...(t.vote ? { rating: t.vote } : {}), tm: { tid: t.tid, backdrop: t.backdrop, overview: t.overview, votes: t.votes, genres: t.genres, year: t.year } });
+        }
+        return out;
+      };
+      trend = match(tm);
+      for (const c of cols) {
+        const got = match(c.results);
+        if (got.length >= 6) { tmdbGroups.set(c.id, got); tmdbCats.push({ id: c.id, name: c.name, count: got.length }); }
       }
     }
-  } catch (e) { console.log(`[tmdb] trending: ${e.message}`); }
+  } catch (e) { console.log(`[tmdb] lists: ${e.message}`); }
   const names = items.map(it => (it.name || '').toLowerCase());
-  console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${trend.length} trending matched, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-  return { items, names, byCat, overview: JSON.stringify({ at: Date.now(), v: 3, cats: catList, recent, top, fresh, trending: trend, total: items.length }) };
+  console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${trend.length} trending matched, ${tmdbCats.length} TMDB groups (${tmdbCats.map(c => `${c.name} ${c.count}`).join(', ')})`);
+  console.log(`[vod] ${kind}: built, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  return { items, names, byCat, tmdbGroups, overview: JSON.stringify({ at: Date.now(), v: 4, cats: catList, recent, top, fresh, trending: trend, tmdbCats, total: items.length }) };
 }
 
 export async function handleCatalog(req, res, url, send, allowed) {
@@ -128,6 +145,8 @@ export async function handleCatalog(req, res, url, send, allowed) {
     const t = String(q.q).toLowerCase().slice(0, 80), out = [];
     for (let i = 0; i < data.names.length && out.length < 400; i++) if (data.names[i].includes(t)) out.push(data.items[i]);
     body = JSON.stringify({ items: out });
+  } else if (q.tmdb) {
+    body = JSON.stringify({ items: data.tmdbGroups?.get(String(q.tmdb)) || [] });
   } else if (q.group !== undefined && q.group !== null) {
     body = JSON.stringify({ items: data.byCat.get(String(q.group)) || [] });
   } else body = data.overview;

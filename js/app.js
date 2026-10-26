@@ -108,6 +108,7 @@ async function init() {
   }
   await detectServerProxy();
   detectedServer = true;
+  serverKnown();
   tmdbStatus();
   if (!state.current) homeRefresh();   // Home was drawn before the server was known: now fill Movies & Series
   // The first screen rendered before we knew the server was there: ask for its guide data now.
@@ -730,7 +731,8 @@ async function homeSearch(q) {
 // ---------- Home hub ----------
 // Everything worth watching in one place: a featured carousel, what's on live now, new and top-rated
 // movies and series, and "Because you watched…". Catalogues load in the background and Home refreshes.
-let detectedServer = false;
+let detectedServer = false, serverKnown = null;
+const serverReady = new Promise(r => { serverKnown = r; });
 const homeRefresh = debounce(() => { if (!state.current && (!location.hash || location.hash === '#/')) { const y = scrollY; showHome(); scrollTo(0, y); } }, 500);
 function homeHub(pl) {
   const hub = { hero: [], onNow: [], shelves: { movies: [], series: [] }, vodLink: {} };
@@ -825,7 +827,7 @@ function servicesHtml(list) {
 // Mouse users: arrow buttons on side-scrolling rows (phones and trackpads just swipe).
 function addRowArrows(root) {
   if (!matchMedia('(hover: hover) and (pointer: fine)').matches) return;
-  root.querySelectorAll('.home-shelf, .cont-row').forEach(row => {
+  root.querySelectorAll('.home-shelf, .cont-row, .discover .shelf-row').forEach(row => {
     if (row.parentNode.classList.contains('rowwrap')) return;
     const w = document.createElement('div');
     w.className = 'rowwrap';
@@ -1047,6 +1049,34 @@ const isSeparator = c => !c || SEP_RE.test(c.name || '') || !/[a-z0-9]/i.test(c.
 const prettyGroup = name => String(name || '')
   .replace(/[ᴬ-ᵪ⁰-₟ᵃ-ᶿⱽ²³¹]+/g, '')
   .replace(/\s*[|/►▶]\s*/g, ' · ').replace(/\s+/g, ' ').replace(/\s·\s*$/, '').trim();
+// Movie/series group names for people: "EN - IMDB TOP 250" -> "IMDb Top 250", "NETFLIX MOVIES ᴵⱽ ˢ" -> "Netflix Movies".
+const KEEP_UPPER = new Set(['4K', 'UHD', 'HD', 'FHD', 'HDR', 'HEVC', 'TV', 'UK', 'US', 'USA', 'DC', 'BBC', 'ITV', 'HBO', 'AMC', 'FX', 'MTV', 'CNN', 'ESPN', 'NBA', 'NFL', 'NHL', 'MLB', 'UFC', 'WWE', 'PPV', 'VIP', '3D', 'AI', 'II', 'III', 'IV', 'VOD', '24/7']);
+const TMDB_LABELS = new Map();   // 'tmdb:genre:28' -> 'Action'
+function groupLabel(name) {
+  if (String(name).startsWith('tmdb:')) return TMDB_LABELS.get(name) || 'TMDB';
+  let s = prettyGroup(name).replace(/^(?:EN|ENG|UK|US|USA)\s*[-:·]\s*/i, '').replace(/\s*\((?:multi[- ]?subs?)\)/i, ' · Multi-subs');
+  if (s === s.toUpperCase() || s === s.toLowerCase()) {
+    s = s.toLowerCase().replace(/[a-z0-9+&'’]+/g, w => {
+      const u = w.toUpperCase();
+      if (KEEP_UPPER.has(u)) return u;
+      if (u === 'IMDB') return 'IMDb';
+      if (/^(and|of|the|in|on|for|a|to|by)$/.test(w)) return w;
+      return w[0].toUpperCase() + w.slice(1);
+    }).replace(/^./, c => c.toUpperCase()).replace(/\bDisney\+/i, 'Disney+').replace(/\bApple\+/i, 'Apple TV+');
+  }
+  return s.trim() || UNGROUPED;
+}
+// Library sections for the movie/series sidebar.
+const GROUP_SECTIONS = [
+  ['Featured', /new release|latest|recent|trend|popular|top ?\d|top movies|top series|imdb|box ?office|cinema|theat|award|oscar|best/i],
+  ['Streaming services', /netflix|disney|apple|amazon|prime|\bhbo|\bmax\b|paramount|hulu|peacock|viaplay|\bsky\b|now ?tv|britbox|starz|showtime|crave|stan\b|binge|mubi|shudder|discovery\+|^(4k-)?(nf|amz|d\+|a\+)\b/i],
+  ['Kids & family', /kid|family|child|cartoon|anima|pixar|dreamworks|junior/i],
+  ['Genres', /action|comedy|horror|thriller|drama|sci-?fi|science|fantasy|romance|romantic|documentar|docu|western|\bwar\b|crime|mystery|music|stand-?up|christmas|holiday|marvel|\bdc\b|sport|adventure|biograph|history|faith/i],
+  ['4K & quality', /4k|uhd|hdr|dolby|hevc|bluray|blu-ray|remux|3d/i],
+];
+const SECTION_ORDER = ['Discover', 'Genres', 'Featured', 'Streaming services', 'Kids & family', '4K & quality', 'More'];
+const sectionOf = name => { if (/^tmdb:\w+:list:/.test(name)) return 'Discover'; if (/^tmdb:\w+:genre:/.test(name)) return 'Genres'; for (const [label, re] of GROUP_SECTIONS) if (re.test(name)) return label; return 'More'; };
+
 // Country/region of a group: a "UK|" style prefix, or a flag emoji; '' when neither.
 const FLAG_CC = { '🇬🇧': 'UK', '🇺🇸': 'US', '🇨🇦': 'CA', '🇦🇺': 'AU', '🇮🇪': 'IE', '🇳🇿': 'NZ', '🇪🇸': 'ES', '🇫🇷': 'FR', '🇩🇪': 'DE', '🇮🇹': 'IT', '🇵🇹': 'PT', '🇧🇷': 'BR', '🇮🇳': 'IN' };
 function regionOf(name) {
@@ -1125,6 +1155,7 @@ function showPlaylist(p) {
   pendingQuery = '';
   $('#q').oninput = debounce(e => { state.query = e.target.value.trim().toLowerCase(); requestAnimationFrame(() => { applyFilter(); toListTop(); }); }, 120);
   $('#chips').onclick = async e => {
+    if (e.target.closest('[data-more-groups]')) { state.allGroups = !state.allGroups; renderChips(); return; }
     const b = e.target.closest('.chip');
     if (!b) return;
     if (b.dataset.locked && !await unlock()) return;
@@ -1240,11 +1271,29 @@ function catalogueEntry(p, tab, d) {
   const ok = new Set(cats.map(c => c.category_name || ''));
   const keep = list => (en ? list.filter(it => ok.has(it.group || '')) : list);
   const sorted = en ? [...cats].sort((a, b) => groupRank(a.category_name) - groupRank(b.category_name) || b.count - a.count) : cats;
-  return { cats: all, keep, total: en ? cats.reduce((n, c) => n + c.count, 0) : d.total || 0,
+  // With TMDB: its lists and genres lead; of the provider's own groups only the best stay in view (one per
+  // name, big enough, not technical duplicates); the rest wait under "All provider groups".
+  const provider = sorted.map(c => ({ name: c.category_name || '', count: c.count, id: c.category_id }));
+  const tmdbGroups = (d.tmdbCats || []).map(c => ({ name: `tmdb:${tab === 'series' ? 'tv' : 'mv'}:${c.id}`, count: c.count, label: c.name }));
+  tmdbGroups.forEach(g => TMDB_LABELS.set(g.name, g.label));
+  let shown = provider, more = [];
+  if (tmdbGroups.length) {
+    const seenLabel = new Set(), quality = [];
+    shown = []; 
+    for (const g of [...provider].sort((a, b) => b.count - a.count)) {
+      const sec = sectionOf(g.name), label = groupLabel(g.name).toLowerCase().replace(/[^a-z0-9+]+/g, '');
+      const cream = g.count >= 25 && !seenLabel.has(label) && !/hevc|dolby|multi-?sub|remux|3d|stand-?up|docu|xxx|adult|test/i.test(g.name)
+        && (sec === 'Featured' || sec === 'Streaming services' || sec === 'Kids & family' || (sec === '4K & quality' && quality.length < 2 && quality.push(g)));
+      if (cream) { seenLabel.add(label); shown.push(g); } else more.push(g);
+    }
+    shown = provider.filter(g => shown.includes(g));   // back in the sidebar's ranked order
+    more = provider.filter(g => more.includes(g));
+  }
+  return { cats: all, keep, moreGroups: more, total: en ? cats.reduce((n, c) => n + c.count, 0) : d.total || 0,
     recent: keep(toItems(p, tab, all, d.recent || [])), top: keep(toItems(p, tab, all, d.top || [])), fresh: keep(toItems(p, tab, all, d.fresh || [])),
     // Trending keeps TMDB's order (toItems sorts by group), and each title its TMDB extras.
     trending: keep((d.trending || []).map(raw => { const it = toItems(p, tab, all, [raw])[0]; return it && { ...it, tm: raw.tm }; }).filter(Boolean)), groups: new Map(), searches: new Map(),
-    groupList: sorted.map(c => ({ name: c.category_name || '', count: c.count, id: c.category_id })) };
+    groupList: [...tmdbGroups, ...shown] };
 }
 async function requestVod(p, tab, { group, q }) {
   const key = vodKey(p, tab), entry = vodCache.get(key);
@@ -1253,9 +1302,12 @@ async function requestVod(p, tab, { group, q }) {
   vodPending.add(tag);
   try {
     const cat = q === undefined ? entry.cats.find(c => (c.category_name || '') === group) : null;
-    const d = await vodApi(p, tab, q !== undefined ? { q } : { group: cat?.category_id ?? '' });
-    const items = toItems(p, tab, entry.cats, d.items || []);
-    if (q !== undefined) entry.searches.set(q, entry.keep ? entry.keep(items) : items); else entry.groups.set(group, items);
+    const isTm = q === undefined && String(group).startsWith('tmdb:');
+    const d = await vodApi(p, tab, q !== undefined ? { q } : isTm ? { tmdb: group.split(':').slice(2).join(':') } : { group: cat?.category_id ?? '' });
+    // TMDB groups keep TMDB's order (most popular first) and their extras; toItems would sort by provider group.
+    const items = isTm ? (d.items || []).map(raw => { const it = toItems(p, tab, entry.cats, [raw])[0]; return it && { ...it, tm: raw.tm }; }).filter(Boolean)
+      : toItems(p, tab, entry.cats, d.items || []);
+    if (q !== undefined) entry.searches.set(q, entry.keep ? entry.keep(items) : items); else entry.groups.set(group, isTm && entry.keep ? entry.keep(items) : items);
   } catch (err) {
     toast(err.message);
   } finally {
@@ -1268,9 +1320,13 @@ async function requestVod(p, tab, { group, q }) {
 async function loadVod(p, tab, { force = false } = {}) {
   const key = vodKey(p, tab);
   if (vodCache.has(key) && !force) return;
+  // Opened before the server answered (a reload on Movies/Series): wait for it, rather than pulling the
+  // provider's whole 50-70MB catalogue straight to this device.
+  if (!detectedServer) await Promise.race([serverReady, new Promise(r => setTimeout(r, 10000))]);
+  if (vodCache.has(key) && !force) return;
   if (!force) {
     const cached = await db.get(`vod:${key}`);
-    if (cached && Date.now() - cached.at < DAY && (canSync() ? cached.overview?.v === 3 : cached.items)) {
+    if (cached && Date.now() - cached.at < DAY && (canSync() ? cached.overview?.v === 4 : cached.items)) {
       vodCache.set(key, cached.overview ? catalogueEntry(p, tab, cached.overview) : cached.items);
       if (state.current === p && state.tab === tab) refreshPlaylistView();
       return;
@@ -1302,7 +1358,7 @@ function renderChips() {
   const p = state.current;
   const entry = p.kind === 'xtream' && state.tab !== 'live' ? vodCache.get(vodKey(p, state.tab)) : null;
   const groups = (entry && !Array.isArray(entry) ? entry.groupList : cachedGroups(p, currentItems(), p.kind === 'xtream' ? 'x:' + state.tab : state.tab)).filter(g => !p.hiddenGroups?.includes(g.name));
-  if (state.group !== null && !groups.some(g => g.name === state.group)) state.group = null;
+  if (state.group !== null && !groups.some(g => g.name === state.group) && !entry?.moreGroups?.some(g => g.name === state.group)) state.group = null;
   const locked = g => !p.virtual && p.lockedGroups?.includes(g) && !state.unlocked;
   const visibleCount = entry && !Array.isArray(entry) ? entry.total : groups.filter(g => !locked(g.name)).reduce((n, g) => n + g.count, 0);
   const chip = (label, n, active, attr, lock) =>
@@ -1311,9 +1367,22 @@ function renderChips() {
   const pinned = new Set(p.homeGroups || []);
   if (pinned.size) groups.sort((a, b) => pinned.has(b.name) - pinned.has(a.name));   // stable: starred groups first, then your order
   $('#chips').hidden = !showGroups;
-  $('#chips').innerHTML = chip('All', visibleCount, state.group === null, 'data-all') +
-    (showGroups ? groups.map(g => chip(g.name ? prettyGroup(g.name) : UNGROUPED, g.count, state.group === g.name,
-      `data-group="${esc(g.name)}" ${locked(g.name) ? 'data-locked="1"' : ''}`, locked(g.name))).join('') : '');
+  const groupChip = g => chip(g.name ? (entry ? groupLabel(g.name) : prettyGroup(g.name)) : UNGROUPED, g.count, state.group === g.name,
+    `data-group="${esc(g.name)}" ${locked(g.name) ? 'data-locked="1"' : ''}`, locked(g.name));
+  let body = '';
+  if (showGroups && entry && !Array.isArray(entry) && !pinned.size) {
+    // Movies & series: grouped into sections (Featured, Streaming services, Kids & family, Genres…).
+    const order = SECTION_ORDER, by = new Map(order.map(k => [k, []]));
+    for (const g of groups) by.get(sectionOf(g.name)).push(g);
+    const tm = groups.some(g => g.name.startsWith('tmdb:'));
+    body = order.filter(k => by.get(k).length).map(k => `<div class="chip-sec">${esc(k === 'Genres' && tm ? 'Genres' : k)}${k === 'Discover' ? '<span>TMDB</span>' : ''}</div>${by.get(k).map(groupChip).join('')}`).join('');
+    const more = (entry.moreGroups || []).filter(g => !p.hiddenGroups?.includes(g.name));
+    if (more.length) {
+      body += `<button class="chip chip-more" data-more-groups>${state.allGroups ? 'Hide' : 'All'} provider groups<span>${more.length}</span></button>`;
+      if (state.allGroups || more.some(g => g.name === state.group)) body += more.map(groupChip).join('');
+    }
+  } else if (showGroups) body = groups.map(groupChip).join('');
+  $('#chips').innerHTML = chip(entry ? `All ${state.tab === 'series' ? 'series' : 'movies'}` : 'All', visibleCount, state.group === null, 'data-all') + body;
   const active = $('#chips .chip.active'), bar = $('#chips');
   if (active && bar) {   // bring the selected group into view inside the chip row / sidebar, never scroll the page
     if (bar.scrollWidth > bar.clientWidth) bar.scrollLeft = active.offsetLeft - bar.clientWidth / 2 + active.offsetWidth / 2;
@@ -1351,29 +1420,34 @@ function renderDiscover() {
   shelfObserver?.disconnect();
   const hidden = new Set(p.hiddenGroups || []);
   const groups = entry.groupList.filter(g => !hidden.has(g.name));
-  const hero = (entry.top || []).find(it => it.logo) || entry.recent.find(it => it.logo) || entry.recent[0];
   const what = tab === 'movies' ? 'movies' : 'series';
   list.className = 'list discover';
   view.classList.add('vod');
-  const groupTiles = groups.map(g => `<li class="gtile" data-see="${esc(g.name)}" style="--hue:${hueOf(g.name)}"><b>${esc(prettyGroup(g.name) || UNGROUPED)}</b><span>${g.count.toLocaleString()}</span></li>`).join('');
+  // Featured: TMDB's trending titles with backdrops when connected, else the most popular.
+  const art = l => (l || []).filter(it => it.logo);
+  const heroItems = (entry.trending?.some(it => it.tm?.backdrop)
+    ? entry.trending.filter(it => it.tm?.backdrop).slice(0, 6).map(it => ({ ...it, heroLabel: `#${entry.trending.indexOf(it) + 1} trending this week` }))
+    : art(entry.top).slice(0, 6));
+  shelfItems.set('hero', heroItems);
+  const fresh = art(entry.fresh).length >= 8 ? art(entry.fresh) : art(entry.recent);
+  // Streaming services and section shelves, in the sidebar's order.
+  const svc = [];
+  for (const [name, re, c1, c2] of SERVICES) { const g = groups.find(g => re.test(g.name) && !/kids|anime/i.test(g.name)); if (g && !svc.some(s => s.group === g.name)) svc.push({ name, c1, c2, group: g.name, count: g.count }); }
+  const order = SECTION_ORDER;
+  // Shelves: TMDB lists and genres, then Featured, Kids… (streaming groups are the tiles above, not rows).
+  const ordered = [...groups].filter(g => sectionOf(g.name) !== 'Streaming services' || !svc.some(s => s.group === g.name))
+    .sort((a, b) => order.indexOf(sectionOf(a.name)) - order.indexOf(sectionOf(b.name)));
+  const top10 = entry.trending?.length >= 5 ? entry.trending.slice(0, 10) : [];
+  shelfItems.set('t10', top10);
   list.innerHTML = `
-    ${hero ? `<li class="hero" data-shelf="hero" data-k="0" style="--hue:${hueOf(hero.name)}">
-      ${hero.logo ? `<img class="hero-bg" src="${esc(hero.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
-      <div class="hero-body">
-        ${hero.logo ? `<span class="poster-img hero-poster"><img src="${esc(hero.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>` : ''}
-        <div class="hero-text">
-          <span class="muted small-caps">New in ${what}</span>
-          <div class="hero-title">${esc(hero.name)}</div>
-          <div class="muted">${[hero.year, hero.rating ? `★ ${hero.rating.toFixed(1)}` : '', prettyGroup(hero.group)].filter(Boolean).map(esc).join(' · ')}</div>
-          <div class="hero-actions"><button class="btn primary" data-hero="play">${icon('play')} ${tab === 'movies' ? 'Play' : 'Episodes'}</button><button class="btn" data-hero="info">Details</button></div>
-        </div>
-      </div></li>` : ''}
-    ${entry.top?.length ? shelfHtml('Trending now', 'top', entry.top.slice(0, 40)) : ''}
-    ${shelfHtml('New releases', 'recent', entry.recent.slice(0, 40))}
-    <li class="shelf"><div class="shelf-head"><h3>Browse by group</h3><span class="muted">${groups.length} groups</span></div><ul class="shelf-row gtiles">${groupTiles}</ul></li>
-    ${groups.slice(0, 40).map(g => shelfHtml(prettyGroup(g.name) || UNGROUPED, 'g:' + g.name, (entry.groups.get(g.name) || []).slice(0, 24), { total: g.count, group: g.name, pending: !entry.groups.has(g.name) })).join('')}
-    ${groups.length > 40 ? `<li class="muted center shelf-note">${(groups.length - 40).toLocaleString()} more groups: use the chips above.</li>` : ''}`;
-  shelfItems.set('hero', [hero].filter(Boolean));
+    ${heroItems.length ? `<li class="disc-hero">${heroHtml(heroItems)}</li>` : ''}
+    ${top10.length ? `<li class="shelf"><div class="shelf-head"><h3>Top 10 ${what} this week</h3><span class="muted">from TMDB</span></div><ul class="shelf-row top10">${top10.map((it, k) => `<li class="scard t10" data-shelf="t10" data-k="${k}"><span class="t10-n">${k + 1}</span>${cardHtml(it, 't10', k).replace(/^<li[^>]*>|<\/li>$/g, '')}</li>`).join('')}</ul></li>` : ''}
+    ${entry.top?.length ? shelfHtml('Popular now', 'top', art(entry.top).slice(0, 40)) : ''}
+    ${fresh.length ? shelfHtml(art(entry.fresh).length >= 8 ? 'New releases' : 'Recently added', 'recent', fresh.slice(0, 40)) : ''}
+    ${svc.length >= 2 ? `<li class="shelf"><div class="shelf-head"><h3>Streaming services</h3></div><ul class="shelf-row services">${svc.map(s => `<li class="svc" data-see="${esc(s.group)}" style="--c1:${s.c1};--c2:${s.c2}"><b>${esc(s.name)}</b><span>${s.count.toLocaleString()} ${what}</span></li>`).join('')}</ul></li>` : ''}
+    ${ordered.slice(0, 40).map(g => shelfHtml(groupLabel(g.name), 'g:' + g.name, (entry.groups.get(g.name) || []).slice(0, 24), { total: g.count, group: g.name, pending: !entry.groups.has(g.name) })).join('')}
+    ${groups.length > 40 ? `<li class="muted center shelf-note">${(groups.length - 40).toLocaleString()} more groups in the sidebar.</li>` : ''}`;
+  requestAnimationFrame(() => addRowArrows(list));
   // Load a group's titles when its shelf scrolls near the viewport.
   shelfObserver = new IntersectionObserver(es => {
     for (const e of es) {
@@ -1404,7 +1478,8 @@ function applyFilter({ keep = false } = {}) {
   const items = currentItems();
   state.filtered = items.filter(c => {
     const g = c.group || '';
-    if (state.group === null ? !visibleGroup(p, g) : g !== state.group) return false;
+    // A TMDB group (genre / list) holds titles from many provider groups: its own fetch already filtered them.
+    if (state.group === null ? !visibleGroup(p, g) : g !== state.group && !String(state.group).startsWith('tmdb:')) return false;
     if (!q) return true;
     if (/^\d+$/.test(q) && c.num) return String(c.num).startsWith(q);   // typing a number zaps by channel number
     return c.name.toLowerCase().includes(q) || g.toLowerCase().includes(q);
@@ -1428,7 +1503,7 @@ function applyFilter({ keep = false } = {}) {
   state.rendered = 0;
   // A movie/series group (or a search) is a library page: title, count and sorting above the posters.
   if (vodGrid && (state.group !== null || state.query)) {
-    const title = state.query ? `Results for “${esc(state.query)}”` : esc(prettyGroup(state.group) || UNGROUPED);
+    const title = state.query ? `Results for “${esc(state.query)}”` : esc(state.group ? groupLabel(state.group) : UNGROUPED);
     list.insertAdjacentHTML('beforeend', `<li class="lib-head"><div><h2>${title}</h2><span class="muted">${plural(state.filtered.length, state.tab === 'series' ? 'series' : 'movie').replace('seriess', 'series')}</span></div>
       <label class="lib-sort">Sort<select data-sort-vod>${[['default', 'Featured'], ['new', 'Newest added'], ['rating', 'Top rated'], ['year', 'Release year'], ['az', 'A–Z']].map(([v, l]) => `<option value="${v}" ${state.vodSort === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label></li>`);
     list.onchange = e => { if (e.target.matches('[data-sort-vod]')) { state.vodSort = e.target.value; applyFilter(); } };
@@ -1852,7 +1927,9 @@ function posterHtml(it, i) {
 function onListClick(e) {
   const see = e.target.closest('[data-see]');
   if (see) { state.group = see.dataset.see; updateTopbar(); renderChips(); applyFilter(); toListTop(); return; }
-  const card = e.target.closest('.scard, .hero');
+  const hp = e.target.closest('[data-hero-play]');
+  if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playChannel([it], 0); }
+  const card = e.target.closest('.scard, .hero, .hero-slide');
   if (card) {
     const it = shelfItems.get(card.dataset.shelf)?.[+card.dataset.k];
     if (!it) return;

@@ -74,6 +74,37 @@ export async function trending(kind) {
   return items;
 }
 
+// Curated lists for the library sidebar: TMDB's own lists plus one per genre (most popular, well voted).
+const COLLECTIONS = {
+  movie: [['list:popular', 'Popular', '/movie/popular', {}], ['list:top', 'Top rated', '/movie/top_rated', {}], ['list:now', 'In cinemas', '/movie/now_playing', {}],
+    ...[[28, 'Action'], [12, 'Adventure'], [16, 'Animation'], [35, 'Comedy'], [80, 'Crime'], [99, 'Documentary'], [18, 'Drama'], [10751, 'Family'], [14, 'Fantasy'],
+      [36, 'History'], [27, 'Horror'], [10402, 'Music'], [9648, 'Mystery'], [10749, 'Romance'], [878, 'Sci-Fi'], [53, 'Thriller'], [10752, 'War'], [37, 'Western']]
+      .map(([id, name]) => [`genre:${id}`, name, '/discover/movie', { with_genres: id, sort_by: 'popularity.desc', 'vote_count.gte': 150 }])],
+  tv: [['list:popular', 'Popular', '/tv/popular', {}], ['list:top', 'Top rated', '/tv/top_rated', {}], ['list:now', 'On the air', '/tv/on_the_air', {}],
+    ...[[10759, 'Action & Adventure'], [16, 'Animation'], [35, 'Comedy'], [80, 'Crime'], [99, 'Documentary'], [18, 'Drama'], [10751, 'Family'], [10762, 'Kids'],
+      [9648, 'Mystery'], [10764, 'Reality'], [10765, 'Sci-Fi & Fantasy'], [10768, 'War & Politics'], [37, 'Western']]
+      .map(([id, name]) => [`genre:${id}`, name, '/discover/tv', { with_genres: id, sort_by: 'popularity.desc', 'vote_count.gte': 80 }])],
+};
+const PAGES = 8;   // 160 titles per list before matching to the catalogue
+export async function collections(kind) {
+  if (!(await loadKey())) return [];
+  const ck = `col:${kind}`, hit = lists.get(ck);
+  if (hit && Date.now() - hit.at < 4 * LIST_TTL) return hit.items;
+  const g = await genres(kind);
+  const jobs = COLLECTIONS[kind].flatMap(([id, , path, params]) => Array.from({ length: PAGES }, (_, i) => ({ id, path, params: { ...params, page: i + 1, language: 'en-US' } })));
+  const pages = new Map();
+  for (let i = 0; i < jobs.length; i += 10) {   // ten at a time: well inside TMDB's rate limit
+    await Promise.all(jobs.slice(i, i + 10).map(async j => {
+      const r = await call(j.path, j.params).catch(() => ({ results: [] }));
+      if (!pages.has(j.id)) pages.set(j.id, []);
+      pages.get(j.id)[j.params.page - 1] = r.results || [];
+    }));
+  }
+  const items = COLLECTIONS[kind].map(([id, name]) => ({ id, name, results: (pages.get(id) || []).flat().filter(Boolean).map(r => slim(r, kind, g)) }));
+  if (items.some(c => c.results.length)) lists.set(ck, { at: Date.now(), items });
+  return items;
+}
+
 // Details for one title, by search (title + year). Cached on disk so repeat views cost nothing.
 let cache = null, saveTimer = 0;
 async function loadCache() {
