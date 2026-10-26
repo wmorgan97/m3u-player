@@ -30,7 +30,7 @@ const slimSeries = s => ({ series_id: s.series_id, name: str(s.name, 200), cover
   rating: rate(s.rating), releaseDate: str(s.releaseDate || s.release_date, 12), plot: str(s.plot, 240), genre: str(s.genre, 60), added: num(s.last_modified) });
 // "4K-TOP - Dune (2021)" and "TOP - Dune (2021)" are the same title for a shelf: keep the first.
 // Every leading tag goes ("4K-D+ - ", "EN | ", "TOP - "), and country tags like "(US)".
-const titleKey = it => String(it.name || '').replace(/^(?:[A-Za-z0-9+&]{1,5}(?:-[A-Za-z0-9+&]{1,5})*\s*[-|:]\s+)+/, '')
+const titleKey = it => String(it.name || '').replace(/^(?:[A-Za-z0-9+&]{1,5}(?:-[A-Za-z0-9+&]{1,5})*\s*[-|:]\s+)+/, '').replace(/^\d{1,3}\.\s+(?=\D)/, '')
   .replace(/\((?:[A-Z]{2}(?:\/[A-Z]{2})?)\)/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 const yearIn = it => Number(String(it.year || '').match(/(19|20)\d\d/)?.[0]) || Number((String(it.name || '').match(/(?:^|\D)((?:19|20)\d\d)(?!.*(?:19|20)\d\d)/) || [])[1]) || 0;
 const bareKey = it => titleKey(it).replace(/(19|20)\d\d$/, '');

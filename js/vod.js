@@ -50,7 +50,8 @@ export function vodMeta(name) {
 
 // A poster's caption: the clean title without tags, year or country codes ("(US)", "(GB)").
 export function displayTitle(name) {
-  const t = vodMeta(name).title || String(name || '');
+  // also list ranks the provider puts in front ("14. Inception" in an IMDb Top 250 group)
+  const t = (vodMeta(name).title || String(name || '')).replace(/^\d{1,3}\.\s+(?=\D)/, '');
   return t.replace(/\s*\((?:[A-Z]{2}(?:\/[A-Z]{2})?)\)/g, '').replace(/\s*\(\s*\)/g, '').trim() || String(name || '');
 }
 
