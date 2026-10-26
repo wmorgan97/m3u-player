@@ -203,7 +203,7 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
     '-hls_segment_filename', join(dir, `seg%d.${ext}`), join(dir, 'index.m3u8'),
     // VOD: every text subtitle stream is written alongside as WebVTT from the same pass (no second download
     // of the file, no second provider connection). One file per run, merged when served.
-    ...(vod ? subs.flatMap(i => ['-map', `0:s:${i}`, '-c:s', 'webvtt', '-f', 'webvtt', '-y', join(dir, `subs${i}-${fromIdx}.vtt`)]) : []),
+    ...(vod ? subs.flatMap(i => ['-map', `0:s:${i}`, '-c:s', 'webvtt', '-flush_packets', '1', '-f', 'webvtt', '-y', join(dir, `subs${i}-${fromIdx}.vtt`)]) : []),
   ];
 }
 

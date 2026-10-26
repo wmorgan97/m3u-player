@@ -437,10 +437,10 @@ function switchAudioTrack(i) {
 }
 // Subtitles: the server writes the file's text subtitles as WebVTT while it cuts the video; the app polls
 // that file every few seconds and adds new cues to a text track, so they keep pace with playback.
-let subPoll = 0, subTrack = null, subIdx = -1;
+let subPoll = 0, subWait = 0, subTrack = null, subIdx = -1;
 const subCueKeys = new Set();
 function clearSubtitles() {
-  clearInterval(subPoll); subPoll = 0; subIdx = -1;
+  clearInterval(subPoll); clearTimeout(subWait); subPoll = subWait = 0; subIdx = -1;
   if (subTrack) { subTrack.mode = 'disabled'; try { [...subTrack.cues || []].forEach(cue => subTrack.removeCue(cue)); } catch {} }
   subCueKeys.clear();
   if (subTrackEl) { subTrackEl.remove(); subTrackEl = null; }
@@ -478,7 +478,9 @@ function useSubtitles(i) {
   for (const t of video.textTracks) if (t !== subTrack) t.mode = 'disabled';
   toast('Loading subtitles…', { busy: true });
   pullSubtitles(c, i);
-  subPoll = setInterval(() => pullSubtitles(c, i), 5000);
+  subPoll = setInterval(() => pullSubtitles(c, i), 3000);
+  // never leave the spinner up: a quiet stretch of the film simply has no lines yet
+  subWait = setTimeout(() => { if (subIdx === i && !subCueKeys.size) toast('Subtitles on – lines appear as they come'); }, 12000);
 }
 
 function seekVod(t) {
