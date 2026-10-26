@@ -4825,8 +4825,12 @@ if (isTV) {
   if (tq) {
     tq.readOnly = true;
     tq.addEventListener('focus', () => document.body.classList.add('rail-open'));
-    tq.addEventListener('blur', () => { tq.readOnly = true; });
-    tq.addEventListener('keyup', e => { if (e.key === 'Enter' && tq.readOnly) { tq.readOnly = false; tq.blur(); tq.focus(); } });
+    let opening = false;
+    tq.addEventListener('blur', () => { if (!opening) tq.readOnly = true; });
+    tq.addEventListener('keyup', e => {
+      if (e.key !== 'Enter' || !tq.readOnly) return;
+      opening = true; tq.readOnly = false; tq.blur(); tq.focus(); opening = false;   // re-focusing an editable box brings up the keyboard
+    });
   }
   // Back on the remote (MainActivity asks this first): true = handled here, false = leave the app.
   window.__tvBack = () => {
