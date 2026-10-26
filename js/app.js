@@ -4798,7 +4798,12 @@ if (isTV) {
       e.preventDefault(); e.stopImmediatePropagation();
       e.target.blur();
       swallowUp = true;   // this key's release must not open the result it lands on
-      const into = (n = 0) => { const row = $('#ts-results:not([hidden]) .hs-row'); if (row) { row.focus(); document.body.classList.add('rail-open'); } else if (n < 40) setTimeout(() => into(n + 1), 100); };
+      // Results draw in twice (this device's matches, then the server's): keep landing on the first one until they settle.
+      const into = (n = 0) => {
+        const row = $('#ts-results:not([hidden]) .hs-row'), lost = document.activeElement === document.body || !document.activeElement;
+        if (row && lost) { row.focus(); document.body.classList.add('rail-open'); }
+        if (n < 40 && (lost || n < 25)) setTimeout(() => into(n + 1), 120);
+      };
       return into();
     }
     const typing = e.target.matches('input:not([readonly]), textarea, select');
