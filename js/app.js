@@ -4767,6 +4767,9 @@ if (isTV) {
     if (!inRail(document.activeElement)) { enterRail(); return true; }   // Home: Back opens the menu, Back again leaves
     return false;
   };
+  // A menu or details sheet opens with its first option picked.
+  new MutationObserver(() => { if (sheetOpen()) setTimeout(() => { if (!$('#sheet').contains(document.activeElement)) { const f = lines(picks())[0]?.items[0]?.el; if (f) focusEl(f); } }, 60); })
+    .observe($('#sheet'), { attributes: true, attributeFilter: ['hidden'] });
   // A new page starts with its first row picked, so the remote always has somewhere to go.
   addEventListener('hashchange', () => setTimeout(() => { if (!inRail(document.activeElement) && !sheetOpen()) leaveRail(); }, 400));
   setTimeout(() => { if (document.activeElement === document.body) leaveRail(); }, 1500);
