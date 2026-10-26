@@ -4728,7 +4728,7 @@ if (isTV) {
     if (first) focusEl(first);
   };
   const move = dir => {
-    const cur = document.activeElement && document.activeElement !== document.body && visible(document.activeElement) ? document.activeElement : null;
+    let cur = document.activeElement && document.activeElement !== document.body && visible(document.activeElement) ? document.activeElement : null;
     if (inRail(cur)) {
       const rail = railPicks(), i = rail.indexOf(cur);
       if (dir === 'ArrowDown' && i < rail.length - 1) focusEl(rail[i + 1]);
