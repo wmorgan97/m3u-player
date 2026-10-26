@@ -4852,19 +4852,22 @@ if (isTV) {
     el.click();
     if (el.closest('#mainnav')) { lastContent = null; setTimeout(leaveRail, 350); }   // picked a section: into its page
   }, true);
-  // Search in the side menu works like a menu item: moving onto it doesn't pop up the TV keyboard (which would
-  // swallow the remote's arrows); OK opens the keyboard, and leaving it makes it a menu item again.
-  const tq = $('#tq');
-  if (tq) {
-    tq.readOnly = true;
-    tq.addEventListener('focus', () => document.body.classList.add('rail-open'));
-    let opening = false;
-    tq.addEventListener('blur', () => { if (!opening) tq.readOnly = true; });
-    tq.addEventListener('keyup', e => {
-      if (e.key !== 'Enter' || !tq.readOnly) return;
-      opening = true; tq.readOnly = false; tq.blur(); tq.focus(); opening = false;   // re-focusing an editable box brings up the keyboard
-    });
-  }
+  // Text boxes (search, settings, forms) work like any other stop: moving onto one doesn't pop up the TV keyboard
+  // (which would swallow the remote's arrows); OK opens the keyboard, and leaving the box makes it a stop again.
+  const TEXT = 'input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=hidden]):not([type=button]):not([type=submit]), textarea';
+  const locked = new WeakSet();
+  let opening = false;
+  const lockText = el => { if (el?.matches?.(TEXT) && !el.readOnly) { el.readOnly = true; locked.add(el); } };
+  for (const el of document.querySelectorAll(TEXT)) lockText(el);
+  new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1) { lockText(n); n.querySelectorAll?.(TEXT).forEach(lockText); } })
+    .observe(document.body, { childList: true, subtree: true });
+  document.addEventListener('focusout', e => { if (!opening && locked.has(e.target)) e.target.readOnly = true; }, true);
+  document.addEventListener('keyup', e => {
+    const el = e.target;
+    if (e.key !== 'Enter' || !locked.has(el) || !el.readOnly) return;
+    opening = true; el.readOnly = false; el.blur(); el.focus(); opening = false;   // re-focusing an editable box brings up the keyboard
+  });
+  $('#tq')?.addEventListener('focus', () => document.body.classList.add('rail-open'));
   // Back on the remote (MainActivity asks this first): true = handled here, false = leave the app.
   window.__tvBack = () => {
     if (sheetOpen()) { closeSheet(); setTimeout(leaveRail, 30); return true; }
