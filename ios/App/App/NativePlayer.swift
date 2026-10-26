@@ -174,6 +174,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private let slider = UISlider()
     private let spinner = UIActivityIndicatorView(style: .large)
     private let closeButton = UIButton(type: .system)
+    private let rotateButton = UIButton(type: .system)
     private let audioButton = UIButton(type: .system)
     private let subsButton = UIButton(type: .system)
     private let infoButton = UIButton(type: .system)
@@ -202,7 +203,25 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     override var prefersStatusBarHidden: Bool { true }
     override var prefersHomeIndicatorAutoHidden: Bool { true }
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .allButUpsideDown }
+    // Rotate button: forces landscape even with the phone's rotation lock on (like VLC), and back to portrait.
+    private var forcedLandscape = false
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { forcedLandscape ? .landscape : .allButUpsideDown }
+    @objc private func rotateTapped() {
+        forcedLandscape.toggle()
+        if #available(iOS 16.0, *) {
+            let mask: UIInterfaceOrientationMask = forcedLandscape ? .landscapeRight : .portrait
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+            view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
+            if !forcedLandscape {   // back to following the phone (portrait while rotation lock is on)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.setNeedsUpdateOfSupportedInterfaceOrientations() }
+            }
+        } else {
+            UIDevice.current.setValue((forcedLandscape ? UIInterfaceOrientation.landscapeRight : .portrait).rawValue, forKey: "orientation")
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
+        rotateButton.tintColor = forcedLandscape ? UIColor(red: 0.36, green: 0.58, blue: 1, alpha: 1) : .white
+        showOverlay()
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -360,6 +379,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             b.heightAnchor.constraint(equalToConstant: size + 24).isActive = true
         }
         style(closeButton, "xmark")
+        style(rotateButton, UIImage(systemName: "rectangle.landscape.rotate") != nil ? "rectangle.landscape.rotate" : "rotate.right")
+        rotateButton.accessibilityLabel = "Rotate"
+        rotateButton.addTarget(self, action: #selector(rotateTapped), for: .touchUpInside)
         style(audioButton, "speaker.wave.2")
         style(subsButton, "captions.bubble")
         style(infoButton, "info.circle")
@@ -400,7 +422,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         let titles = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
         titles.axis = .vertical
         titles.spacing = 2
-        let top = UIStackView(arrangedSubviews: [titles, UIView(), infoButton, audioButton, subsButton, closeButton])
+        let top = UIStackView(arrangedSubviews: [titles, UIView(), infoButton, audioButton, subsButton, rotateButton, closeButton])
         top.alignment = .center
         top.spacing = 4
         let middle = UIStackView(arrangedSubviews: [prevButton, backButton, playButton, forwardButton, nextButton])
