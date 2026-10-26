@@ -4645,28 +4645,36 @@ if (isTV) {
     const root = !$('#sheet').hidden ? $('#sheet') : document;   // an open sheet keeps the focus inside it
     return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest('.scard, .svc, .hero-slide, .row, .hs-row, .cw') && visible(el));
   };
+  // Instant, and the picked row kept mid-screen: holding an arrow never queues up animations, and the sticky top bar
+  // never covers what's picked.
   const focusEl = el => {
     if (!el.matches('a[href], button, input, select, textarea') && !el.hasAttribute('tabindex')) el.tabIndex = -1;
     el.focus({ preventScroll: true });
-    el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    el.scrollIntoView({ block: el.closest('.topbar') ? 'nearest' : 'center', inline: 'nearest' });
   };
+  let memX = null;   // the column you were in: down/up go to the poster below it, not to a "See all" button off to the side
   const move = dir => {
     const cur = document.activeElement && document.activeElement !== document.body && visible(document.activeElement) ? document.activeElement : null;
     const all = picks();
-    if (!cur) { const first = all.find(el => el.getBoundingClientRect().top >= 0); if (first) focusEl(first); return; }
+    if (!cur) { const first = all.find(el => el.getBoundingClientRect().top >= 60) || all[0]; if (first) focusEl(first); return; }
+    const sideways = dir === 'ArrowRight' || dir === 'ArrowLeft';
     const a = cur.getBoundingClientRect(), ax = a.left + a.width / 2, ay = a.top + a.height / 2;
+    const refX = !sideways && memX != null ? memX : ax;
     let best = null, bestScore = Infinity;
     for (const el of all) {
       if (el === cur || cur.contains(el)) continue;
       const b = el.getBoundingClientRect(), bx = b.left + b.width / 2, by = b.top + b.height / 2;
-      const along = dir === 'ArrowRight' ? b.left - a.right + a.width / 2 : dir === 'ArrowLeft' ? a.left - b.right + a.width / 2 : dir === 'ArrowDown' ? b.top - a.bottom + a.height / 2 : a.top - b.bottom + a.height / 2;
       const ahead = dir === 'ArrowRight' ? bx > ax + 2 : dir === 'ArrowLeft' ? bx < ax - 2 : dir === 'ArrowDown' ? by > ay + 2 : by < ay - 2;
       if (!ahead) continue;
-      const across = dir === 'ArrowRight' || dir === 'ArrowLeft' ? Math.abs(by - ay) : Math.abs(bx - ax);
-      const score = Math.max(0, along) + across * 2.5;
+      const gap = dir === 'ArrowRight' ? b.left - a.right : dir === 'ArrowLeft' ? a.left - b.right : dir === 'ArrowDown' ? b.top - a.bottom : a.top - b.bottom;
+      const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0;
+      const across = sideways ? (overlapY ? 0 : Math.abs(by - ay)) : Math.abs(bx - refX);
+      const score = Math.max(0, gap) + across * (sideways ? 3 : 1.2);
       if (score < bestScore) { bestScore = score; best = el; }
     }
-    if (best) focusEl(best);
+    if (!best) return;
+    focusEl(best);
+    if (sideways || memX == null) { const r = best.getBoundingClientRect(); memX = r.left + r.width / 2; }
   };
   document.addEventListener('keydown', e => {
     const typing = e.target.matches('input, textarea, select');

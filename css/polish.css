@@ -804,8 +804,23 @@ button.cw-x { border: 0; padding: 0; margin: 0; -webkit-appearance: none; appear
 #ctl-live.on::before { background: #ff4a4f; animation: none; }
 #ctl-live:not(.on) { color: rgba(255,255,255,.7); }
 
-/* Android TV (Shield): a clear highlight on whatever the remote has picked. */
+/* ---------- Android TV (Shield) ----------
+   A 10-foot screen driven by a remote: no hover effects, no live blur or shadows (the Shield's WebView repaints them on
+   every move), the page exactly as wide as the TV, and Movies / Series as full-width shelves with the top bar's
+   search only (the shelves are the menu, so no group column or second search box). */
+html.tv, html.tv body { overflow-x: hidden; }
+html.tv *, html.tv *::before, html.tv *::after { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+html.tv .topbar, html.tv .mainnav, html.tv #view .filters { background: var(--bg) !important; }
+html.tv .poster-img, html.tv .cw-img, html.tv .hero-car, html.tv .svc, html.tv .onnow.nc, html.tv .search { box-shadow: none !important; }
+html.tv .hub-sec, html.tv .discover > .shelf { content-visibility: auto; contain-intrinsic-size: auto 340px; }
+html.tv .topsearch { flex: 0 1 230px; }
+html.tv .topsearch kbd, html.tv .topbar h1 { display: none; }
+html.tv #view.pl.vod { grid-template-columns: minmax(0, 1fr); max-width: none; }
+html.tv #view.pl.vod > * { grid-column: 1; }
+html.tv #view.pl.vod .filters { display: none; }
+html.tv #view.pl .filters .search { display: none; }
+/* A clear highlight on whatever the remote has picked. */
 html.tv :focus { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 10px; }
 html.tv .scard:focus { outline: none; }
-html.tv .scard:focus .poster-img { outline: 3px solid #fff; outline-offset: 2px; transform: scale(1.06); transition: transform .12s; }
+html.tv .scard:focus .poster-img { outline: 3px solid #fff; outline-offset: 2px; transform: scale(1.06); }
 html.tv .row:focus, html.tv .hs-row:focus { background: var(--surface-2); }
