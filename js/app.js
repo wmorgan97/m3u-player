@@ -4358,7 +4358,7 @@ function playNative(list, index, c) {
     url: c.url, title: niceName(c), live, start,
     subtitle: now ? `${now[2]} · ends ${fmtTime(now[1])}` : live ? prettyGroup(c.group) || '' : vodLine(c),
     info: now ? now[3] || '' : c.plot || '',
-    headers: headersFromOpts(c.opts), hasPrev: index > 0, hasNext: index < list.length - 1,
+    headers: headersFromOpts(c.opts), hasPrev: index > 0, hasNext: index < list.length - 1, art: c.logo || '',
     ...nativeList(list, index, live),
   }).catch(e => toast(e.message || 'Couldn’t open the player'));
 }
@@ -4390,7 +4390,7 @@ window.__nativePlayer = ev => {
   if (ev.type === 'step') { const i = pl.index + ev.dir; if (i >= 0 && i < pl.list.length) playChannel(pl.list, i); }
   if (ev.type === 'jump' && ev.index >= 0 && ev.index < pl.list.length && ev.index !== pl.index) playChannel(pl.list, ev.index);
   if ((ev.type === 'progress' || ev.type === 'closed') && !isLiveChannel(c) && c.kind !== 'catchup' && ev.d >= 60) writeProgress(c, ev.t, ev.d);
-  if (ev.type === 'ended' && c.kind === 'episode' && pl.index < pl.list.length - 1) playChannel(pl.list, pl.index + 1);
+  // 'ended': the player itself counts down "Next episode in 10" and then asks for the next one (a 'step').
   if (ev.type === 'closed') { state.playing = null; highlightPlaying(); if (!state.current) rerender(); }
   if (ev.type === 'error') report('native-play', `${ev.message}: ${c.name}`, isLiveChannel(c) ? 'live' : c.kind);
 };
