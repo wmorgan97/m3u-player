@@ -62,13 +62,18 @@ public class PlayerActivity extends AppCompatActivity {
     public static PlayerActivity current;
 
     private ExoPlayer player;
+    private Player.Listener listener;
     private PlayerView playerView;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private JSObject item = new JSObject();
     private boolean live, finished, retried;
     private int ticks;
 
-    private View overlay, nextPanel;
+    private View overlay, nextPanel, infoBar;
+    private TextView infoNum, infoName, infoNow, infoTime, infoNext, infoClock;
+    private ProgressBar infoProgress;
+    private long loadAt;   // when the current channel was asked for (for the switch-time log)
+    private final Runnable infoOff = () -> infoBar.setVisibility(View.GONE);
     private android.widget.ListView channelList;   // live TV: TiviMate-style channel panel on OK
     private TextView clockLabel;
     private TextView title, subtitle, badge, liveTag, elapsed, total, hud, status, nextCount, nextName;
@@ -102,12 +107,14 @@ public class PlayerActivity extends AppCompatActivity {
         current = this;
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | WindowManager.LayoutParams.FLAG_FULLSCREEN);
         buildUi();
-        player = new ExoPlayer.Builder(this, new DefaultRenderersFactory(this).setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER))
-            .setSeekBackIncrementMs(10_000).setSeekForwardIncrementMs(10_000).build();
+        player = PlayerHolder.take(this);   // built ahead of time while you browse, so the player screen opens with it ready
         playerView.setPlayer(player);
         // Captions off until asked for (broadcast captions were coming on by themselves); the subtitles button turns them on.
         player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build());
-        player.addListener(new Player.Listener() {
+        player.addListener(listener = new Player.Listener() {
+            @Override public void onRenderedFirstFrame() {
+                if (loadAt > 0) { android.util.Log.i("M3U", "picture in " + (System.currentTimeMillis() - loadAt) + "ms"); loadAt = 0; }
+            }
             @Override public void onPlaybackStateChanged(int state) {
                 spinner.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
                 if (state == Player.STATE_READY) { status.setVisibility(View.GONE); retried = false; }
@@ -127,6 +134,7 @@ public class PlayerActivity extends AppCompatActivity {
     // ---------- stream ----------
 
     public void load(JSObject next) {
+        loadAt = System.currentTimeMillis();
         item = next;
         live = next.optBoolean("live", true);
         finished = false;
@@ -154,19 +162,36 @@ public class PlayerActivity extends AppCompatActivity {
             if (k.equalsIgnoreCase("User-Agent")) agent = v; else headers.put(k, v);
         }
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-            .setUserAgent(agent).setAllowCrossProtocolRedirects(true).setConnectTimeoutMs(15_000).setReadTimeoutMs(20_000)
+            .setUserAgent(agent).setAllowCrossProtocolRedirects(true).setConnectTimeoutMs(8_000).setReadTimeoutMs(15_000)
             .setDefaultRequestProperties(headers);
         String url = next.optString("url");
         MediaItem.Builder media = new MediaItem.Builder().setUri(url);
         if (url.toLowerCase(Locale.ROOT).contains(".m3u8")) media.setMimeType(MimeTypes.APPLICATION_M3U8);
-        player.setMediaSource(new DefaultMediaSourceFactory(http).createMediaSource(media.build()));
+        player.setMediaSource(new DefaultMediaSourceFactory(http, PlayerHolder.extractors()).createMediaSource(media.build()));
         double start = next.optDouble("start", 0);
         if (!live && start > 1) player.seekTo((long) (start * 1000));
         player.prepare();
         player.play();
-        showOverlay();
+        if (live) { hideOverlay(); showBanner(); } else { showOverlay(); }   // live: the channel banner, as on a TV; films: the controls
         justShown = live;
     }
+
+    /** The channel banner (TiviMate-style): number, name, what's on with a progress bar, what's next; shown on every zap. */
+    private void showBanner() {
+        infoNum.setText(item.optString("num", ""));
+        infoName.setText(item.optString("title", ""));
+        long s = item.optLong("nowStart", 0), e = item.optLong("nowEnd", 0), now = System.currentTimeMillis();
+        String nowTitle = item.optString("nowTitle", "");
+        infoNow.setText(nowTitle.isEmpty() ? item.optString("subtitle", "") : nowTitle);
+        infoTime.setText(s > 0 && e > 0 ? clockHm(s) + "–" + clockHm(e) : "");
+        if (s > 0 && e > s) { infoProgress.setVisibility(View.VISIBLE); infoProgress.setProgress((int) (100 * Math.max(0, Math.min(1, (now - s) / (double) (e - s))))); } else infoProgress.setVisibility(View.GONE);
+        String next = item.optString("nextTitle", "");
+        infoNext.setText(next.isEmpty() ? "" : "Next  " + next);
+        infoClock.setText(clockHm(now));
+        infoBar.setVisibility(View.VISIBLE);
+        ui.removeCallbacks(infoOff); ui.postDelayed(infoOff, 4500);
+    }
+    private static String clockHm(long ms) { return new java.text.SimpleDateFormat("HH:mm", Locale.UK).format(new java.util.Date(ms)); }
 
     private JSArray list() { return NativePlayerPlugin.array(item.opt("list")); }
 
@@ -221,9 +246,17 @@ public class PlayerActivity extends AppCompatActivity {
 
     // ---------- remote ----------
 
+    private boolean okHeld = false;
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
         int k = e.getKeyCode();
+        if (e.getAction() == KeyEvent.ACTION_UP && live && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER)
+            && overlay.getVisibility() != View.VISIBLE && channelList.getVisibility() != View.VISIBLE && nextPanel.getVisibility() != View.VISIBLE) {
+            if (okHeld) { okHeld = false; return true; }
+            if (list().length() > 1) openChannels(); else showOverlay();
+            return true;
+        }
+        if (e.getAction() == KeyEvent.ACTION_UP && okHeld && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER)) { okHeld = false; return true; }
         if (e.getAction() != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(e);
         boolean shown = overlay.getVisibility() == View.VISIBLE;
         if (shown) bumpHide();
@@ -247,18 +280,25 @@ public class PlayerActivity extends AppCompatActivity {
             return super.dispatchKeyEvent(e);   // up/down move through the list, OK switches (see openChannels)
         }
         if (nextPanel.getVisibility() == View.VISIBLE) return super.dispatchKeyEvent(e);
+        // Live TV, like a TV: up/down zap whatever is on screen; OK = channel list; hold OK = the controls; left/right = banner.
+        if (live && (k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN) && !(shown && !justShown && overlay.findFocus() != null && overlay.findFocus() != playBtn)) {
+            if (e.getRepeatCount() == 0 || e.getRepeatCount() % 3 == 0) step(k == KeyEvent.KEYCODE_DPAD_UP ? -1 : 1);   // held: one channel per ~3 repeats
+            return true;
+        }
+        if (live && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER) && e.getRepeatCount() == 1) { showOverlay(); okHeld = true; return true; }
+        if (live && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER) && e.getRepeatCount() > 1) return true;
         if (!shown) {
             switch (k) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER: case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                    if (live && list().length() > 1) openChannels(); else showOverlay();   // live: OK = channel list, as in TiviMate
-                    return true;
+                    if (live) return true;   // acted on at key-up (openChannels), unless it turns into a hold
+                    showOverlay(); return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT: case KeyEvent.KEYCODE_DPAD_RIGHT:
-                    if (live) { showOverlay(); return true; }
+                    if (live) { showBanner(); return true; }
                     seekBy((k == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1) * (e.getRepeatCount() > 3 ? 30_000 : 10_000)); return true;
                 case KeyEvent.KEYCODE_DPAD_UP: case KeyEvent.KEYCODE_DPAD_DOWN:
-                    if (live) step(k == KeyEvent.KEYCODE_DPAD_UP ? -1 : 1); else showOverlay();
-                    return true;
+                    showOverlay(); return true;
                 case KeyEvent.KEYCODE_BACK:
+                    if (infoBar.getVisibility() == View.VISIBLE) { infoBar.setVisibility(View.GONE); return true; }
                     finish(); return true;
             }
             return super.dispatchKeyEvent(e);
@@ -521,7 +561,7 @@ public class PlayerActivity extends AppCompatActivity {
             double d = player.getDuration() > 0 ? player.getDuration() / 1000.0 : 0;
             event("closed", Math.max(0, player.getCurrentPosition()) / 1000.0, d);
         }
-        if (player != null) { player.release(); player = null; }
+        if (player != null) { if (listener != null) player.removeListener(listener); playerView.setPlayer(null); PlayerHolder.giveBack(player); player = null; }
         if (current == this) current = null;
         super.onDestroy();
     }
@@ -722,6 +762,33 @@ public class PlayerActivity extends AppCompatActivity {
             } catch (Exception ignored) {}
         });
         root.addView(channelList, new FrameLayout.LayoutParams(dp(420), -1, Gravity.START));
+
+        // Channel banner (live TV): bottom-left card with number, name, programme + progress, next.
+        LinearLayout ib = new LinearLayout(this);
+        infoBar = ib;
+        ib.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable ibBg = new GradientDrawable(); ibBg.setColor(0xF0101319); ibBg.setCornerRadius(dp(14));
+        ib.setBackground(ibBg);
+        ib.setPadding(dp(22), dp(16), dp(22), dp(16));
+        LinearLayout l1 = new LinearLayout(this); l1.setGravity(Gravity.CENTER_VERTICAL);
+        infoNum = text(22, 0xFF9AA3B5, true); infoNum.setPadding(0, 0, dp(14), 0);
+        infoName = text(24, Color.WHITE, true);
+        infoClock = text(15, 0xB3FFFFFF, false); infoClock.setPadding(dp(18), 0, 0, 0);
+        l1.addView(infoNum); l1.addView(infoName, new LinearLayout.LayoutParams(0, -2, 1)); l1.addView(infoClock);
+        LinearLayout l2 = new LinearLayout(this); l2.setGravity(Gravity.CENTER_VERTICAL); l2.setPadding(0, dp(8), 0, 0);
+        infoNow = text(17, Color.WHITE, false);
+        infoTime = text(14, 0xB3FFFFFF, false); infoTime.setPadding(dp(14), 0, 0, 0);
+        l2.addView(infoNow, new LinearLayout.LayoutParams(0, -2, 1)); l2.addView(infoTime);
+        infoProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        infoProgress.setMax(100);
+        infoProgress.setProgressDrawable(new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{ new ColorDrawable(0x40FFFFFF), new android.graphics.drawable.ClipDrawable(new ColorDrawable(0xFF5B93FF), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL) }));
+        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-1, dp(3)); pp.setMargins(0, dp(8), 0, 0);
+        infoNext = text(14, 0xB3FFFFFF, false); infoNext.setPadding(0, dp(8), 0, 0);
+        ib.addView(l1); ib.addView(l2); ib.addView(infoProgress, pp); ib.addView(infoNext);
+        ib.setVisibility(View.GONE);
+        FrameLayout.LayoutParams ibl = new FrameLayout.LayoutParams(dp(560), -2, Gravity.BOTTOM | Gravity.START);
+        ibl.setMargins(dp(48), 0, 0, dp(40));
+        root.addView(ib, ibl);
 
         setContentView(root);
     }

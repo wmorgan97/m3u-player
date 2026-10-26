@@ -7,6 +7,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -338,10 +340,24 @@ object Repo {
         val cats = (0 until ca.length()).associate { ca.getJSONObject(it).optString("category_id") to ca.getJSONObject(it).optString("category_name") }
         val tm = d.optJSONArray("tmdbCats") ?: JSONArray()
         val groups = (0 until tm.length()).map { tm.getJSONObject(it).optString("id") to tm.getJSONObject(it).optString("name") }
-        Overview(tidy(arr(d, "trending", kind, cats)), tidy(arr(d, "top", kind, cats)), tidy(arr(d, "fresh", kind, cats)), tidy(arr(d, "recent", kind, cats)), groups, cats).also { overviews[kind] = it }
+        Overview(tidy(arr(d, "trending", kind, cats)), tidy(arr(d, "top", kind, cats)), tidy(arr(d, "fresh", kind, cats)), tidy(arr(d, "recent", kind, cats)), groups, cats).also { overviews[kind] = it; prefetchGroups(kind, it) }
     }
 
     private val groupCache = ConcurrentHashMap<String, List<Vod>>()
+    fun cachedGroup(kind: String, tmdbId: String): List<Vod>? = groupCache["$kind|$tmdbId"]
+    fun cachedOverview(kind: String): Overview? = overviews[kind]
+    private val prefetching = ConcurrentHashMap<String, Boolean>()
+    /** Every genre / list of a catalogue, fetched in the background (4 at a time) so each row has its titles the moment
+     *  it scrolls into view. Without this a row arrived while you were moving, and its build landed mid-movement. */
+    fun prefetchGroups(kind: String, o: Overview) {
+        if (prefetching.putIfAbsent(kind, true) != null) return
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            try {
+                val sem = kotlinx.coroutines.sync.Semaphore(4)
+                o.groups.map { (id, _) -> async { sem.withPermit { runCatching { group(kind, id) } } } }.awaitAll()
+            } finally { prefetching.remove(kind) }
+        }
+    }
     /** A TMDB list or genre ("list:popular", "genre:28"). */
     suspend fun group(kind: String, tmdbId: String): List<Vod> = withContext(Dispatchers.IO) {
         groupCache["$kind|$tmdbId"]?.let { return@withContext it }

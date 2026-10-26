@@ -56,8 +56,8 @@ import org.json.JSONObject
 @Composable
 fun HomeScreen(act: TvActivity) {
     val refresh = act.refresh + Repo.version
-    val movies by produceState<Overview?>(null, Repo.version) { value = runCatching { Repo.overview("movies") }.getOrNull() }
-    val series by produceState<Overview?>(null, Repo.version) { value = runCatching { Repo.overview("series") }.getOrNull() }
+    val movies by produceState(Repo.cachedOverview("movies"), Repo.version) { if (value == null) value = runCatching { Repo.overview("movies") }.getOrNull() }
+    val series by produceState(Repo.cachedOverview("series"), Repo.version) { if (value == null) value = runCatching { Repo.overview("series") }.getOrNull() }
     val cw = remember(refresh) { Repo.continueWatching() }
     val favs = remember(refresh) { Repo.favorites().filter { it.optString("url").isNotEmpty() } }
     val recent = remember(refresh) { Repo.recentChannels() }
@@ -285,7 +285,7 @@ fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onClick:
 
 @Composable
 fun VodScreen(act: TvActivity, kind: String) {
-    val ov by produceState<Overview?>(null, Repo.version) { value = runCatching { Repo.overview(kind) }.getOrNull() }
+    val ov by produceState(Repo.cachedOverview(kind), Repo.version) { if (value == null) value = runCatching { Repo.overview(kind) }.getOrNull() }
     val what = if (kind == "series") "series" else "movies"
     val o = ov
     LazyColumn(Modifier.fillMaxSize(), state = rememberPageState(), contentPadding = PaddingValues(bottom = 56.dp)) {
@@ -300,8 +300,9 @@ fun VodScreen(act: TvActivity, kind: String) {
 
 /** A TMDB list / genre: its first titles, then a "See all" tile into the full grid. */
 @Composable
-fun GroupRow(act: TvActivity, kind: String, id: String, name: String) {
-    val items by produceState<List<Vod>?>(null, id, Repo.version) { value = runCatching { Repo.group(kind, id) }.getOrElse { emptyList() } }
+fun GroupRow(act: TvActivity, kind: String, id: String, name: String) = traced("GroupRow") {
+    // Built once, with its titles, when they're already fetched (the usual case: every group is fetched at start).
+    val items by produceState(Repo.cachedGroup(kind, id), id, Repo.version) { if (value == null) value = runCatching { Repo.group(kind, id) }.getOrElse { emptyList() } }
     val l = items
     Column {
         RowTitle(name, count = l?.size)
@@ -310,7 +311,7 @@ fun GroupRow(act: TvActivity, kind: String, id: String, name: String) {
             items(l.take(20), key = { it.id }) { v -> PosterCard(v) { act.go(Screen.Details(v)) } }
             if (l.size > 20) item {
                 Column(Modifier.width(Tv.poster)) {
-                    Card(onClick = { act.go(Screen.Grid(kind, id, name)) }, shape = CardDefaults.shape(Tv.shape), border = cardBorder(), glow = cardGlow(), scale = cardScale(), modifier = Modifier.width(Tv.poster).aspectRatio(2f / 3f)) {
+                    FocusCard(Modifier.width(Tv.poster).aspectRatio(2f / 3f), onClick = { act.go(Screen.Grid(kind, id, name)) }) {
                         Box(Modifier.fillMaxSize().background(Tv.surface2), contentAlignment = Alignment.Center) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Icon(Icons.Default.ArrowForward, null, tint = Tv.text, modifier = Modifier.size(28.dp))

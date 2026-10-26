@@ -66,9 +66,11 @@ class TvActivity : ComponentActivity() {
         Repo.cachedSync()
         lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
         lifecycleScope.launch { runCatching { Repo.liveChannels() } }   // channels ready before Live TV is opened
+        lifecycleScope.launch { delay(1500); runCatching { Repo.overview("movies") }; runCatching { Repo.overview("series") } }   // rows ready before Movies / Series are opened
+        lifecycleScope.launch { delay(2500); com.wmorgan97.m3uplayer.PlayerHolder.warm(this@TvActivity) }   // a player ready before play is pressed
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Tv.accent, background = Tv.bg, surface = Tv.surface, onSurface = Tv.text, onBackground = Tv.text, surfaceVariant = Tv.surface2)) {
-                App()
+                CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides QuickBringIntoView) { App() }
             }
         }
     }
@@ -213,7 +215,8 @@ class TvActivity : ComponentActivity() {
         playList = items; playIndex = index
         NativePlayerPlugin.listener = NativePlayerPlugin.Listener { onPlayerEvent(it) }
         val it = playerItem(index)
-        lifecycleScope.launch { Repo.saveRecent(items[index].optJSONObject("sync") ?: JSONObject()) }
+        val sync = items[index].optJSONObject("sync") ?: JSONObject()
+        if (sync.optString("group") != "Test") lifecycleScope.launch { Repo.saveRecent(sync) }   // (test-hook channels stay out of your history)
         PlayerActivity.current?.let { p -> p.load(com.getcapacitor.JSObject(it.toString())); return }
         startActivity(Intent(this, PlayerActivity::class.java).putExtra("item", it.toString()))
     }
@@ -233,8 +236,12 @@ class TvActivity : ComponentActivity() {
 
     private fun onPlayerEvent(e: JSONObject) {
         when (e.optString("type")) {
-            "step" -> { val n = playIndex + e.optInt("dir"); if (n in playList.indices) { if (playList[n].optBoolean("live")) lastLive = playList to playIndex; play(playList, n) } }
-            "jump" -> { val n = e.optInt("index"); if (n in playList.indices && n != playIndex) { if (playList[n].optBoolean("live")) lastLive = playList to playIndex; play(playList, n) } }
+            "step", "jump" -> {
+                val n = if (e.optString("type") == "step") playIndex + e.optInt("dir") else e.optInt("index")
+                if (n !in playList.indices || n == playIndex) return
+                if (playList[n].optBoolean("live")) { lastLive = playList to playIndex; playList[n].put("last", playList[playIndex].optString("title")); Repo.lastChannelUrl = playList[n].optString("url") }
+                play(playList, n)
+            }
             "last" -> lastLive?.let { (l, k) -> val cur = playList to playIndex; lastLive = cur; play(l, k) }
             "zap" -> { val c = Repo.channelByNumber(e.optInt("num")); if (c != null) playLive(Repo.live?.channels ?: listOf(c), Repo.live?.channels?.indexOf(c)?.coerceAtLeast(0) ?: 0) }
             "progress", "closed" -> {

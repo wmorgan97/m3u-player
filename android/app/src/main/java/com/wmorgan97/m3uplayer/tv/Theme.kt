@@ -26,6 +26,9 @@ import androidx.compose.ui.input.key.*
 // rhythm: a 48dp safe margin (Android TV's overscan guide), an 8dp spacing grid, one type scale sized for a
 // sofa (nothing under 12sp), one card shape, one focus treatment.
 
+/** A named section in a system trace around a piece of composition. */
+inline fun <T> traced(name: String, block: () -> T): T { android.os.Trace.beginSection(name); try { return block() } finally { android.os.Trace.endSection() } }
+
 object Tv {
     // Layout
     val margin = 48.dp          // left/right content margin (overscan-safe)
@@ -107,8 +110,32 @@ fun SkeletonTitle() {
 
 /** Rows are prepared before they scroll into view (and the first cards of each row with them), so moving down a page
  *  never waits for a row to be built: the one cause of dropped frames on a Shield. */
+/** Rows stay built for a screen's height above and below what's showing (Compose's cache window): a D-pad move finds
+ *  its row ready instead of building it mid-scroll, and rows you scroll back to are still there. */
 @Composable
-fun rememberPageState() = androidx.compose.foundation.lazy.rememberLazyListState(prefetchStrategy = androidx.compose.foundation.lazy.LazyListPrefetchStrategy(nestedPrefetchItemCount = 8))
+fun rememberPageState() = androidx.compose.foundation.lazy.rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = 3, nested = 10) })
+
+/** Keeps rows built above and below what's on screen, and prefetches each of a row's first cards as its own small unit
+ *  (a whole row is more than a frame's worth, which Compose's prefetcher won't attempt; one poster is not). */
+class AheadPrefetch(private val rows: Int = 3, private val nested: Int = 10) : androidx.compose.foundation.lazy.LazyListPrefetchStrategy {
+    private val done = HashMap<Int, androidx.compose.foundation.lazy.layout.LazyLayoutPrefetchState.PrefetchHandle>()
+    override fun androidx.compose.foundation.lazy.LazyListPrefetchScope.onScroll(delta: Float, layoutInfo: androidx.compose.foundation.lazy.LazyListLayoutInfo) = schedule(layoutInfo)
+    override fun androidx.compose.foundation.lazy.LazyListPrefetchScope.onVisibleItemsUpdated(layoutInfo: androidx.compose.foundation.lazy.LazyListLayoutInfo) = schedule(layoutInfo)
+    private fun androidx.compose.foundation.lazy.LazyListPrefetchScope.schedule(info: androidx.compose.foundation.lazy.LazyListLayoutInfo) {
+        val first = info.visibleItemsInfo.firstOrNull()?.index ?: return
+        val last = info.visibleItemsInfo.lastOrNull()?.index ?: return
+        val want = ((1..rows).map { last + it } + (1..rows).map { first - it }).filter { it in 0 until info.totalItemsCount }
+        done.keys.filter { it !in want && it !in first..last }.forEach { done.remove(it)?.cancel() }
+        for (i in want) if (i !in done) done[i] = schedulePrefetch(i)
+    }
+    override fun androidx.compose.foundation.lazy.layout.NestedPrefetchScope.onNestedPrefetch(firstVisibleItemIndex: Int) { repeat(nested) { schedulePrefetch(firstVisibleItemIndex + it) } }
+}
+
+/** Scroll-into-view in 180ms with an ease-out, instead of the default spring: each move settles sooner. */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+val QuickBringIntoView = object : androidx.compose.foundation.gestures.BringIntoViewSpec {
+    override val scrollAnimationSpec: androidx.compose.animation.core.AnimationSpec<Float> = tween(180, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+}
 
 /** Hold OK for options on a list row: the remote's first key repeat (~0.5s) is the hold, and the release after it is
  *  swallowed so the row's normal click never follows. (Cards get this from onLongClick; list rows need it spelled out.) */
@@ -128,7 +155,7 @@ fun Modifier.holdOk(onHold: () -> Unit): Modifier {
 
 /** Section heading above a row: a title, an optional quiet caption, and a count on the right. */
 @Composable
-fun RowTitle(text: String, extra: String? = null, count: Int? = null) {
+fun RowTitle(text: String, extra: String? = null, count: Int? = null) = traced("RowTitle") {
     Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, top = Tv.rowGap, bottom = 12.dp), verticalAlignment = Alignment.Bottom) {
         Text(text, fontSize = Tv.rowTitle, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
         if (extra != null) { Spacer(Modifier.width(10.dp)); Text(extra, fontSize = Tv.label, color = Tv.muted, modifier = Modifier.padding(bottom = 2.dp)) }
