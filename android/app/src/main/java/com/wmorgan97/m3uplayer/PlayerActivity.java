@@ -15,6 +15,7 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
@@ -68,6 +69,7 @@ public class PlayerActivity extends AppCompatActivity {
     private int ticks;
 
     private View overlay, nextPanel;
+    private android.widget.ListView channelList;   // live TV: TiviMate-style channel panel on OK
     private TextView title, subtitle, badge, liveTag, elapsed, total, hud, status, nextCount, nextName;
     private SeekBar seek;
     private ProgressBar spinner;
@@ -123,6 +125,7 @@ public class PlayerActivity extends AppCompatActivity {
         retried = false;
         ui.removeCallbacks(countdownRun);
         nextPanel.setVisibility(View.GONE);
+        if (channelList != null) channelList.setVisibility(View.GONE);
         status.setVisibility(View.GONE);
         title.setText(next.optString("title", ""));
         String sub = next.optString("subtitle", "");
@@ -154,6 +157,7 @@ public class PlayerActivity extends AppCompatActivity {
         player.prepare();
         player.play();
         showOverlay();
+        justShown = live;
     }
 
     private JSArray list() { return NativePlayerPlugin.array(item.opt("list")); }
@@ -223,11 +227,16 @@ public class PlayerActivity extends AppCompatActivity {
             case KeyEvent.KEYCODE_MEDIA_REWIND: seekBy(-30_000); return true;
         }
         if (nextPanel.getVisibility() == View.VISIBLE && k == KeyEvent.KEYCODE_BACK) { cancelNext(); return true; }
+        if (channelList.getVisibility() == View.VISIBLE) {
+            if (k == KeyEvent.KEYCODE_BACK || k == KeyEvent.KEYCODE_DPAD_RIGHT) { closeChannels(); return true; }
+            return super.dispatchKeyEvent(e);   // up/down move through the list, OK switches (see openChannels)
+        }
         if (nextPanel.getVisibility() == View.VISIBLE) return super.dispatchKeyEvent(e);
         if (!shown) {
             switch (k) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER: case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                    showOverlay(); return true;
+                    if (live && list().length() > 1) openChannels(); else showOverlay();   // live: OK = channel list, as in TiviMate
+                    return true;
                 case KeyEvent.KEYCODE_DPAD_LEFT: case KeyEvent.KEYCODE_DPAD_RIGHT:
                     if (live) { showOverlay(); return true; }
                     seekBy((k == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1) * (e.getRepeatCount() > 3 ? 30_000 : 10_000)); return true;
@@ -240,6 +249,9 @@ public class PlayerActivity extends AppCompatActivity {
             return super.dispatchKeyEvent(e);
         }
         if (k == KeyEvent.KEYCODE_BACK) { hideOverlay(); return true; }
+        boolean onButton = getCurrentFocus() != null && getCurrentFocus() != playerView && overlay.findFocus() != null && !justShown;
+        if (live && !onButton && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER) && list().length() > 1) { openChannels(); return true; }
+        if (justShown && k != KeyEvent.KEYCODE_DPAD_CENTER && k != KeyEvent.KEYCODE_ENTER) justShown = false;   // the first arrow moves onto the buttons
         if (seek.hasFocus() && (k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT)) {
             seekBy((k == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1) * (e.getRepeatCount() > 3 ? 30_000 : 10_000));
             return true;
@@ -273,6 +285,7 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     private void showOverlay() { showOverlay(false); }
+    private boolean justShown = false;   // the info bar came up by itself (new channel): OK still means "channel list"
     private void showOverlay(boolean keep) {
         boolean was = overlay.getVisibility() == View.VISIBLE;
         overlay.setVisibility(View.VISIBLE);
@@ -349,6 +362,34 @@ public class PlayerActivity extends AppCompatActivity {
         playerView.setResizeMode(aspect == 1 ? AspectRatioFrameLayout.RESIZE_MODE_ZOOM : aspect == 2 ? AspectRatioFrameLayout.RESIZE_MODE_FILL : AspectRatioFrameLayout.RESIZE_MODE_FIT);
         showHud(ASPECTS[aspect]);
     }
+
+    /** Live TV: the channels down the left, the one playing picked; up/down browse, OK switches, Back / right close. */
+    private void openChannels() {
+        JSArray l = list();
+        final int cur = Math.max(0, item.optInt("current") - item.optInt("listStart"));
+        List<String> rows = new ArrayList<>();
+        for (int i = 0; i < l.length(); i++) {
+            JSONObject r = l.optJSONObject(i);
+            String t = r == null ? "" : r.optString("t"), d = r == null ? "" : r.optString("s");
+            rows.add((i == cur ? "▶  " : "") + (d.isEmpty() ? t : t + "\n" + d));
+        }
+        channelList.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, rows) {
+            @Override public View getView(int pos, View convert, ViewGroup parent) {
+                TextView v = (TextView) super.getView(pos, convert, parent);
+                v.setTextColor(pos == cur ? 0xFF7FAAFF : Color.WHITE);   // the channel playing now, in blue
+                v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+                v.setMaxLines(2);
+                v.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                v.setPadding(dp(18), dp(10), dp(18), dp(10));
+                return v;
+            }
+        });
+        hideOverlay();
+        channelList.setVisibility(View.VISIBLE);
+        channelList.setSelection(Math.max(0, cur - 3));
+        channelList.post(() -> { channelList.requestFocus(); channelList.setSelection(cur); });
+    }
+    private void closeChannels() { channelList.setVisibility(View.GONE); }
 
     private void showList() {
         JSArray l = list();
@@ -629,6 +670,29 @@ public class PlayerActivity extends AppCompatActivity {
         FrameLayout.LayoutParams npl = new FrameLayout.LayoutParams(dp(360), -2, Gravity.BOTTOM | Gravity.END);
         npl.setMargins(0, 0, dp(48), dp(48));
         root.addView(np, npl);
+
+        // Channel panel (live TV)
+        channelList = new android.widget.ListView(this);
+        GradientDrawable cl = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, new int[]{0xF20B0D12, 0xE60B0D12});
+        channelList.setBackground(cl);
+        channelList.setDivider(new ColorDrawable(0x22FFFFFF));
+        channelList.setDividerHeight(1);
+        StateListDrawable sel = new StateListDrawable();
+        GradientDrawable selOn = new GradientDrawable(); selOn.setColor(0x33FFFFFF); selOn.setStroke(dp(2), Color.WHITE); selOn.setCornerRadius(dp(8));
+        sel.addState(new int[]{android.R.attr.state_focused}, selOn);
+        sel.addState(new int[]{android.R.attr.state_selected}, selOn);
+        sel.addState(new int[]{}, new ColorDrawable(Color.TRANSPARENT));
+        channelList.setSelector(sel);
+        channelList.setDrawSelectorOnTop(true);
+        channelList.setPadding(dp(12), dp(24), dp(12), dp(24));
+        channelList.setClipToPadding(false);
+        channelList.setVisibility(View.GONE);
+        channelList.setOnItemClickListener((parent, v, pos, id) -> {
+            closeChannels();
+            if (pos == item.optInt("current") - item.optInt("listStart")) return;
+            try { NativePlayerPlugin.emit(new JSONObject().put("type", "jump").put("index", item.optInt("listStart") + pos)); } catch (Exception ignored) {}
+        });
+        root.addView(channelList, new FrameLayout.LayoutParams(dp(420), -1, Gravity.START));
 
         setContentView(root);
     }
