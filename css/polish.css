@@ -704,3 +704,9 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
   #view.pl #chips .chip-sec span { margin-left: 8px; padding: 1px 6px; border-radius: 5px; font-size: 9.5px; letter-spacing: .06em; background: #01b4e4; color: #04212b; vertical-align: 1px; }
   #view.pl #chips .chip-more { margin-top: 14px; color: var(--accent); font-weight: 600; }
 }
+/* Movies/Series on a phone: the pinned search + group chips get a solid backdrop, so posters scroll under it, not through it */
+@media (max-width: 899px) {
+  #view.vod .filters { background: color-mix(in srgb, var(--bg) 94%, transparent) !important; -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    margin: 0 calc(-12px - var(--safe-right)) 8px calc(-12px - var(--safe-left)); padding: 6px calc(12px + var(--safe-right)) 8px calc(12px + var(--safe-left));
+    border-bottom: 1px solid var(--line); box-shadow: 0 8px 18px rgba(0,0,0,.35); }
+}
