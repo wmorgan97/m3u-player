@@ -755,7 +755,7 @@ async function homeSearch(q, box = $('#home-results')) {
   shelfItems.set('hs-chan', chans);
   const section = (title, key, items, row) => items.length ? `<div class="hs-title">${title}</div>${items.map((it, k) => row(it, key, k)).join('')}` : '';
   const chanRow = (c, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}">${logoHtml(c)}<span class="row-text"><span class="row-name">${esc(c.name)}</span><span class="muted">${esc(prettyGroup(c.group) || '')}</span></span>${icon('play')}</div>`;
-  const vodRow = (it, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}"><span class="hs-poster">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span><span class="row-text"><span class="row-name">${esc(displayTitle(it.name))}</span><span class="muted">${[it.kind === 'series' ? 'Series' : 'Movie', it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : ''].filter(Boolean).map(esc).join(' · ')}</span></span></div>`;
+  const vodRow = (it, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}"><span class="hs-poster">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span><span class="row-text"><span class="row-name">${esc(niceName(it))}</span><span class="muted">${[it.kind === 'series' ? 'Series' : 'Movie', it.rating && it.rating < 9.5 ? `★ ${it.rating.toFixed(1)}` : '', it.copies > 1 ? `${it.copies} versions` : ''].filter(Boolean).map(esc).join(' · ')}</span></span></div>`;
   box.innerHTML = section('Channels', 'hs-chan', chans, chanRow) || '<div class="muted hs-empty">Searching…</div>';
   box.hidden = false;
   if (!canSync()) { if (!chans.length) box.innerHTML = '<div class="muted hs-empty">No channels match.</div>'; return; }
@@ -764,8 +764,9 @@ async function homeSearch(q, box = $('#home-results')) {
     try {
       const [m, s] = await Promise.all([vodApi(p, 'movies', { q }), vodApi(p, 'series', { q })]);
       const cats = vodCache.get(vodKey(p, 'movies'))?.cats || [], scats = vodCache.get(vodKey(p, 'series'))?.cats || [];
-      movies.push(...toItems(p, 'movies', cats, (m.items || []).slice(0, 6)));
-      series.push(...toItems(p, 'series', scats, (s.items || []).slice(0, 6)));
+      const en = l => state.settings.vodLanguage !== 'all' ? l.filter(it => isEnglishGroup(it.group || '')) : l;
+      movies.push(...oneOfEach(en(toItems(p, 'movies', cats, (m.items || []).slice(0, 80)))).slice(0, 8));
+      series.push(...oneOfEach(en(toItems(p, 'series', scats, (s.items || []).slice(0, 80)))).slice(0, 8));
     } catch {}
   }));
   if (seq !== homeSearchSeq) return;
@@ -1431,7 +1432,7 @@ async function requestVod(p, tab, { group, q }) {
     // TMDB groups keep TMDB's order (most popular first) and their extras; toItems would sort by provider group.
     const items = isTm ? (d.items || []).map(raw => { const it = toItems(p, tab, entry.cats, [raw])[0]; return it && { ...it, tm: raw.tm }; }).filter(Boolean)
       : toItems(p, tab, entry.cats, d.items || []);
-    if (q !== undefined) entry.searches.set(q, entry.keep ? entry.keep(items) : items); else entry.groups.set(group, isTm && entry.keep ? entry.keep(items) : items);
+    if (q !== undefined) entry.searches.set(q, oneOfEach(entry.keep ? entry.keep(items) : items)); else entry.groups.set(group, isTm && entry.keep ? entry.keep(items) : items);
   } catch (err) {
     toast(err.message);
   } finally {
@@ -2502,20 +2503,37 @@ function qualityOf(it) {
   const tags = [res, hdr && 'HDR', atmos && 'Dolby audio', lang].filter(Boolean);
   return { res, hdr, hevc, atmos, lang, score, tags, converts: !plain };
 }
+// One entry per title in search results: the copies ("EN - Inception", "4K-EN - Inception", "NF - Inception 2010")
+// collapse into the best English one, which remembers how many there are. Play then offers the versions.
+function oneOfEach(items) {
+  const by = new Map();
+  for (const it of items) {
+    if (it.kind !== 'movie' && it.kind !== 'series') { by.set(Symbol(), it); continue; }
+    const y = it.year || vodMeta(it.name).year || '';
+    const k = `${it.kind}|${displayTitle(it.name).toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '')}`;
+    const prev = by.get(k);
+    if (prev && prev.year && y && Math.abs(Number(prev.year) - Number(y)) > 1) { by.set(`${k}|${y}`, it); continue; }   // a remake
+    if (!prev) { by.set(k, { ...it, copies: 1 }); continue; }
+    const best = qualityOf(it).score > qualityOf(prev).score ? { ...it } : prev;
+    best.copies = prev.copies + 1;
+    by.set(k, best);
+  }
+  return [...by.values()];
+}
 const versionsCache = new Map();
 async function versionsOf(m) {
   const p = playlistOf(m);
   if (!p || p.kind !== 'xtream' || !canSync() || m.kind !== 'movie') return [m];
   if (!versionsCache.has(m.url)) versionsCache.set(m.url, (async () => {
     try {
-      const d = await vodApi(p, 'movies', { versions: m.name });
+      const d = await vodApi(p, 'movies', { versions: m.name, year: m.year || '' });
       const entry = vodCache.get(vodKey(p, 'movies'));
       const list = toItems(p, 'movies', entry?.cats || [], d.items || []);
       if (!list.some(v => v.url === m.url)) list.unshift(m);
       // English only (like the rest of Movies) unless languages are set to "All"; the one you opened always stays.
       const en = state.settings.vodLanguage !== 'all' ? list.filter(v => v.url === m.url || isEnglishGroup(v.group || '')) : list;
       return en.map(v => ({ v, q: qualityOf(v) })).sort((a, b) => b.q.score - a.q.score).map(x => x.v);
-    } catch { return [m]; }
+    } catch (e) { console.warn('versions:', e?.message || e); versionsCache.delete(m.url); return [m]; }
   })());
   return versionsCache.get(m.url);
 }

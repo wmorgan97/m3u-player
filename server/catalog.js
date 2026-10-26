@@ -32,6 +32,8 @@ const slimSeries = s => ({ series_id: s.series_id, name: str(s.name, 200), cover
 // Every leading tag goes ("4K-D+ - ", "EN | ", "TOP - "), and country tags like "(US)".
 const titleKey = it => String(it.name || '').replace(/^(?:[A-Za-z0-9+&]{1,5}(?:-[A-Za-z0-9+&]{1,5})*\s*[-|:]\s+)+/, '')
   .replace(/\((?:[A-Z]{2}(?:\/[A-Z]{2})?)\)/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+const yearIn = it => Number(String(it.year || '').match(/(19|20)\d\d/)?.[0]) || Number((String(it.name || '').match(/(?:^|\D)((?:19|20)\d\d)(?!.*(?:19|20)\d\d)/) || [])[1]) || 0;
+const bareKey = it => titleKey(it).replace(/(19|20)\d\d$/, '');
 const uniq = (list, n) => { const seen = new Set(), out = []; for (const it of list) { const k = titleKey(it); if (k && !seen.has(k)) { seen.add(k); out.push(it); if (out.length >= n) break; } } return out; };
 
 async function api(base, user, pass, action) {
@@ -117,7 +119,8 @@ async function build(server, user, pass, kind) {
   } catch (e) { console.log(`[tmdb] lists: ${e.message}`); }
   // Every copy of a title (4K, HD, per-platform…), for the details page's "Versions" choice.
   const byTitle = new Map();
-  for (const it of items) { const k = titleKey(it); if (!k) continue; const l = byTitle.get(k); if (l) l.push(it); else byTitle.set(k, [it]); }
+  // Keyed by title without the year (providers write "Dune (2021)", "Dune 2021" or just "Dune"); years are checked at lookup.
+  for (const it of items) { const k = bareKey(it); if (!k) continue; const l = byTitle.get(k); if (l) l.push(it); else byTitle.set(k, [it]); }
   const catNames = new Map(cats.map(c => [String(c.category_id), str(c.category_name, 120)]));
   const names = items.map(it => (it.name || '').toLowerCase());
   console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${trend.length} trending matched, ${tmdbCats.length} TMDB groups (${tmdbCats.map(c => `${c.name} ${c.count}`).join(', ')})`);
@@ -150,8 +153,9 @@ export async function handleCatalog(req, res, url, send, allowed) {
     for (let i = 0; i < data.names.length && out.length < 400; i++) if (data.names[i].includes(t)) out.push(data.items[i]);
     body = JSON.stringify({ items: out });
   } else if (q.versions) {
-    const k = titleKey({ name: String(q.versions).slice(0, 200) });
-    const list = (data.byTitle?.get(k) || []).slice(0, 60).map(it => ({ ...it, category_name: data.catNames?.get(String(it.category_id)) || '' }));
+    const want = { name: String(q.versions).slice(0, 200), year: q.year };
+    const y = yearIn(want);
+    const list = (data.byTitle?.get(bareKey(want)) || []).filter(it => { const iy = yearIn(it); return !y || !iy || Math.abs(iy - y) <= 1; }).slice(0, 60).map(it => ({ ...it, category_name: data.catNames?.get(String(it.category_id)) || '' }));
     body = JSON.stringify({ items: list });
   } else if (q.tmdb) {
     body = JSON.stringify({ items: data.tmdbGroups?.get(String(q.tmdb)) || [] });
