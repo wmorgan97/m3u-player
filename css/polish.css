@@ -538,7 +538,7 @@ body .stage:fullscreen video, body .stage.fs video { width: 100vw !important; he
   .mainnav .nv-ico .ico { width: 22px; height: 22px; }
   #view { padding-bottom: calc(var(--safe-bottom) + 120px) !important; }
   body.playing .mainnav { display: none; }
-  .toast { bottom: calc(var(--safe-bottom) + 84px); }
+  .toast { top: auto; bottom: calc(var(--safe-bottom) + 84px); }
 }
 
 /* ---------- Home: clear section headers ---------- */

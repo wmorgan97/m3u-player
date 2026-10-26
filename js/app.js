@@ -1027,9 +1027,31 @@ const vodSource = tab => state.playlists.find(p => p.kind === 'xtream' && p.cont
 function openSection(kind) {
   if (kind === 'tvguide') { const p = liveSource(); return location.replace(p ? `#/guide/${p.id}` : '#/'); }
   const p = kind === 'live' ? liveSource() : vodSource(kind);
-  if (!p) { toast(kind === 'live' ? 'Add a playlist with live channels first' : `None of your playlists has ${kind}`); return location.replace('#/'); }
+  if (!p) { location.replace('#/'); return kind === 'live' ? toast('Add a playlist with live channels first') : noVodSheet(kind); }
   pendingTab = kind;
   location.replace(`#/p/${p.id}`);
+}
+// Movies/Series tapped with no playlist that has them: say why, and offer the fix.
+function noVodSheet(kind) {
+  const liveOnly = state.playlists.find(p => !p.virtual && p.content === 'live' && (p.kind === 'xtream' || p.sourceUrl));
+  sheet(`<div class="sheet-title">No ${kind} yet</div>
+    ${liveOnly ? `<p class="muted sheet-intro">“${esc(playlistTitle(liveOnly))}” is set to keep Live TV only on this device. Most providers include movies and series with the same login.</p>
+      <div class="form-actions"><button class="btn" data-add>Add another playlist</button><button class="btn primary" data-widen>Turn on movies &amp; series</button></div>`
+    : `<p class="muted sheet-intro">None of the playlists on this device has ${kind}. Each device keeps its own playlists: add the same Xtream login (or M3U link) you use on your other devices.</p>
+      <div class="form-actions"><button class="btn primary" data-add>Add playlist</button></div>`}`, {
+    onMount: el => {
+      el.querySelector('[data-add]')?.addEventListener('click', () => { closeSheet(); addPlaylistSheet(); });
+      el.querySelector('[data-widen]')?.addEventListener('click', async () => {
+        closeSheet();
+        liveOnly.content = 'both';
+        await save(liveOnly);
+        toast('Loading movies & series…', { busy: true });
+        try { await refreshSource(liveOnly); } catch {}
+        pendingTab = kind;
+        location.hash = `#/p/${liveOnly.id}`;
+      });
+    },
+  });
 }
 function updateNav() {
   const hash = location.hash || '#/';
