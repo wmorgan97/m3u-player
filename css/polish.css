@@ -862,6 +862,10 @@ html.tv .sheet .detail { padding-top: 24px; }
 html.tv .sheet .detail-actions .btn { height: 46px; padding: 0 22px; font-size: 16px; }
 html.tv .sheet .detail-plot { font-size: 17px; line-height: 1.5; max-width: 900px; }
 
+/* Live TV rows: favourite / options are on Hold OK, so the row is one stop. */
+html.tv #list .row .icon-btn, html.tv #list .row .fav { display: none; }
+html.tv .epc:focus { outline: 3px solid #fff; background: var(--surface-2); }
+
 /* What the remote is on: unmistakable, never clipped (drawn inside the edge). */
 html.tv :focus { outline: 3px solid var(--accent); outline-offset: -3px; }
 html.tv .hero-slide:focus, html.tv .svc:focus { outline: 4px solid #fff; outline-offset: -4px; }

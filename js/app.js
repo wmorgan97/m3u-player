@@ -4659,9 +4659,14 @@ if (isTV) {
   // Everything you can pick on the page (or in an open sheet), minus the small buttons inside cards (hold OK for those).
   const picks = () => {
     const root = sheetOpen() ? $('#sheet') : $('#view');
-    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && !el.closest(SKIP) && visible(el));   // banner slides are one row: left/right change slide
+    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && !el.closest(SKIP) && (sheetOpen() || !el.closest(SIDE)) && visible(el));   // banner slides are one row: left/right change slide
   };
   const railPicks = () => [...document.querySelectorAll(RAIL)].filter(visible);
+  // A page's own side list (Live TV groups) is a column of its own, like the menu: up/down within it, right into the page.
+  const SIDE = '#chips';
+  const inSide = el => !sheetOpen() && !!el?.closest(SIDE);
+  const sidePicks = () => sheetOpen() ? [] : [...document.querySelectorAll(`${SIDE} .chip`)].filter(visible);
+  let lastMain = null;
   // Rows: things whose tops line up (a shelf, even the part scrolled off to the side, a grid line, a row of buttons).
   const lines = items => {
     const rows = [];
@@ -4679,6 +4684,7 @@ if (isTV) {
     if (inRail(el)) { document.body.classList.add('rail-open'); return; }
     document.body.classList.remove('rail-open');
     if (!el.closest('#sheet')) lastContent = el;   // what to come back to when a details page or menu closes
+    if (!el.closest('#sheet') && !el.closest(SIDE)) lastMain = el;
     // Instant (holding a key never queues animations) and kept mid-screen, clear of the edges.
     el.scrollIntoView({ block: el.closest('#sheet') ? 'nearest' : 'center', inline: 'nearest' });   // a details page scrolls only as needed
   };
@@ -4699,6 +4705,17 @@ if (isTV) {
       else if (dir === 'ArrowRight') leaveRail();
       return;
     }
+    if (inSide(cur)) {
+      const side = sidePicks(), i = side.indexOf(cur);
+      if (dir === 'ArrowDown' && i < side.length - 1) focusEl(side[i + 1]);
+      else if (dir === 'ArrowUp' && i > 0) focusEl(side[i - 1]);
+      else if (dir === 'ArrowLeft') enterRail();
+      else if (dir === 'ArrowRight') {
+        if (lastMain && lastMain.isConnected && visible(lastMain)) focusEl(lastMain);
+        else { const f = lines(picks()).find(r => r.top >= 0)?.items[0]?.el; if (f) focusEl(f); }
+      }
+      return;
+    }
     const rows = lines(picks());
     if (!rows.length) return;
     let ri = -1, ci = -1;
@@ -4708,7 +4725,13 @@ if (isTV) {
       return focusEl(row.items[0].el);
     }
     const row = rows[ri];
-    if (dir === 'ArrowLeft') { if (ci > 0) { focusEl(row.items[ci - 1].el); memX = null; } else if (!sheetOpen()) enterRail(); return; }
+    if (dir === 'ArrowLeft') {
+      if (ci > 0) { focusEl(row.items[ci - 1].el); memX = null; return; }
+      if (sheetOpen()) return;
+      const side = sidePicks();
+      if (side.length) return focusEl(side.find(c => c.classList.contains('active')) || side[0]);
+      return enterRail();
+    }
     if (dir === 'ArrowRight') { if (ci < row.items.length - 1) { focusEl(row.items[ci + 1].el); memX = null; } return; }
     const target = rows[ri + (dir === 'ArrowDown' ? 1 : -1)];
     if (!target) return;
