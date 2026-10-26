@@ -151,7 +151,7 @@ export async function handleCatalog(req, res, url, send, allowed) {
     body = JSON.stringify({ items: out });
   } else if (q.versions) {
     const k = titleKey({ name: String(q.versions).slice(0, 200) });
-    const list = (data.byTitle?.get(k) || []).slice(0, 12).map(it => ({ ...it, category_name: data.catNames?.get(String(it.category_id)) || '' }));
+    const list = (data.byTitle?.get(k) || []).slice(0, 60).map(it => ({ ...it, category_name: data.catNames?.get(String(it.category_id)) || '' }));
     body = JSON.stringify({ items: list });
   } else if (q.tmdb) {
     body = JSON.stringify({ items: data.tmdbGroups?.get(String(q.tmdb)) || [] });

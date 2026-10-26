@@ -2512,7 +2512,9 @@ async function versionsOf(m) {
       const entry = vodCache.get(vodKey(p, 'movies'));
       const list = toItems(p, 'movies', entry?.cats || [], d.items || []);
       if (!list.some(v => v.url === m.url)) list.unshift(m);
-      return list.map(v => ({ v, q: qualityOf(v) })).sort((a, b) => b.q.score - a.q.score).map(x => x.v);
+      // English only (like the rest of Movies) unless languages are set to "All"; the one you opened always stays.
+      const en = state.settings.vodLanguage !== 'all' ? list.filter(v => v.url === m.url || isEnglishGroup(v.group || '')) : list;
+      return en.map(v => ({ v, q: qualityOf(v) })).sort((a, b) => b.q.score - a.q.score).map(x => x.v);
     } catch { return [m]; }
   })());
   return versionsCache.get(m.url);
