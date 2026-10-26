@@ -1484,14 +1484,15 @@ async function requestVod(p, tab, { group, q }) {
       if (sameShelf(was, now)) unchanged = true; else rememberShelf(key, group, now);
     }
   } catch (err) {
-    toast(err.message);
+    console.warn('row load failed', group ?? q, err.message);
+    if (q !== undefined || !shelfPrev.get(key)?.has(group)) toast(err.message);   // a row already showing its saved titles fails quietly
   } finally {
     vodPending.delete(tag);
     if (state.current === p && state.tab === tab) {
       // On the Movies/Series front page only the row that just loaded is redrawn. Redrawing the whole page here
       // rebuilt ~1000 posters every time a row loaded while scrolling: the stutter on iPhone.
       const shelf = q === undefined && discoverMode() && [...document.querySelectorAll('#list > .shelf[data-group]')].find(el => el.dataset.group === group);
-      if (shelf && unchanged) {}
+      if (shelf && (unchanged || !entry.groups.has(group))) {}   // same titles, or the refresh failed: keep what's shown
       else if (shelf) {
         const g = entry.groupList.find(x => x.name === group) || (entry.moreGroups || []).find(x => x.name === group);
         const t = document.createElement('template');
