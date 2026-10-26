@@ -2516,6 +2516,7 @@ function oneOfEach(items) {
     if (!prev) { by.set(k, { ...it, copies: 1 }); continue; }
     const best = qualityOf(it).score > qualityOf(prev).score ? { ...it } : prev;
     best.copies = prev.copies + 1;
+    best.year ||= prev.year || y || undefined;   // keep a year from whichever copy has one
     by.set(k, best);
   }
   return [...by.values()];
