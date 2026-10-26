@@ -1451,11 +1451,24 @@ async function refreshVodInBackground(p, tab) {
     homeRefresh();
   } catch {}
 }
+// Front-page rows from the last visit (first 24 titles of each), saved on this device so a cold start shows
+// every row at once instead of "Loading…"; each row still refreshes itself when it scrolls into view.
+const shelfPrev = new Map();   // catalogue key -> Map(group -> items)
+const shelfSaveTimers = new Map();
+function rememberShelf(key, group, items) {
+  if (!shelfPrev.has(key)) shelfPrev.set(key, new Map());
+  shelfPrev.get(key).set(group, items.slice(0, 24));
+  clearTimeout(shelfSaveTimers.get(key));
+  shelfSaveTimers.set(key, setTimeout(() => db.set(`shelves:${key}`, Object.fromEntries(shelfPrev.get(key))).catch(() => {}), 2000));
+}
+const sameShelf = (a, b) => !!a && !!b && a.length === b.length && a.every((it, i) => it.url === b[i].url && it.logo === b[i].logo && it.name === b[i].name);
+
 async function requestVod(p, tab, { group, q }) {
   const key = vodKey(p, tab), entry = vodCache.get(key);
   const tag = `${key}|${q !== undefined ? 'q:' + q : 'g:' + group}`;
   if (!entry || Array.isArray(entry) || vodPending.has(tag)) return;
   vodPending.add(tag);
+  let unchanged = false;   // the row already shows exactly these titles (from the saved copy): nothing to redraw
   try {
     const cat = q === undefined ? entry.cats.find(c => (c.category_name || '') === group) : null;
     const isTm = q === undefined && String(group).startsWith('tmdb:');
@@ -1463,7 +1476,13 @@ async function requestVod(p, tab, { group, q }) {
     // TMDB groups keep TMDB's order (most popular first) and their extras; toItems would sort by provider group.
     const items = isTm ? (d.items || []).map(raw => { const it = toItems(p, tab, entry.cats, [raw])[0]; return it && { ...it, tm: raw.tm }; }).filter(Boolean)
       : toItems(p, tab, entry.cats, d.items || []);
-    if (q !== undefined) entry.searches.set(q, oneOfEach(entry.keep ? entry.keep(items) : items)); else entry.groups.set(group, isTm && entry.keep ? entry.keep(items) : items);
+    if (q !== undefined) entry.searches.set(q, oneOfEach(entry.keep ? entry.keep(items) : items));
+    else {
+      const was = shelfPrev.get(key)?.get(group);
+      entry.groups.set(group, isTm && entry.keep ? entry.keep(items) : items);
+      const now = entry.groups.get(group).slice(0, 24);
+      if (sameShelf(was, now)) unchanged = true; else rememberShelf(key, group, now);
+    }
   } catch (err) {
     toast(err.message);
   } finally {
@@ -1472,7 +1491,8 @@ async function requestVod(p, tab, { group, q }) {
       // On the Movies/Series front page only the row that just loaded is redrawn. Redrawing the whole page here
       // rebuilt ~1000 posters every time a row loaded while scrolling: the stutter on iPhone.
       const shelf = q === undefined && discoverMode() && [...document.querySelectorAll('#list > .shelf[data-group]')].find(el => el.dataset.group === group);
-      if (shelf) {
+      if (shelf && unchanged) {}
+      else if (shelf) {
         const g = entry.groupList.find(x => x.name === group) || (entry.moreGroups || []).find(x => x.name === group);
         const t = document.createElement('template');
         t.innerHTML = shelfHtml(groupLabel(group), 'g:' + group, (entry.groups.get(group) || []).slice(0, 24), { total: g?.count || 0, group }).trim();
@@ -1499,7 +1519,8 @@ async function loadVodNow(p, tab, { force = false } = {}) {
   // Instant start: the catalogue saved on this device is shown at once (up to a week old); when it is more than
   // a few hours old a fresh copy is fetched in the background and swapped in.
   if (!force) {
-    const cached = await db.get(`vod:${key}`);
+    const [cached, shelves] = await Promise.all([db.get(`vod:${key}`), shelfPrev.has(key) ? null : db.get(`shelves:${key}`).catch(() => null)]);
+    if (shelves && !shelfPrev.has(key)) shelfPrev.set(key, new Map(Object.entries(shelves)));
     if (cached?.overview?.v === 4 && Date.now() - cached.at < 7 * DAY) {
       vodCache.set(key, catalogueEntry(p, tab, cached.overview));
       if (state.current === p && state.tab === tab) refreshPlaylistView();
@@ -1626,13 +1647,14 @@ function renderDiscover() {
     .sort((a, b) => order.indexOf(sectionOf(a.name)) - order.indexOf(sectionOf(b.name)));
   const top10 = entry.trending?.length >= 5 ? entry.trending.slice(0, 10) : [];
   shelfItems.set('t10', top10);
+  const saved = shelfPrev.get(vodKey(p, tab));
   list.innerHTML = `
     ${heroItems.length ? `<li class="disc-hero">${heroHtml(heroItems)}</li>` : ''}
     ${top10.length ? `<li class="shelf"><div class="shelf-head"><h3>Top 10 ${what} this week</h3><span class="muted">from TMDB</span></div><ul class="shelf-row top10">${top10.map((it, k) => `<li class="scard t10" data-shelf="t10" data-k="${k}"><span class="t10-n">${k + 1}</span>${cardHtml(it, 't10', k).replace(/^<li[^>]*>|<\/li>$/g, '')}</li>`).join('')}</ul></li>` : ''}
     ${entry.top?.length ? shelfHtml('Popular now', 'top', art(entry.top).slice(0, 40)) : ''}
     ${fresh.length ? shelfHtml(art(entry.fresh).length >= 8 ? 'New releases' : 'Recently added', 'recent', fresh.slice(0, 40)) : ''}
     ${svc.length >= 2 ? `<li class="shelf"><div class="shelf-head"><h3>Streaming services</h3></div><ul class="shelf-row services">${svc.map(s => `<li class="svc" data-see="${esc(s.group)}" style="--c1:${s.c1};--c2:${s.c2}"><b>${esc(s.name)}</b><span>${s.count.toLocaleString()} ${what}</span></li>`).join('')}</ul></li>` : ''}
-    ${ordered.slice(0, 40).map(g => shelfHtml(groupLabel(g.name), 'g:' + g.name, (entry.groups.get(g.name) || []).slice(0, 24), { total: g.count, group: g.name, pending: !entry.groups.has(g.name) })).join('')}
+    ${ordered.slice(0, 40).map(g => { const items = (entry.groups.get(g.name) || saved?.get(g.name) || []).slice(0, 24); return shelfHtml(groupLabel(g.name), 'g:' + g.name, items, { total: g.count, group: g.name, pending: !items.length }); }).join('')}
     ${groups.length > 40 ? `<li class="muted center shelf-note">${(groups.length - 40).toLocaleString()} more groups in the sidebar.</li>` : ''}`;
   requestAnimationFrame(() => addRowArrows(list));
   // Load a group's titles when its shelf scrolls near the viewport.
