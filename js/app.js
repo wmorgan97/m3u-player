@@ -2050,6 +2050,7 @@ function updateRowsInPlace() {
 
 function rerenderRows() {
   if (!$('#list') || !state.current) return;
+  if (discoverMode()) return;   // the Movies/Series front page is shelves, not rows: nothing to redraw here
   const keep = state.rendered;
   $('#list').innerHTML = '';
   state.rendered = 0;
