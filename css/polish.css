@@ -835,7 +835,7 @@ html.tv .mainnav a { display: flex; flex-direction: row; align-items: center; ju
 html.tv .mainnav a .nv-ico svg, html.tv .mainnav a .ico { width: 24px; height: 24px; flex: none; }
 html.tv .mainnav a > span:last-child { opacity: 0; transition: opacity .1s; }
 html.tv body.rail-open .mainnav a > span:last-child { opacity: 1; }
-html.tv .mainnav a.active { color: #fff; background: var(--surface-2); }
+html.tv .mainnav a.on { color: #fff; background: var(--surface-2); }
 html.tv .mainnav a:focus { color: #0e1014; background: #fff; outline: none; }
 html.tv .actions { order: 2; margin-top: auto; display: flex; flex-direction: column; gap: 4px; }
 html.tv .actions .icon-btn { display: flex; align-items: center; width: 100%; height: 48px; margin: 0; justify-content: flex-start; gap: 18px; padding: 0 18px; border-radius: 12px; color: var(--muted); }

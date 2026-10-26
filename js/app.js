@@ -4675,7 +4675,7 @@ if (isTV) {
     }
     return out;   // banner slides are one row: left/right change slide
   };
-  const railPicks = () => [...document.querySelectorAll(RAIL)].filter(visible);
+  const railPicks = () => [...document.querySelectorAll(RAIL)].filter(visible).sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);   // in screen order (search sits above the sections)
   // A page's own side list (Live TV groups) is a column of its own, like the menu: up/down within it, right into the page.
   const SIDE = '#chips';
   const inSide = el => !!el?.closest(SIDE) && sidePicks().includes(el);
@@ -4722,7 +4722,7 @@ if (isTV) {
     // Instant (holding a key never queues animations) and kept mid-screen, clear of the edges.
     el.scrollIntoView({ block: el.closest('#sheet') ? 'nearest' : 'center', inline: 'nearest' });   // a details page scrolls only as needed
   };
-  const enterRail = () => { const a = $('#mainnav a.active') || railPicks()[0]; if (a) focusEl(a); };
+  const enterRail = () => { const a = $('#mainnav a.on') || railPicks()[0]; if (a) focusEl(a); };   // opens on the section you're in
   const leaveRail = () => {
     if (lastContent && lastContent.isConnected && visible(lastContent)) return focusEl(lastContent);
     const hero = [...$('#view').querySelectorAll('.hero-slide')].find(visible);   // a page with a banner starts on it
