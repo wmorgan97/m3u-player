@@ -1037,20 +1037,7 @@ function showHome() {
   // Snapshot: playing a channel moves it to the front of state.recents, so tiles must keep their own channel.
   const recentStrip = state.recents.filter(isLiveChannel).slice(0, 14);
   // Browse: the groups the user pinned to Home (in their order); until they pin any, the biggest live groups.
-  const pinnedAny = pl.some(p => p.homeGroups?.length);
-  const browse = pl.flatMap(p => {
-    const k = m3uKinds(p);
-    const gs = cachedGroups(p, k ? k.live : p.channels, k ? 'live' : 'all').filter(g => g.name && visibleGroup(p, g.name));
-    if (pinnedAny) {
-      const want = p.homeGroups || [];
-      return want.map(n => gs.find(g => g.name === n)).filter(Boolean).map(g => ({ pid: p.id, name: g.name, count: g.count }));
-    }
-    // Until groups are pinned: your own region's big groups first (US / UK / Canada / English), then the rest.
-    const home = /^(?:US|USA|UK|GB|EN|CA|IE)\b|\b(?:USA|UK|English)\b/i;
-    const mine = gs.filter(g => home.test(g.name));
-    return (mine.length >= 6 ? mine : gs).sort((a, b) => b.count - a.count).map(g => ({ pid: p.id, name: g.name, count: g.count }));
-  }).slice(0, pinnedAny ? 40 : 12);
-  const browseEdit = pl.length ? `<button class="link" data-edit-groups="${esc(pl[0].id)}">${pinnedAny ? 'Edit' : 'Choose'}</button>` : '';
+  // (Home no longer shows group tiles: no grouping of every channel at each Home render.)
   patchView(view, `
     ${isIOS && !isStandalone && !dismissed ? `<div class="banner">
       ${icon('share')}<span><b>Install on your iPhone:</b> tap Share, then “Add to Home Screen”. It opens full-screen and iOS keeps your playlists safe.</span>
