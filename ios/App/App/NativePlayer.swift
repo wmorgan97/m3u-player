@@ -2,6 +2,7 @@ import UIKit
 import AVKit
 import Capacitor
 import VLCKitSPM
+import MediaPlayer
 
 /// Hosts the web app and registers the app's own native plugin.
 class MainViewController: CAPBridgeViewController {
@@ -18,6 +19,7 @@ class MainViewController: CAPBridgeViewController {
         let live = args.contains("-testLive")
         var item = VLCPlayerController.Item(url: url, title: "Test stream", subtitle: "Player check", info: "", live: live, start: 0, headers: ["X-Test-Mute": "1"], hasPrev: true, hasNext: true)
         item.list = (1...12).map { ("Episode \($0)", "S1 E\($0)") }
+        item.listTitle = "Episodes"
         item.current = 2
         let controller = VLCPlayerController(item: item) { event in print("[player] \(event)") }
         controller.modalPresentationStyle = .fullScreen
@@ -90,6 +92,7 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
         item.listStart = call.getInt("listStart") ?? 0
         item.current = call.getInt("current") ?? 0
         item.listTitle = call.getString("listTitle") ?? "Episodes"
+        item.art = call.getString("art") ?? ""
         DispatchQueue.main.async {
             // Already open (channel up/down, next episode): swap the stream in place.
             if let open = self.vlcController, open.presentingViewController != nil {
@@ -172,6 +175,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         var listStart = 0
         var current = 0
         var listTitle = "Episodes"
+        var art = ""   // poster / logo for the lock screen
     }
 
     private let player = VLCMediaPlayer()
@@ -215,6 +219,33 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private static let aspectModes = ["Best fit", "Fill screen", "Stretch", "16:9", "4:3", "2.35:1"]
     private var aspectMode = 0
     private let spacer = UIView()   // takes the spare width when the slider is hidden (live), so "LIVE" stays small
+    // Big centre read-out for swipes (brightness, volume, seek): visible even while the controls are hidden.
+    private let hud = UILabel()
+    private var hudTimer: Timer?
+    // Audio / subtitle sync, VLC-style: nudge in 50 ms steps.
+    private let syncPanel = UIStackView()
+    private let syncLabel = UILabel()
+    private var syncKind = 0   // 0 audio, 1 subtitles
+    // "Next episode in 10" at the end of an episode.
+    private let nextPanel = UIView()
+    private let nextName = UILabel()
+    private let nextCount = UILabel()
+    private var countdown: Timer?
+    private var countdownLeft = 0
+    // Swipes on films and episodes: left half brightness, right half volume, sideways to seek.
+    private enum Drag { case none, scrub, brightness, volume }
+    private var drag = Drag.none
+    private var dragFrom: Double = 0
+    private var scrubTarget: Double = 0
+    private let volumeView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 10, height: 10))
+    private var volumeSlider: UISlider? { volumeView.subviews.compactMap { $0 as? UISlider }.first }
+    private var startBrightness: CGFloat = 1
+    // Lock screen / Control Center / headphone buttons.
+    private var remoteTargets: [(MPRemoteCommand, Any)] = []
+    private var artwork: MPMediaItemArtwork?
+    private var deinterlaceSet = false
+    // Bytes read, for the stream info panel's bitrate.
+    private var samples: [(t: TimeInterval, bytes: Int64)] = []
 
     init(item: Item, onEvent: @escaping ([String: Any]) -> Void) {
         self.item = item
@@ -262,6 +293,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         videoView.isUserInteractionEnabled = false   // VLC's drawing view must never take the touches
         // Taps and swipes are read straight from the touches (touchesBegan/Ended below): gesture recognizers
         // never fired over VLC's video view, which is what made the player feel dead to the touch.
+        startBrightness = UIScreen.main.brightness
+        view.addSubview(volumeView)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        setUpRemoteControls()
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
         load(item)
     }
@@ -273,14 +309,59 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         if let t = touches.first, !isOnControl(t) { touchStart = (t.location(in: view), ProcessInfo.processInfo.systemUptime) }
         super.touchesBegan(touches, with: event)
     }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesMoved(touches, with: event)
+        guard !locked, !item.live, let t = touches.first, let start = touchStart else { return }
+        let p = t.location(in: view), dx = p.x - start.point.x, dy = p.y - start.point.y
+        let h = view.bounds.height, w = view.bounds.width
+        if drag == .none {
+            guard max(abs(dx), abs(dy)) > 14 else { return }
+            if abs(dx) > abs(dy) { drag = .scrub; dragFrom = position().0; scrubTarget = dragFrom }
+            else if start.point.y < 50 || start.point.y > h - 50 { touchStart = nil; return }   // the system's own edge swipes
+            else if start.point.x < w / 2 { drag = .brightness; dragFrom = Double(UIScreen.main.brightness) }
+            else { drag = .volume; dragFrom = Double(AVAudioSession.sharedInstance().outputVolume) }
+        }
+        switch drag {
+        case .scrub:
+            let d = position().1
+            scrubTarget = min(max(0, dragFrom + Double(dx / w) * 120), d > 1 ? d - 1 : .greatestFiniteMagnitude)   // full width = 2 minutes
+            let delta = scrubTarget - dragFrom
+            showHud("\(clock(scrubTarget))   \(delta < 0 ? "−" : "+")\(clock(abs(delta)))", sticky: true)
+        case .brightness:
+            let v = min(1, max(0, dragFrom - Double(dy / (h * 0.6))))
+            UIScreen.main.brightness = CGFloat(v)
+            showHud("☀︎  \(Int(v * 100))%", sticky: true)
+        case .volume:
+            let v = min(1, max(0, dragFrom - Double(dy / (h * 0.6))))
+            volumeSlider?.value = Float(v)
+            showHud("Volume  \(Int(v * 100))%", sticky: true)
+        case .none: break
+        }
+    }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         defer { touchStart = nil; super.touchesEnded(touches, with: event) }
+        if drag != .none {
+            if drag == .scrub { player.time = VLCTime(int: Int32(scrubTarget * 1000)) }
+            drag = .none
+            showHud(hud.text ?? "", sticky: false)
+            return
+        }
         guard let t = touches.first, let start = touchStart else { return }
         let p = t.location(in: view), dx = p.x - start.point.x, dy = p.y - start.point.y
         if abs(dy) > 60 && abs(dy) > abs(dx) * 1.5 { return swipe(up: dy < 0) }          // vertical swipe: channel up/down
         if abs(dx) < 12 && abs(dy) < 12 && ProcessInfo.processInfo.systemUptime - start.time < 0.6 { tapped(at: p) }
     }
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { touchStart = nil; super.touchesCancelled(touches, with: event) }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if drag != .none { drag = .none; showHud(hud.text ?? "", sticky: false) }
+        touchStart = nil
+        super.touchesCancelled(touches, with: event)
+    }
+    private func showHud(_ text: String, sticky: Bool) {
+        hudTimer?.invalidate()
+        hud.text = text
+        hud.alpha = 1
+        if !sticky { hudTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { [weak self] _ in UIView.animate(withDuration: 0.25) { self?.hud.alpha = 0 } } }
+    }
     private func isOnControl(_ t: UITouch) -> Bool {
         guard overlay.alpha > 0.5 else { return false }
         var v: UIView? = t.view
@@ -311,7 +392,19 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         qualityBadge.isHidden = true
         listButton.isHidden = next.list.count < 2
         listButton.accessibilityLabel = next.listTitle
-        infoButton.isHidden = next.info.isEmpty
+        infoButton.isHidden = false   // stream info is always there
+        countdown?.invalidate()
+        nextPanel.isHidden = true
+        syncPanel.isHidden = true
+        deinterlaceSet = false
+        samples = []
+        let rc = MPRemoteCommandCenter.shared()
+        rc.skipForwardCommand.isEnabled = !next.live
+        rc.skipBackwardCommand.isEnabled = !next.live
+        rc.changePlaybackPositionCommand.isEnabled = !next.live
+        rc.nextTrackCommand.isEnabled = next.hasNext
+        rc.previousTrackCommand.isEnabled = next.hasPrev
+        loadArtwork(next.art)
         prevButton.isEnabled = next.hasPrev
         nextButton.isEnabled = next.hasNext
         prevButton.alpha = next.hasPrev ? 1 : 0.35
@@ -327,6 +420,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         player.media = media
         player.play()
         showOverlay()
+        updateNowPlaying()
     }
 
     func finish() {
@@ -336,6 +430,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         onEvent(["type": "closed", "t": t, "d": d])
         tickTimer?.invalidate()
         hideTimer?.invalidate()
+        countdown?.invalidate()
+        tearDownRemoteControls()
+        if UIScreen.main.brightness != startBrightness { UIScreen.main.brightness = startBrightness }   // the phone's own brightness back
         player.stop()
         dismiss(animated: true)
     }
@@ -357,6 +454,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         playButton.setImage(UIImage(systemName: player.isPlaying ? "pause.fill" : "play.fill"), for: .normal)
         ticks += 1
         if !item.live && d > 0 && ticks % 5 == 0 { onEvent(["type": "progress", "t": t, "d": d]) }
+        if ticks % 5 == 0 { updateNowPlaying() }
+        if let m = player.media {
+            samples.append((ProcessInfo.processInfo.systemUptime, Int64(m.statistics.readBytes)))
+            if samples.count > 6 { samples.removeFirst() }
+        }
     }
 
     private func updateQuality() {
@@ -378,8 +480,14 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             if !player.isPlaying { spinner.startAnimating() }
         case .playing:
             applyAspect()
+            // Interlaced broadcasts (most live sport, many UK channels) get VLC's smooth 50fps deinterlacer; progressive
+            // pictures are left alone (auto only acts on interlaced frames).
+            if !deinterlaceSet { deinterlaceSet = true; player.setDeinterlace(.auto, withFilter: item.live ? "yadif2x" : "yadif") }
             spinner.stopAnimating()
             statusLabel.text = ""
+            updateNowPlaying()
+        case .paused:
+            updateNowPlaying()
         case .error:
             spinner.stopAnimating()
             statusLabel.text = "This stream couldn't be played"
@@ -389,6 +497,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             let (t, d) = position()
             onEvent(["type": "progress", "t": d > 0 ? d : t, "d": d])
             onEvent(["type": "ended"])
+            if !item.live && item.hasNext && item.listTitle == "Episodes" { startCountdown() } else { showOverlay(keep: true) }
         default:
             break
         }
@@ -523,6 +632,91 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         ] + [aspectButton, lockButton, listButton].map { $0.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: 2) })
         unlockButton.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(unlockButton)
+
+        hud.font = .monospacedDigitSystemFont(ofSize: 22, weight: .semibold)
+        hud.textColor = .white
+        hud.textAlignment = .center
+        hud.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        hud.layer.cornerRadius = 12
+        hud.clipsToBounds = true
+        hud.alpha = 0
+        hud.isUserInteractionEnabled = false
+        hud.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(hud)
+
+        func pill(_ title: String?, _ symbol: String?, _ action: Selector) -> UIButton {
+            let b = UIButton(type: .system)
+            if let title = title { b.setTitle(title, for: .normal) }
+            if let symbol = symbol { b.setImage(UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)), for: .normal) }
+            b.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+            b.tintColor = .white
+            b.addTarget(self, action: action, for: .touchUpInside)
+            b.widthAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
+            b.heightAnchor.constraint(equalToConstant: 40).isActive = true
+            return b
+        }
+        syncLabel.font = .monospacedDigitSystemFont(ofSize: 15, weight: .medium)
+        syncLabel.textColor = .white
+        syncLabel.textAlignment = .center
+        syncLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        for v in [pill(nil, "minus", #selector(syncMinus)), syncLabel, pill(nil, "plus", #selector(syncPlus)), pill("Reset", nil, #selector(syncReset)), pill(nil, "xmark", #selector(syncDone))] { syncPanel.addArrangedSubview(v) }
+        syncPanel.spacing = 6
+        syncPanel.alignment = .center
+        syncPanel.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        syncPanel.layer.cornerRadius = 12
+        syncPanel.isLayoutMarginsRelativeArrangement = true
+        syncPanel.layoutMargins = UIEdgeInsets(top: 2, left: 10, bottom: 2, right: 10)
+        syncPanel.isHidden = true
+        syncPanel.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(syncPanel)
+
+        nextPanel.backgroundColor = UIColor(white: 0.1, alpha: 0.92)
+        nextPanel.layer.cornerRadius = 14
+        nextPanel.isHidden = true
+        nextPanel.translatesAutoresizingMaskIntoConstraints = false
+        nextCount.font = .systemFont(ofSize: 13, weight: .medium)
+        nextCount.textColor = UIColor.white.withAlphaComponent(0.7)
+        nextName.font = .systemFont(ofSize: 16, weight: .semibold)
+        nextName.textColor = .white
+        let playNow = UIButton(type: .system)
+        playNow.setTitle("Play now", for: .normal)
+        playNow.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
+        playNow.setTitleColor(.black, for: .normal)
+        playNow.backgroundColor = .white
+        playNow.layer.cornerRadius = 8
+        playNow.heightAnchor.constraint(equalToConstant: 38).isActive = true
+        playNow.addTarget(self, action: #selector(playNextNow), for: .touchUpInside)
+        let cancel = UIButton(type: .system)
+        cancel.setTitle("Cancel", for: .normal)
+        cancel.titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
+        cancel.tintColor = .white
+        cancel.heightAnchor.constraint(equalToConstant: 38).isActive = true
+        cancel.addTarget(self, action: #selector(cancelNext), for: .touchUpInside)
+        let buttons = UIStackView(arrangedSubviews: [playNow, cancel])
+        buttons.distribution = .fillEqually
+        buttons.spacing = 8
+        let nextStack = UIStackView(arrangedSubviews: [nextCount, nextName, buttons])
+        nextStack.axis = .vertical
+        nextStack.spacing = 6
+        nextStack.setCustomSpacing(12, after: nextName)
+        nextStack.translatesAutoresizingMaskIntoConstraints = false
+        nextPanel.addSubview(nextStack)
+        view.addSubview(nextPanel)
+        NSLayoutConstraint.activate([
+            hud.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            hud.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -90),
+            hud.heightAnchor.constraint(equalToConstant: 48),
+            hud.widthAnchor.constraint(greaterThanOrEqualToConstant: 150),
+            syncPanel.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            syncPanel.bottomAnchor.constraint(equalTo: lockButton.topAnchor, constant: -10),
+            nextPanel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            nextPanel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -110),
+            nextPanel.widthAnchor.constraint(equalToConstant: 260),
+            nextStack.topAnchor.constraint(equalTo: nextPanel.topAnchor, constant: 14),
+            nextStack.bottomAnchor.constraint(equalTo: nextPanel.bottomAnchor, constant: -14),
+            nextStack.leadingAnchor.constraint(equalTo: nextPanel.leadingAnchor, constant: 14),
+            nextStack.trailingAnchor.constraint(equalTo: nextPanel.trailingAnchor, constant: -14),
+        ])
         let g = overlay.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
             top.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 16),
@@ -592,11 +786,143 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     /// The current programme's (or film's) description, from the guide / catalogue.
     @objc private func showInfo() {
-        let sheet = UIAlertController(title: item.subtitle.isEmpty ? item.title : item.subtitle, message: item.info, preferredStyle: .alert)
+        let text = [item.info, streamInfo()].filter { !$0.isEmpty }.joined(separator: "\n\n")
+        let sheet = UIAlertController(title: item.subtitle.isEmpty || item.info.isEmpty ? item.title : item.subtitle, message: text, preferredStyle: .alert)
         sheet.addAction(UIAlertAction(title: "Close", style: .cancel))
         present(sheet, animated: true)
         showOverlay(keep: true)
     }
+    /// What's actually playing, like VLC's media info: codec, size, frame rate, bit depth, audio format, bitrate.
+    private func streamInfo() -> String {
+        let tracks = (player.media?.tracksInformation as? [[String: Any]]) ?? []
+        func codec(_ t: [String: Any], _ type: String) -> String {
+            guard let n = t[VLCMediaTracksInformationCodec] as? NSNumber else { return "?" }
+            let long = VLCMedia.codecName(forFourCC: n.uint32Value, trackType: type), u = long.uppercased()
+            // VLC's names are long ("H264 - MPEG-4 AVC (part 10)"): the everyday name instead.
+            let names: [(String, String)] = [("HEVC", "HEVC (H.265)"), ("H265", "HEVC (H.265)"), ("H264", "H.264"), ("AV1", "AV1"), ("VP9", "VP9"),
+                ("MPEG-2", "MPEG-2"), ("MPEG-1/2 VIDEO", "MPEG-2"), ("E-AC-3", "Dolby Digital Plus"), ("EAC3", "Dolby Digital Plus"), ("A52", "Dolby Digital"),
+                ("AC-3", "Dolby Digital"), ("TRUEHD", "Dolby TrueHD"), ("DTS", "DTS"), ("AAC", "AAC"), ("OPUS", "Opus"), ("FLAC", "FLAC"),
+                ("MPEG AUDIO", "MP2 / MP3"), ("MP3", "MP3")]
+            return names.first { u.contains($0.0) }?.1 ?? long
+        }
+        func num(_ t: [String: Any], _ k: String) -> Double { (t[k] as? NSNumber)?.doubleValue ?? 0 }
+        var lines: [String] = []
+        if let v = tracks.first(where: { ($0[VLCMediaTracksInformationType] as? String) == VLCMediaTracksInformationTypeVideo }) {
+            let name = codec(v, VLCMediaTracksInformationTypeVideo)
+            var bits = [name]
+            let w = Int(num(v, VLCMediaTracksInformationVideoWidth)), h = Int(num(v, VLCMediaTracksInformationVideoHeight))
+            let size = player.videoSize
+            if w > 0 && h > 0 { bits.append("\(w)×\(h)") } else if size.width > 0 { bits.append("\(Int(size.width))×\(Int(size.height))") }
+            let fr = num(v, VLCMediaTracksInformationFrameRate), den = num(v, VLCMediaTracksInformationFrameRateDenominator)
+            if fr > 0 && den > 0 { bits.append(String(format: "%g fps", (fr / den * 100).rounded() / 100)) }
+            if num(v, VLCMediaTracksInformationCodecProfile) == 2 && (name.contains("HEVC") || name.contains("265")) { bits.append("10-bit") }
+            lines.append("Video: " + bits.joined(separator: " · "))
+        }
+        let audio = tracks.filter { ($0[VLCMediaTracksInformationType] as? String) == VLCMediaTracksInformationTypeAudio }
+        if let a = audio.first(where: { Int32(num($0, VLCMediaTracksInformationId)) == player.currentAudioTrackIndex }) ?? audio.first {
+            var bits = [codec(a, VLCMediaTracksInformationTypeAudio)]
+            let ch = Int(num(a, VLCMediaTracksInformationAudioChannelsNumber))
+            if ch > 0 { bits.append(ch == 1 ? "Mono" : ch == 2 ? "Stereo" : ch == 6 ? "5.1" : ch == 8 ? "7.1" : "\(ch) ch") }
+            let rate = num(a, VLCMediaTracksInformationAudioRate)
+            if rate > 0 { bits.append(String(format: "%g kHz", rate / 1000)) }
+            if let lang = a[VLCMediaTracksInformationLanguage] as? String, !lang.isEmpty { bits.append(lang.uppercased()) }
+            lines.append("Audio: " + bits.joined(separator: " · "))
+        }
+        if let first = samples.first, let last = samples.last, last.t - first.t >= 2, last.bytes > first.bytes {
+            let mbit = Double(last.bytes - first.bytes) * 8 / (last.t - first.t) / 1_000_000
+            lines.append(String(format: "Bitrate: %.1f Mbit/s", mbit))
+        }
+        if let stats = player.media?.statistics, stats.lostPictures > 0 { lines.append("Dropped frames: \(stats.lostPictures)") }
+        let ad = player.currentAudioPlaybackDelay / 1000
+        if ad != 0 { lines.append("Audio sync: \(ad > 0 ? "+" : "")\(ad) ms") }
+        return lines.isEmpty ? "Stream details appear once it's playing." : lines.joined(separator: "\n")
+    }
+
+    // MARK: sync
+    private func showSync(_ kind: Int) {
+        syncKind = kind
+        updateSyncLabel()
+        syncPanel.isHidden = false
+        showOverlay(keep: true)
+    }
+    private var syncMs: Int { (syncKind == 0 ? player.currentAudioPlaybackDelay : player.currentVideoSubTitleDelay) / 1000 }
+    private func setSync(_ ms: Int) {
+        if syncKind == 0 { player.currentAudioPlaybackDelay = ms * 1000 } else { player.currentVideoSubTitleDelay = ms * 1000 }
+        updateSyncLabel()
+    }
+    private func updateSyncLabel() {
+        let ms = syncMs
+        syncLabel.text = "\(syncKind == 0 ? "Audio" : "Subtitles") \(ms > 0 ? "+" : "")\(ms) ms" + (ms == 0 ? "" : ms > 0 ? " later" : " earlier")
+    }
+    @objc private func syncMinus() { setSync(syncMs - 50) }
+    @objc private func syncPlus() { setSync(syncMs + 50) }
+    @objc private func syncReset() { setSync(0) }
+    @objc private func syncDone() { syncPanel.isHidden = true; showOverlay() }
+
+    // MARK: next episode
+    private func startCountdown() {
+        let i = item.current - item.listStart + 1
+        nextName.text = item.list.indices.contains(i) ? item.list[i].title : "Next episode"
+        countdownLeft = 10
+        nextCount.text = "Next episode in 10"
+        nextPanel.isHidden = false
+        countdown?.invalidate()
+        countdown = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            self.countdownLeft -= 1
+            self.nextCount.text = "Next episode in \(self.countdownLeft)"
+            if self.countdownLeft <= 0 { self.playNextNow() }
+        }
+    }
+    @objc private func playNextNow() { countdown?.invalidate(); nextPanel.isHidden = true; onEvent(["type": "step", "dir": 1]) }
+    @objc private func cancelNext() { countdown?.invalidate(); nextPanel.isHidden = true; showOverlay(keep: true) }
+
+    // MARK: lock screen
+    private func setUpRemoteControls() {
+        let c = MPRemoteCommandCenter.shared()
+        func on(_ cmd: MPRemoteCommand, _ f: @escaping (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) { remoteTargets.append((cmd, cmd.addTarget(handler: f))) }
+        on(c.playCommand) { [weak self] _ in self?.player.play(); return .success }
+        on(c.pauseCommand) { [weak self] _ in self?.player.pause(); return .success }
+        on(c.togglePlayPauseCommand) { [weak self] _ in self?.playPause(); return .success }
+        on(c.nextTrackCommand) { [weak self] _ in self?.onEvent(["type": "step", "dir": 1]); return .success }
+        on(c.previousTrackCommand) { [weak self] _ in self?.onEvent(["type": "step", "dir": -1]); return .success }
+        c.skipForwardCommand.preferredIntervals = [30]
+        c.skipBackwardCommand.preferredIntervals = [30]
+        on(c.skipForwardCommand) { [weak self] _ in self?.player.jumpForward(30); return .success }
+        on(c.skipBackwardCommand) { [weak self] _ in self?.player.jumpBackward(30); return .success }
+        on(c.changePlaybackPositionCommand) { [weak self] e in
+            guard let e = e as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            self?.player.time = VLCTime(int: Int32(e.positionTime * 1000))
+            return .success
+        }
+    }
+    private func tearDownRemoteControls() {
+        for (cmd, target) in remoteTargets { cmd.removeTarget(target) }
+        remoteTargets = []
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+    }
+    private func updateNowPlaying() {
+        guard !finished else { return }
+        let (t, d) = position()
+        var info: [String: Any] = [MPMediaItemPropertyTitle: item.title, MPMediaItemPropertyArtist: item.subtitle,
+                                   MPNowPlayingInfoPropertyPlaybackRate: player.isPlaying ? 1.0 : 0.0, MPNowPlayingInfoPropertyIsLiveStream: item.live]
+        if !item.live && d > 0 { info[MPMediaItemPropertyPlaybackDuration] = d; info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = t }
+        if let a = artwork { info[MPMediaItemPropertyArtwork] = a }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+    private func loadArtwork(_ url: String) {
+        artwork = nil
+        guard !url.isEmpty, let u = URL(string: url) else { return }
+        URLSession.shared.dataTask(with: u) { [weak self] data, _, _ in
+            guard let data = data, let img = UIImage(data: data) else { return }
+            DispatchQueue.main.async {
+                guard let self = self, self.item.art == url else { return }
+                self.artwork = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+                self.updateNowPlaying()
+            }
+        }.resume()
+    }
+
     /// The picture-size icon: a filled screen with a small panel cut into its lower-right corner (VLC-style).
     private static func aspectIcon() -> UIImage {
         let size = CGSize(width: 24, height: 20)
@@ -687,6 +1013,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         NSLog("M3UDBG playPause playing=%d", player.isPlaying ? 1 : 0)
         #endif
         if player.isPlaying { player.pause(); showOverlay(keep: true) } else { player.play(); showOverlay() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.updateNowPlaying() }
     }
 
     @objc private func jumpBack() { player.jumpBackward(30); showOverlay() }
@@ -705,11 +1032,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         if d > 0 { elapsedLabel.text = clock(Double(slider.value) * d) }
     }
 
-    @objc private func pickAudio() { pickTrack(title: "Audio", names: player.audioTrackNames, ids: player.audioTrackIndexes, current: player.currentAudioTrackIndex, source: audioButton) { [weak self] id in self?.player.currentAudioTrackIndex = id } }
+    @objc private func pickAudio() { pickTrack(title: "Audio", names: player.audioTrackNames, ids: player.audioTrackIndexes, current: player.currentAudioTrackIndex, source: audioButton, extra: ("Audio sync…", { [weak self] in self?.showSync(0) })) { [weak self] id in self?.player.currentAudioTrackIndex = id } }
 
-    @objc private func pickSubtitles() { pickTrack(title: "Subtitles", names: player.videoSubTitlesNames, ids: player.videoSubTitlesIndexes, current: player.currentVideoSubTitleIndex, source: subsButton) { [weak self] id in self?.player.currentVideoSubTitleIndex = id } }
+    @objc private func pickSubtitles() { pickTrack(title: "Subtitles", names: player.videoSubTitlesNames, ids: player.videoSubTitlesIndexes, current: player.currentVideoSubTitleIndex, source: subsButton, extra: ("Subtitle sync…", { [weak self] in self?.showSync(1) })) { [weak self] id in self?.player.currentVideoSubTitleIndex = id } }
 
-    private func pickTrack(title: String, names: [Any]?, ids: [Any]?, current: Int32, source: UIView, choose: @escaping (Int32) -> Void) {
+    private func pickTrack(title: String, names: [Any]?, ids: [Any]?, current: Int32, source: UIView, extra: (String, () -> Void)? = nil, choose: @escaping (Int32) -> Void) {
         let labels = (names ?? []).map { "\($0)" }
         let numbers = (ids ?? []).compactMap { ($0 as? NSNumber)?.int32Value }
         let sheet = UIAlertController(title: title, message: labels.isEmpty ? "None in this stream" : nil, preferredStyle: .actionSheet)
@@ -717,6 +1044,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             let id = numbers[i]
             sheet.addAction(UIAlertAction(title: (id == current ? "✓ " : "") + label, style: .default) { _ in choose(id) })
         }
+        if let (label, action) = extra { sheet.addAction(UIAlertAction(title: label, style: .default) { _ in action() }) }
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         sheet.popoverPresentationController?.sourceView = source
         sheet.popoverPresentationController?.sourceRect = source.bounds
