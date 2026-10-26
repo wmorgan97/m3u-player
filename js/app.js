@@ -4668,6 +4668,9 @@ const perfTimer = setInterval(() => {
 // Films and channels play in the TV's own player (PlayerActivity), which has its own remote keys.
 if (isTV) {
   document.documentElement.classList.add('tv');
+  // The TV app's own screens use the same server: hand them the key (and again whenever it changes).
+  const giveKey = () => { if (state.settings?.serverKey) globalThis.Capacitor?.nativePromise?.('NativePlayer', 'tvConfig', { key: state.settings.serverKey }).catch(() => {}); };
+  setTimeout(giveKey, 1500); setInterval(giveKey, 60_000);
   const RAIL = '#mainnav a, #tq, #actions button';
   const PICKABLE = 'a[href], button:not([disabled]), input:not([type=hidden]), select, textarea, [tabindex], .scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, .epc, .poster, [data-go], [data-see], [data-resume]';
   const CARDISH = '.scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, .epc, .poster';
