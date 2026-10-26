@@ -786,8 +786,9 @@ function homeHub(pl) {
     for (const tab of ['movies', 'series']) {
       const e = vodCache.get(vodKey(p, tab));
       // Only through your server (the provider's own catalogue is 50-70MB); it may still be connecting.
-      if (!canSync()) { hub.loading = serverProxy.available || !detectedServer; continue; }
-      if (!e || Array.isArray(e)) { if (Array.isArray(e)) vodCache.delete(vodKey(p, tab)); hub.loading = true; loadVod(p, tab).then(homeRefresh).catch(() => {}); continue; }
+      // The catalogue saved on this device shows at once; only with nothing saved does Home wait for the server.
+      if (!e || (Array.isArray(e) && canSync())) { if (e) vodCache.delete(vodKey(p, tab)); hub.loading = true; loadVod(p, tab).then(homeRefresh).catch(() => {}); continue; }
+      if (Array.isArray(e)) continue;
       hub.vodLink[tab] ||= `#/p/${p.id}`;
       const what = tab === 'movies' ? 'movies' : 'series';
       const withArt = l => (l || []).filter(it => it.logo);
@@ -1420,6 +1421,19 @@ function catalogueEntry(p, tab, d) {
     trending: keep((d.trending || []).map(raw => { const it = toItems(p, tab, all, [raw])[0]; return it && { ...it, tm: raw.tm }; }).filter(Boolean)), groups: new Map(), searches: new Map(),
     groupList: [...tmdbGroups, ...shown] };
 }
+async function refreshVodInBackground(p, tab) {
+  if (!detectedServer) await Promise.race([serverReady, new Promise(r => setTimeout(r, 15000))]);
+  if (!canSync()) return;
+  try {
+    const d = await vodApi(p, tab);
+    const key = vodKey(p, tab), old = vodCache.get(key);
+    const entry = catalogueEntry(p, tab, d);
+    if (old && !Array.isArray(old)) { entry.groups = old.groups; entry.searches = old.searches; }   // keep groups already loaded
+    vodCache.set(key, entry);
+    db.set(`vod:${key}`, { at: Date.now(), overview: d }).catch(() => {});
+    homeRefresh();
+  } catch {}
+}
 async function requestVod(p, tab, { group, q }) {
   const key = vodKey(p, tab), entry = vodCache.get(key);
   const tag = `${key}|${q !== undefined ? 'q:' + q : 'g:' + group}`;
@@ -1442,17 +1456,36 @@ async function requestVod(p, tab, { group, q }) {
   }
 }
 
-async function loadVod(p, tab, { force = false } = {}) {
+const vodLoading = new Map();   // one load per catalogue at a time
+function loadVod(p, tab, opts = {}) {
+  const key = vodKey(p, tab);
+  if (!opts.force && vodLoading.has(key)) return vodLoading.get(key);
+  const job = loadVodNow(p, tab, opts).finally(() => vodLoading.delete(key));
+  vodLoading.set(key, job);
+  return job;
+}
+async function loadVodNow(p, tab, { force = false } = {}) {
   const key = vodKey(p, tab);
   if (vodCache.has(key) && !force) return;
-  // Opened before the server answered (a reload on Movies/Series): wait for it, rather than pulling the
-  // provider's whole 50-70MB catalogue straight to this device.
+  // Instant start: the catalogue saved on this device is shown at once (up to a week old); when it is more than
+  // a few hours old a fresh copy is fetched in the background and swapped in.
+  if (!force) {
+    const cached = await db.get(`vod:${key}`);
+    if (cached?.overview?.v === 4 && Date.now() - cached.at < 7 * DAY) {
+      vodCache.set(key, catalogueEntry(p, tab, cached.overview));
+      if (state.current === p && state.tab === tab) refreshPlaylistView();
+      if (Date.now() - cached.at > 6 * 3600_000) setTimeout(() => refreshVodInBackground(p, tab), 4000);
+      return;
+    }
+  }
+  // Nothing saved yet and the server not answered (a reload on Movies/Series): wait for it, rather than pulling
+  // the provider's whole 50-70MB catalogue straight to this device.
   if (!detectedServer) await Promise.race([serverReady, new Promise(r => setTimeout(r, 10000))]);
   if (vodCache.has(key) && !force) return;
   if (!force) {
     const cached = await db.get(`vod:${key}`);
-    if (cached && Date.now() - cached.at < DAY && (canSync() ? cached.overview?.v === 4 : cached.items)) {
-      vodCache.set(key, cached.overview ? catalogueEntry(p, tab, cached.overview) : cached.items);
+    if (!canSync() && cached?.items && Date.now() - cached.at < DAY) {
+      vodCache.set(key, cached.items);
       if (state.current === p && state.tab === tab) refreshPlaylistView();
       return;
     }
