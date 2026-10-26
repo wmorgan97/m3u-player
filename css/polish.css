@@ -799,3 +799,7 @@ button.cw-x { border: 0; padding: 0; margin: 0; -webkit-appearance: none; appear
 #ctl-live.on::before { background: #fff; animation: live-pulse 1.6s ease-in-out infinite; }
 #ctl-live:not(.on) { background: rgba(255,255,255,.14); }
 @keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+/* LIVE: quiet — a red dot and the word, no coloured pill (speed and calm over flash) */
+#ctl-live, #ctl-live.on, #ctl-live:not(.on) { background: transparent !important; box-shadow: none !important; padding: 0 6px !important; font-weight: 700; letter-spacing: .06em; }
+#ctl-live.on::before { background: #ff4a4f; animation: none; }
+#ctl-live:not(.on) { color: rgba(255,255,255,.7); }
