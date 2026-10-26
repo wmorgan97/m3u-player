@@ -96,6 +96,7 @@ async function init() {
   bindPlayer();
   new ResizeObserver(([e]) => document.documentElement.style.setProperty('--chrome-h', `${e.target.offsetHeight}px`)).observe($('.chrome'));
   bindKeys();
+  bindTopSearch();
   document.querySelectorAll('#mainnav [data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); });
   window.addEventListener('hashchange', route);
   window.addEventListener('resize', debounce(sizeGuide, 100));
@@ -738,8 +739,7 @@ function resumeCardHtml(c) {
 
 // Home search: channels from every playlist plus movies and series from each Xtream catalogue (server search).
 let homeSearchSeq = 0;
-async function homeSearch(q) {
-  const box = $('#home-results');
+async function homeSearch(q, box = $('#home-results')) {
   if (!box) return;
   const seq = ++homeSearchSeq;
   if (q.length < 2) { box.hidden = true; box.innerHTML = ''; return; }
@@ -754,8 +754,8 @@ async function homeSearch(q) {
   }
   shelfItems.set('hs-chan', chans);
   const section = (title, key, items, row) => items.length ? `<div class="hs-title">${title}</div>${items.map((it, k) => row(it, key, k)).join('')}` : '';
-  const chanRow = (c, key, k) => `<div class="hs-row" data-shelf="${key}" data-k="${k}">${logoHtml(c)}<span class="row-text"><span class="row-name">${esc(c.name)}</span><span class="muted">${esc(prettyGroup(c.group) || '')}</span></span>${icon('play')}</div>`;
-  const vodRow = (it, key, k) => `<div class="hs-row" data-shelf="${key}" data-k="${k}"><span class="hs-poster">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span><span class="row-text"><span class="row-name">${esc(it.name)}</span><span class="muted">${[it.kind === 'series' ? 'Series' : 'Movie', it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : ''].filter(Boolean).map(esc).join(' · ')}</span></span></div>`;
+  const chanRow = (c, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}">${logoHtml(c)}<span class="row-text"><span class="row-name">${esc(c.name)}</span><span class="muted">${esc(prettyGroup(c.group) || '')}</span></span>${icon('play')}</div>`;
+  const vodRow = (it, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}"><span class="hs-poster">${it.logo ? `<img src="${esc(it.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span><span class="row-text"><span class="row-name">${esc(it.name)}</span><span class="muted">${[it.kind === 'series' ? 'Series' : 'Movie', it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : ''].filter(Boolean).map(esc).join(' · ')}</span></span></div>`;
   box.innerHTML = section('Channels', 'hs-chan', chans, chanRow) || '<div class="muted hs-empty">Searching…</div>';
   box.hidden = false;
   if (!canSync()) { if (!chans.length) box.innerHTML = '<div class="muted hs-empty">No channels match.</div>'; return; }
@@ -888,6 +888,39 @@ function addRowArrows(root) {
     row.addEventListener('scroll', upd, { passive: true });
     requestAnimationFrame(upd);
   });
+}
+// Search in the top bar (computers): channels, movies and series from any page; Enter shows every match.
+function bindTopSearch() {
+  const q = $('#tq'), box = $('#ts-results');
+  if (!q || !box) return;
+  $('#topsearch [data-icon]').innerHTML = icon('search');
+  const close = () => { box.hidden = true; };
+  q.addEventListener('input', debounce(() => homeSearch(q.value.trim(), box), 220));
+  q.addEventListener('focus', () => { if (q.value.trim().length >= 2 && box.innerHTML) box.hidden = false; });
+  q.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { close(); q.blur(); }
+    if (e.key === 'Enter' && q.value.trim()) { close(); pendingQuery = q.value.trim(); location.hash = '#/all'; q.blur(); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); box.querySelector('.hs-row')?.focus(); }
+  });
+  box.addEventListener('keydown', e => {
+    const rows = [...box.querySelectorAll('.hs-row')], i = rows.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); rows[i + 1]?.focus(); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); (rows[i - 1] || q).focus(); }
+    if (e.key === 'Enter' && i >= 0) { e.preventDefault(); rows[i].click(); }
+    if (e.key === 'Escape') { close(); q.focus(); }
+  });
+  box.addEventListener('mousedown', e => e.preventDefault());   // keep focus in the field while clicking a result
+  box.addEventListener('click', e => {
+    const row = e.target.closest('.hs-row');
+    if (!row) return;
+    const it = shelfItems.get(row.dataset.shelf)?.[+row.dataset.k];
+    close(); q.blur();
+    if (!it) return;
+    if (it.kind === 'series') return seriesSheet(it);
+    if (it.kind === 'movie') return movieSheet(it);
+    playChannel([it], 0);
+  });
+  document.addEventListener('click', e => { if (!e.target.closest('#topsearch')) close(); });
 }
 function homeShelfHtml(sh) {
   if (sh.top10) return `<div class="row-head"><h3>${esc(sh.title)}</h3><span class="muted small">from TMDB</span></div><ul class="shelf-row home-shelf top10">${sh.items.map((it, k) => `<li class="scard t10" data-shelf="${esc(sh.key)}" data-k="${k}"><span class="t10-n">${k + 1}</span>${cardHtml(it, sh.key, k).replace(/^<li[^>]*>|<\/li>$/g, '')}</li>`).join('')}</ul>`;
@@ -3881,8 +3914,9 @@ function bindKeys() {
     const typing = e.target.matches('input, textarea, select');
     const sheetOpen = !$('#sheet').hidden;
     if (e.key === 'Escape') { if (sheetOpen) closeSheet(); else if (state.playing && !typing) stopPlaying(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && matchMedia('(min-width: 900px)').matches) { e.preventDefault(); $('#tq')?.focus(); $('#tq')?.select(); return; }
     if (typing || sheetOpen || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.key === '/') { e.preventDefault(); ($('#q') || $('#home-q') || $('#gq'))?.focus(); return; }
+    if (e.key === '/') { e.preventDefault(); ($('#q') || (matchMedia('(min-width: 900px)').matches ? $('#tq') : $('#home-q')) || $('#gq'))?.focus(); return; }
     if (/^\d$/.test(e.key) && (state.playing || state.current)) {
       zapBuf += e.key; clearTimeout(zapTimer);
       toast(`Channel ${zapBuf}…`);

@@ -436,6 +436,12 @@ export async function handleHls(req, res, url) {
   const info = parts.length === 2 && parts[1] === 'info';
   const subs = parts.length === 2 && parts[1] === 'subs';
   const pause = parts.length === 2 && parts[1] === 'pause';
+  // Deploys ask this before restarting: streams playing now, or films paused in the last 30 minutes.
+  if (url.pathname === '/hls/active') {
+    if (PROXY_KEY && url.searchParams.get('key') !== PROXY_KEY) return send(res, 403, 'Wrong or missing key');
+    const n = [...sessions.values()].filter(s => !s.exited || (s.paused && Date.now() - (s.pausedAt || 0) < 30 * 60_000) || Date.now() - s.lastAccess < 60_000).length;
+    return send(res, 200, String(n), { 'cache-control': 'no-store' });
+  }
   const target = url.searchParams.get('url');
   const key = url.searchParams.get('key') || '';
   if (!target) return send(res, 400, 'Missing url');

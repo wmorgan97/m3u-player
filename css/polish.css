@@ -736,3 +736,20 @@ button.cw-x { border: 0; padding: 0; margin: 0; -webkit-appearance: none; appear
 .nc-dot { width: 6px; height: 6px; border-radius: 50%; background: #e5484d; box-shadow: 0 0 0 3px rgba(229,72,77,.18); }
 .onnow.nc .nc-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 0; margin: 0; background: rgba(255,255,255,.06); }
 @media (min-width: 900px) { .onnow.nc { width: 300px; } }
+
+/* Search in the top bar (computers only; phones keep the search on Home) */
+.topsearch { display: none; }
+@media (min-width: 900px) {
+  .topsearch { display: block; position: relative; flex: 0 1 380px; margin-left: auto; margin-right: 6px; }
+  .ts-box { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 10px 0 12px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); cursor: text; }
+  .ts-box:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: var(--surface-2); }
+  .ts-ico .ico { width: 16px; height: 16px; color: var(--muted); }
+  .ts-box input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 14px; padding: 0; box-shadow: none; }
+  .ts-box kbd { font: 600 11px/1 inherit; color: var(--muted); padding: 4px 6px; border-radius: 6px; border: 1px solid var(--line); }
+  .ts-box:focus-within kbd { display: none; }
+  .ts-results { position: absolute; top: calc(100% + 8px); right: 0; width: min(520px, 90vw); max-height: min(70vh, 640px); overflow-y: auto; margin: 0; z-index: 60; }
+  .hs-row:focus { outline: none; background: var(--surface-2); }
+  .mainnav { margin-right: 0; }
+  .home-top .home-search, #home-results { display: none; }   /* the top bar has it */
+  .home-top { margin-top: 10px; }
+}
