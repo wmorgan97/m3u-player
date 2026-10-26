@@ -11,7 +11,9 @@
 // The app never downloads the whole catalogue: a group is a few hundred titles, search is server-side.
 
 import { createHash } from 'node:crypto';
-import { gzipSync } from 'node:zlib';
+import { gzipSync, gunzipSync } from 'node:zlib';
+import { promises as fs } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { readBody } from './sync.js';
 import { trending, collections, onTmdbChange } from './tmdb.js';
 import { warmThumbs } from './img.js';
@@ -37,21 +39,47 @@ const yearIn = it => Number(String(it.year || '').match(/(19|20)\d\d/)?.[0]) || 
 const bareKey = it => titleKey(it).replace(/(19|20)\d\d$/, '');
 const uniq = (list, n) => { const seen = new Set(), out = []; for (const it of list) { const k = titleKey(it); if (k && !seen.has(k)) { seen.add(k); out.push(it); if (out.length >= n) break; } } return out; };
 
+// A provider blip (dropped connection, a 5xx while it's busy) is retried twice before it counts.
 async function api(base, user, pass, action) {
   const u = new URL('/player_api.php', base);
   u.search = new URLSearchParams({ username: user, password: pass, action });
-  const res = await fetch(u, { headers: { 'user-agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(180_000) });
-  if (!res.ok) throw new Error(`The provider replied ${res.status}`);
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const res = await fetch(u, { headers: { 'user-agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(180_000) });
+      if (!res.ok) throw Object.assign(new Error(`The provider replied ${res.status}`), { retry: res.status >= 500 || res.status === 429 });
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
+    } catch (e) {
+      if (attempt >= 3 || e.retry === false) throw e;
+      console.log(`[vod] ${action}: ${e.message}, retrying`);
+      await new Promise(r => setTimeout(r, attempt * 3000));
+    }
+  }
 }
+
+// The last good catalogue of each login is kept on disk, so a provider that's down (or a restart while it's busy)
+// still gives Movies & Series, just as they were at the last successful refresh.
+const SAVED = fileURLToPath(new URL('../data/catalog/', import.meta.url));
+const savedFile = (server, user, kind) => `${SAVED}${createHash('sha256').update(`${server}|${user}|${kind}`).digest('hex').slice(0, 24)}.json.gz`;
 
 async function build(server, user, pass, kind) {
   const t0 = Date.now();
-  const [cats, list] = kind === 'movies'
-    ? await Promise.all([api(server, user, pass, 'get_vod_categories'), api(server, user, pass, 'get_vod_streams')])
-    : await Promise.all([api(server, user, pass, 'get_series_categories'), api(server, user, pass, 'get_series')]);
-  const items = list.map(kind === 'movies' ? slimMovie : slimSeries);
+  const file = savedFile(server, user, kind);
+  let cats, items;
+  try {
+    const [c, list] = kind === 'movies'
+      ? await Promise.all([api(server, user, pass, 'get_vod_categories'), api(server, user, pass, 'get_vod_streams')])
+      : await Promise.all([api(server, user, pass, 'get_series_categories'), api(server, user, pass, 'get_series')]);
+    cats = c;
+    items = list.map(kind === 'movies' ? slimMovie : slimSeries);
+    if (items.length) fs.mkdir(SAVED, { recursive: true }).then(() => fs.writeFile(file, gzipSync(JSON.stringify({ cats, items })))).catch(e => console.log(`[vod] saving ${kind}: ${e.message}`));
+  } catch (e) {
+    let saved = null;
+    try { saved = JSON.parse(gunzipSync(await fs.readFile(file))); } catch {}
+    if (!saved?.items?.length) throw e;
+    console.log(`[vod] ${kind}: provider unavailable (${e.message}), using the saved catalogue`);
+    ({ cats, items } = saved);
+  }
   const byCat = new Map();
   for (const it of items) { const k = String(it.category_id ?? ''); if (!byCat.has(k)) byCat.set(k, []); byCat.get(k).push(it); }
   const catList = cats.map(c => ({ category_id: c.category_id, category_name: str(c.category_name, 120), count: byCat.get(String(c.category_id))?.length || 0 })).filter(c => c.count);
