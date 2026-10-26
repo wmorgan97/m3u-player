@@ -2399,7 +2399,7 @@ function openExternal(x, c) {
 }
 function externalItems(c) {
   return [
-    ...externalPlayers(c.url).map(x => ({ label: `Open in ${x.name}`, fn: () => openExternal(x, c) })),
+    ...(isTV ? [] : externalPlayers(c.url).map(x => ({ label: `Open in ${x.name}`, fn: () => openExternal(x, c) }))),
     { label: 'Copy stream link', fn: () => copyText(c.url, 'Link copied') },
   ];
 }
@@ -2413,7 +2413,7 @@ function channelMenu(c) {
     !fromPlayer && { label: 'Play', fn: () => { const i = state.filtered.indexOf(c); playChannel(i >= 0 ? state.filtered : [c], Math.max(i, 0)); } },
     hasGuide && { label: archiveDays(c) ? 'TV guide & catch-up' : 'TV guide', fn: () => scheduleSheet(c) },
     { label: favUrls.has(c.url) ? 'Remove from Favorites' : 'Add to Favorites', fn: () => toggleFavorite(c, null).then(highlightStars) },
-    isLiveChannel(c) && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
+    isLiveChannel(c) && !isTV && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
     p?.id === 'fav' && { label: 'Move to list…', fn: () => favListMenu(c) },
     canReorder() && !state.reordering && { label: 'Reorder channels (drag)…', fn: () => { toggleReordering(); const li = $(`#list .row[data-i="${state.filtered.indexOf(c)}"]`); li?.scrollIntoView({ block: 'center' }); } },
     editable && isLiveChannel(c) && { label: 'Move to top of group', fn: () => moveInGroup(c, true) },
@@ -4293,7 +4293,7 @@ function playerMenu() {
     { label: 'Picture in Picture', fn: () => player.togglePip().catch(e => toast(e.message)) },
     !isLiveChannel(c) && !c.offline && canSync() && { label: 'Download for offline…', fn: () => downloadMenu(c) },
     isNative && { label: 'Play in iPhone player (full screen)', fn: () => openNativePlayer(c) },
-    isLiveChannel(c) && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
+    isLiveChannel(c) && !isTV && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
     { label: favUrls.has(c.url) ? 'Remove from Favorites' : 'Add to Favorites', fn: () => toggleFavorite(c, null).then(highlightStars) },
     ...externalItems(c),
   ]);

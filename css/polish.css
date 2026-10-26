@@ -868,6 +868,9 @@ html.tv .sheet .detail-plot { font-size: 17px; line-height: 1.5; max-width: 900p
 /* The Guide fills the screen below its day / group chips. */
 html.tv .guide { height: calc(100vh / .75 - 150px) !important; max-height: none !important; }
 
+/* Not on a TV: Multi-view (the web player), downloads (nowhere to save), playlist files (nothing to pick from). */
+html.tv [data-go="#/multi"], html.tv [data-dl], html.tv [data-vp="dl"], html.tv .tab[data-tab="file"] { display: none !important; }
+
 /* Live TV rows: favourite / options are on Hold OK, so the row is one stop. */
 html.tv #list .row .icon-btn, html.tv #list .row .fav { display: none; }
 html.tv .epc:focus, html.tv .gprog:focus, html.tv .gch:focus { outline: 3px solid #fff; outline-offset: -3px; background: var(--surface-2); }
