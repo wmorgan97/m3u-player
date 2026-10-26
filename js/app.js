@@ -2745,7 +2745,7 @@ async function seriesSheet(s) {
         const still = e.logo && e.logo !== s.logo && e.logo !== i.cover ? e.logo : '';
         return `<li class="epc${pr?.done ? ' done' : ''}" data-e="${k}">
           <span class="ep-still" data-initials="${esc(e.num)}">${still ? `<img src="${esc(still)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${pr && !pr.done && pr.t > 30 ? `<span class="bar"><i style="width:${Math.min(100, (pr.t / pr.d) * 100).toFixed(1)}%"></i></span>` : ''}<span class="ep-play">${pr?.done ? icon('check') : icon('play')}</span></span>
-          <span class="row-text"><span class="muted ep-label">Episode ${esc(e.num)}${e.duration ? ` · ${esc(e.duration)}` : ''}${pr?.done ? ' · Watched' : pr?.t > 30 ? ` · ${fmtDur(pr.d - pr.t)} left` : ''}</span><span class="row-name">${esc(e.name)}</span>${e.plot ? `<span class="muted clamp">${esc(e.plot)}</span>` : ''}</span>
+          <span class="row-text"><span class="muted ep-label">Episode ${esc(e.num)}${e.duration ? ` · ${esc(e.duration)}` : ''}${pr?.done ? ' · Watched' : pr?.t > 30 ? ` · ${fmtDur(pr.d - pr.t)} left` : ''}</span><span class="row-name">${esc(epTitle(e.name) || `Episode ${e.num}`)}</span>${e.plot ? `<span class="muted clamp">${esc(e.plot)}</span>` : ''}</span>
         </li>`;
       }).join('')}</ul>` : '<p class="muted">No episodes listed.</p>'}
     </div>`, {
@@ -4362,11 +4362,16 @@ function playNative(list, index, c) {
     ...nativeList(list, index, live),
   }).catch(e => toast(e.message || 'Couldn’t open the player'));
 }
+// An episode's own name: "Clean Entry" from "EN - S.W.A.T. Exiles (2026) (US) - S01E01 - Clean Entry" ('' when the file has none).
+function epTitle(name) {
+  const t = String(name || '').split(/\bS\d+\s*E\d+\s*[-–:]?\s*/i).pop().trim();
+  return t && t !== String(name).trim() ? t : '';
+}
 // Second line under a film / episode title in the player: the episode's own name, or rating and length.
 // Never the provider's group ("EN - NETFLIX MOVIES"): that's filing, not information.
 function vodLine(c) {
-  const ep = c.kind === 'episode' ? String(c.name).split(/\bS\d+\s*E\d+\s*[-–:]?\s*/i).pop().trim() : '';
-  const bits = [ep && ep !== c.name ? ep : '', c.rating && c.rating < 9.5 ? `★ ${Number(c.rating).toFixed(1)}` : '', c.duration || ''];
+  const ep = c.kind === 'episode' ? epTitle(c.name) : '';
+  const bits = [ep, c.rating && c.rating < 9.5 ? `★ ${Number(c.rating).toFixed(1)}` : '', c.duration || ''];
   return bits.filter(Boolean).join(' · ');
 }
 // The player's list button: up to 300 episodes / channels around the one playing (a full channel list can be thousands).
@@ -4375,9 +4380,9 @@ function nativeList(list, index, live) {
   const from = Math.max(0, Math.min(index - 150, list.length - 300)), part = list.slice(from, from + 300);
   const row = x => {
     if (x.kind === 'episode') {
-      const m = vodMeta(x.name), ep = String(x.name).split(/\bS\d+\s*E\d+\s*[-–:]?\s*/i).pop().trim();
+      const m = vodMeta(x.name), ep = epTitle(x.name);
       const n = m.episode ?? x.num;
-      return { t: n != null ? `${n}. ${ep && ep !== x.name ? ep : `Episode ${n}`}` : x.name, s: [m.season ? `Season ${m.season}` : '', x.duration || ''].filter(Boolean).join(' · ') };
+      return { t: n != null ? `${n}. ${ep || `Episode ${n}`}` : x.name, s: [m.season ? `Season ${m.season}` : '', x.duration || ''].filter(Boolean).join(' · ') };
     }
     if (isLiveChannel(x)) { const g = guideFor(x), now = g && g.nowNext(x).now; return { t: x.name, s: now ? now[2] : prettyGroup(x.group) || '' }; }
     return { t: niceName(x), s: vodLine(x) };
@@ -4641,8 +4646,8 @@ const perfTimer = setInterval(() => {
 if (isTV) {
   document.documentElement.classList.add('tv');
   const RAIL = '#mainnav a, #tq, #actions button';
-  const PICKABLE = 'a[href], button:not([disabled]), input:not([type=hidden]), select, textarea, [tabindex], .scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, [data-go], [data-see], [data-resume]';
-  const CARDISH = '.scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card';
+  const PICKABLE = 'a[href], button:not([disabled]), input:not([type=hidden]), select, textarea, [tabindex], .scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, .epc, [data-go], [data-see], [data-resume]';
+  const CARDISH = '.scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, .epc';
   // Section-header links ("Browse all", "See all 133") aren't stops: the side menu and each row's "+ more" tile cover them.
   const SKIP = '.hero-dots, a.link, .shelf-head, .row-head';
   const visible = el => {
@@ -4673,7 +4678,7 @@ if (isTV) {
     el.focus({ preventScroll: true });
     if (inRail(el)) { document.body.classList.add('rail-open'); return; }
     document.body.classList.remove('rail-open');
-    lastContent = el;
+    if (!el.closest('#sheet')) lastContent = el;   // what to come back to when a details page or menu closes
     // Instant (holding a key never queues animations) and kept mid-screen, clear of the edges.
     el.scrollIntoView({ block: el.closest('#sheet') ? 'nearest' : 'center', inline: 'nearest' });   // a details page scrolls only as needed
   };
@@ -4765,7 +4770,7 @@ if (isTV) {
   }
   // Back on the remote (MainActivity asks this first): true = handled here, false = leave the app.
   window.__tvBack = () => {
-    if (sheetOpen()) { closeSheet(); return true; }
+    if (sheetOpen()) { closeSheet(); setTimeout(leaveRail, 30); return true; }
     if (inRail(document.activeElement) && location.hash && location.hash !== '#/') { leaveRail(); return true; }
     if (location.hash && location.hash !== '#/' && location.hash !== '#') { history.back(); return true; }
     if (!inRail(document.activeElement)) { enterRail(); return true; }   // Home: Back opens the menu, Back again leaves
