@@ -4751,7 +4751,9 @@ if (isTV) {
     if (lastContent && lastContent.isConnected && visible(lastContent)) return focusEl(lastContent);
     const hero = [...$('#view').querySelectorAll('.hero-slide')].find(visible);   // a page with a banner starts on it
     if (hero && !sheetOpen()) return focusEl(hero);
-    const first = lines(picks()).find(r => r.top >= 0)?.items[0]?.el;
+    // otherwise the first poster / channel / card on screen (not a sort box or filter above them)
+    const rows = lines(picks()).filter(r => r.top >= 0);
+    const first = rows.find(r => r.items.some(i => i.el.matches(CARDISH)))?.items.find(i => i.el.matches(CARDISH))?.el || rows[0]?.items[0]?.el;
     if (first) focusEl(first);
   };
   const move = dir => {

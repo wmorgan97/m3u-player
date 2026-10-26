@@ -854,6 +854,7 @@ html.tv #view.pl.vod > * { grid-column: 1; }
 html.tv #view.pl.vod .filters { display: none; }
 html.tv #view.pl .filters .search { display: none; }
 html.tv .list:not(.grid):not(.discover) { grid-template-columns: minmax(0, 1fr) !important; }
+html.tv .list.grid { grid-template-columns: repeat(7, minmax(0, 1fr)) !important; gap: 18px 14px; }   /* 7 posters a row, like the shelves */
 
 /* Details and menus: details are a full page beside the side menu (as on Google TV), menus a centred panel. */
 html.tv .sheet { left: calc(var(--rail) - 1px) !important; right: 0 !important; top: 0 !important; bottom: 0 !important; width: auto !important; max-width: none !important;
