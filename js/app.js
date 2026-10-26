@@ -149,7 +149,46 @@ async function detectServerProxy() {
 // ---------- sync across devices ----------
 // Favourites, recently watched and progress are also kept on the VPS (server/sync.js), so the
 // phone, iPad and laptop all match. The server merges; the app sends its state and adopts the result.
-const syncMeta = { favAt: 0, recReset: 0 };
+const syncMeta = { favAt: 0, recReset: 0, srcDel: {} };
+// A playlist's identity across devices: its Xtream server + username, or its playlist link.
+// The same login is often added twice (one "Live TV only", one "VOD only"), so what it keeps is part of it.
+function sourceBase(p) {
+  if (p.virtual) return '';
+  if (p.kind === 'xtream' && p.xtream?.server) { try { return `x:${new URL(p.xtream.server).host.toLowerCase()}|${p.xtream.user}`; } catch { return ''; } }
+  return p.sourceUrl ? `u:${p.sourceUrl}` : '';
+}
+function sourceKey(p) { const b = sourceBase(p); return b ? `${b}|${p.content || 'both'}` : ''; }
+function localSources() {
+  const out = {};
+  for (const p of state.playlists) {
+    const k = sourceKey(p);
+    if (k) out[k] = { name: p.name, kind: p.kind === 'xtream' ? 'xtream' : 'url', xtream: p.kind === 'xtream' ? p.xtream : undefined, sourceUrl: p.sourceUrl, content: p.content || 'both', epgUrl: p.epgUrl, at: p.createdAt || 1 };
+  }
+  for (const [k, at] of Object.entries(syncMeta.srcDel || {})) if (!out[k]) out[k] = { deleted: true, at };
+  return out;
+}
+// Playlists added on another device: add them here too (once; a failure is retried at the next sync).
+const adoptingSources = new Set();
+async function adoptSources(remote) {
+  const have = new Set(state.playlists.map(sourceKey).filter(Boolean));
+  // Already covered here: the same login keeping everything, or (for a remote "everything") any copy of it.
+  const covered = (k, v) => { const base = k.slice(0, k.lastIndexOf('|')); return have.has(`${base}|both`) || ((v.content || 'both') === 'both' && [...have].some(h => h.startsWith(`${base}|`))); };
+  for (const [k, v] of Object.entries(remote || {})) {
+    if (!v || v.deleted || have.has(k) || covered(k, v) || adoptingSources.has(k) || (syncMeta.srcDel?.[k] || 0) >= (v.at || 0)) continue;
+    adoptingSources.add(k);
+    try {
+      let channels, extra, header = {};
+      if (v.kind === 'xtream' && v.xtream?.server) ({ channels, extra } = await xtreamPlaylist(v.xtream));
+      else if (v.sourceUrl) { const r = await loadFromUrl(v.sourceUrl); ({ channels, header } = r); extra = { sourceUrl: v.sourceUrl, refreshedAt: Date.now() }; }
+      else continue;
+      if (state.playlists.some(p => sourceKey(p) === k)) continue;
+      const content = v.content || 'both';
+      const p = await createPlaylist(v.name || 'Playlist', applyContent(content, channels), { header, content, ...extra, ...(v.epgUrl ? { epgUrl: v.epgUrl } : {}), createdAt: v.at || Date.now() });
+      toast(`Added “${playlistTitle(p)}” from your other devices`);
+      if (!state.current && !state.playing) rerender();
+    } catch (e) { report?.('sync-source', e.message); } finally { adoptingSources.delete(k); }
+  }
+}
 const canSync = () => serverProxy.available && !serverProxy.needsKey;
 const serverApi = path => serverProxy.base.replace(/proxy$/, path) + (state.settings.serverKey ? `?key=${encodeURIComponent(state.settings.serverKey)}` : '');
 let syncing = null, syncAgain = false;
@@ -159,7 +198,7 @@ async function syncNow() {
   syncing = (async () => {
     try {
       const res = await fetch(serverApi('sync'), { method: 'POST', cache: 'no-store', body: JSON.stringify({
-        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress }) });
+        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources() }) });
       if (!res.ok) return;
       const d = await res.json();
       const urls = list => (list || []).map(c => c.url).join('\n');
@@ -170,6 +209,7 @@ async function syncNow() {
       }
       if (Array.isArray(d.recents) && urls(d.recents) !== urls(state.recents)) { state.recents = d.recents; db.set('recents', d.recents); changed = true; }
       if (d.progress) { state.progress = d.progress; db.set('progress', d.progress).catch(() => {}); }
+      if (d.sources) adoptSources(d.sources);
       Object.assign(syncMeta, { favAt: d.favAt || syncMeta.favAt, recReset: d.recReset || syncMeta.recReset });
       db.set('syncMeta', syncMeta).catch(() => {});
       // Never redraw Home under a playing channel or while you're typing; keep the scroll position.
@@ -515,6 +555,7 @@ async function createPlaylist(name, channels, extra = {}) {
   const p = { id: uid(), name: name || 'Playlist', channels, header: {}, createdAt: Date.now(), updatedAt: Date.now(), ...extra };
   await db.putPlaylist(p);
   state.playlists.push(p);
+  syncSoon();
   navigator.storage?.persist?.().catch(() => {});
   return p;
 }
@@ -3090,6 +3131,8 @@ function playlistMenu(p) {
     real && { label: 'Delete playlist', danger: true, fn: async () => {
       if (!await confirmDialog(`Delete “${p.name}”? Favorites are kept.`, 'Delete', true)) return;
       await db.deletePlaylist(p.id);
+      const sk = sourceKey(p);   // other devices: don't add it back here (they keep their own copy)
+      if (sk) { syncMeta.srcDel = { ...(syncMeta.srcDel || {}), [sk]: Date.now() }; db.set('syncMeta', syncMeta).catch(() => {}); syncSoon(); }
       for (const k of ['movies', 'series']) db.del(`vod:${vodKey(p, k)}`).catch(() => {});
       db.del(`epg:${p.id}`).catch(() => {});
       state.playlists = state.playlists.filter(x => x !== p);

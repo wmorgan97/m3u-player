@@ -56,6 +56,13 @@ export function merge(a, b) {
     const entries = Object.entries(p);
     out.progress = entries.length > MAX_PROGRESS ? Object.fromEntries(entries.sort((x, y) => y[1].at - x[1].at).slice(0, MAX_PROGRESS)) : p;
   }
+  // Playlist sources (Xtream logins / playlist links, not their channels): newest record per source wins;
+  // a deleted one stays as a marker so other devices don't add it back.
+  if (b.sources && typeof b.sources === 'object') {
+    const s = { ...(a.sources || {}) };
+    for (const [k, v] of Object.entries(b.sources)) if (v && typeof v === 'object' && (!s[k] || (v.at || 0) > (s[k].at || 0))) s[k] = v;
+    out.sources = s;
+  }
   return out;
 }
 
