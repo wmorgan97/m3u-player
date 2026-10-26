@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { readBody } from './sync.js';
 import { trending, collections, onTmdbChange } from './tmdb.js';
+import { warmThumbs } from './img.js';
 
 const PROXY_KEY = process.env.PROXY_KEY || '';
 const TTL = 12 * 3600_000;
@@ -122,6 +123,9 @@ async function build(server, user, pass, kind) {
   // Keyed by title without the year (providers write "Dune (2021)", "Dune 2021" or just "Dune"); years are checked at lookup.
   for (const it of items) { const k = bareKey(it); if (!k) continue; const l = byTitle.get(k); if (l) l.push(it); else byTitle.set(k, [it]); }
   const catNames = new Map(cats.map(c => [String(c.category_id), str(c.category_name, 120)]));
+  // Pre-shrink the posters of the rows people see first (Top 10, Popular, New releases, genre rows).
+  const art2 = it => it.stream_icon || it.cover;
+  warmThumbs([...trend.slice(0, 20), ...top.slice(0, 40), ...fresh.slice(0, 40), ...recent.slice(0, 20), ...[...tmdbGroups.values()].flatMap(g => g.slice(0, 24))].map(art2));
   const names = items.map(it => (it.name || '').toLowerCase());
   console.log(`[vod] ${kind}: ${items.length} titles in ${catList.length} categories, ${trend.length} trending matched, ${tmdbCats.length} TMDB groups (${tmdbCats.map(c => `${c.name} ${c.count}`).join(', ')})`);
   console.log(`[vod] ${kind}: built, ${((Date.now() - t0) / 1000).toFixed(1)}s`);

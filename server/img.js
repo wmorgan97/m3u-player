@@ -43,6 +43,41 @@ function shrink(src, w, out) {
   });
 }
 
+// Make (or find) the thumbnail for src at width w. Shared by requests and the background warm-up.
+async function ensure(src, w) {
+  const file = join(DIR, `${createHash('sha1').update(`${src}|${w}`).digest('hex')}.jpg`);
+  if (await fs.stat(file).then(() => true, () => false)) return file;
+  if (!inflight.has(file)) {
+    inflight.set(file, (async () => {
+      await fs.mkdir(DIR, { recursive: true });
+      await slot();
+      try { return await shrink(src, w, file); } finally { release(); }
+    })().finally(() => setTimeout(() => inflight.delete(file), 1000)));
+  }
+  return (await inflight.get(file)) ? file : null;
+}
+
+// Background warm-up: when a catalogue is (re)built, the posters of its front-page rows are shrunk ahead of time,
+// two at a time and behind any real request, so even the first scroll finds them ready.
+const warmQueue = [];
+let warming = false;
+export function warmThumbs(urls, w = 300) {
+  for (const u of urls) if (u && /^https?:/i.test(u)) warmQueue.push(u);
+  if (warming) return;
+  warming = true;
+  (async () => {
+    let made = 0;
+    const t0 = Date.now();
+    while (warmQueue.length) {
+      const batch = warmQueue.splice(0, 2);
+      await Promise.all(batch.map(u => ensure(u, w).then(f => { if (f) made++; })));
+      if (running >= MAX_JOBS - 2) await new Promise(r => setTimeout(r, 200));   // real requests first
+    }
+    warming = false;
+    console.log(`[img] warmed ${made} thumbnails in ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+  })();
+}
+
 export async function handleImg(req, res, url, send, allowed) {
   if (PROXY_KEY && url.searchParams.get('key') !== PROXY_KEY) return send(res, 403, 'Wrong or missing key');
   let src;
@@ -50,19 +85,8 @@ export async function handleImg(req, res, url, send, allowed) {
   if (!/^https?:$/.test(src.protocol) || !allowed(src)) return send(res, 400, 'Image url not allowed');
   const asked = Number(url.searchParams.get('w')) || 300;
   const w = WIDTHS.find(x => x >= asked) || 1280;
-  const file = join(DIR, `${createHash('sha1').update(`${src.href}|${w}`).digest('hex')}.jpg`);
-  let ok = await fs.stat(file).then(() => true, () => false);
-  if (!ok) {
-    if (!inflight.has(file)) {
-      inflight.set(file, (async () => {
-        await fs.mkdir(DIR, { recursive: true });
-        await slot();
-        try { return await shrink(src.href, w, file); } finally { release(); }
-      })().finally(() => setTimeout(() => inflight.delete(file), 1000)));
-    }
-    ok = await inflight.get(file);
-  }
-  if (!ok) { res.writeHead(302, { location: src.href, 'cache-control': 'public, max-age=3600' }); return res.end(); }   // the browser loads the original instead
+  const file = await ensure(src.href, w);
+  if (!file) { res.writeHead(302, { location: src.href, 'cache-control': 'public, max-age=3600' }); return res.end(); }   // the browser loads the original instead
   const st = await fs.stat(file);
   res.writeHead(200, { 'content-type': 'image/jpeg', 'content-length': st.size, 'cache-control': 'public, max-age=2592000, immutable', 'access-control-allow-origin': '*' });
   if (req.method === 'HEAD') return res.end();
