@@ -9,6 +9,19 @@ class MainViewController: CAPBridgeViewController {
         bridge?.registerPluginInstance(NativePlayerPlugin())
     }
 
+    /// Test hook: launched with `-testStream <url>` (simulator / Xcode only), open the player straight on that
+    /// stream so its controls can be checked without a playlist or a provider connection.
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-testStream"), i + 1 < args.count, let url = URL(string: args[i + 1]), presentedViewController == nil else { return }
+        let live = args.contains("-testLive")
+        let item = VLCPlayerController.Item(url: url, title: "Test stream", subtitle: "Player check", info: "", live: live, start: 0, headers: ["X-Test-Mute": "1"], hasPrev: true, hasNext: true)
+        let controller = VLCPlayerController(item: item) { event in print("[player] \(event)") }
+        controller.modalPresentationStyle = .fullScreen
+        present(controller, animated: false)
+    }
+
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 }
 
@@ -202,18 +215,35 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         player.delegate = self
         buildOverlay()
 
-        let tap = UITapGestureRecognizer(target: self, action: #selector(toggleOverlay))
-        tap.cancelsTouchesInView = false
-        view.addGestureRecognizer(tap)
-        for direction in [UISwipeGestureRecognizer.Direction.up, .down] {
-            let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
-            swipe.direction = direction
-            view.addGestureRecognizer(swipe)
-        }
+        // Touch: a single tap shows/hides the controls, a double tap on the left/right third skips 10s.
+        // Taps that land on a button or the slider go to that control only (see gestureRecognizer(_:shouldReceive:)).
+        videoView.isUserInteractionEnabled = false   // VLC's drawing view must never take the touches
+        // Taps and swipes are read straight from the touches (touchesBegan/Ended below): gesture recognizers
+        // never fired over VLC's video view, which is what made the player feel dead to the touch.
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
         load(item)
     }
 
+    // MARK: touch
+    private var touchStart: (point: CGPoint, time: TimeInterval)?
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let t = touches.first, !isOnControl(t) { touchStart = (t.location(in: view), ProcessInfo.processInfo.systemUptime) }
+        super.touchesBegan(touches, with: event)
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        defer { touchStart = nil; super.touchesEnded(touches, with: event) }
+        guard let t = touches.first, let start = touchStart else { return }
+        let p = t.location(in: view), dx = p.x - start.point.x, dy = p.y - start.point.y
+        if abs(dy) > 60 && abs(dy) > abs(dx) * 1.5 { return swipe(up: dy < 0) }          // vertical swipe: channel up/down
+        if abs(dx) < 12 && abs(dy) < 12 && ProcessInfo.processInfo.systemUptime - start.time < 0.6 { tapped(at: p) }
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { touchStart = nil; super.touchesCancelled(touches, with: event) }
+    private func isOnControl(_ t: UITouch) -> Bool {
+        guard overlay.alpha > 0.5 else { return false }
+        var v: UIView? = t.view
+        while let current = v, current !== view { if current is UIControl { return true }; v = current.superview }
+        return false
+    }
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         gradient.frame = overlay.bounds
@@ -243,6 +273,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         if let agent = next.headers["User-Agent"] { media.addOption(":http-user-agent=\(agent)") }
         if let referrer = next.headers["Referer"] { media.addOption(":http-referrer=\(referrer)") }
         if !next.live && next.start > 1 { media.addOption(":start-time=\(Int(next.start))") }
+        if next.headers["X-Test-Mute"] != nil { media.addOption(":no-audio") }   // test hook only: silent
         spinner.startAnimating()
         player.media = media
         player.play()
@@ -316,6 +347,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
         spinner.color = .white
         spinner.hidesWhenStopped = true
+        spinner.isUserInteractionEnabled = false   // it sits over the play button: never block taps
         spinner.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(spinner)
 
@@ -361,7 +393,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         liveBadge.layer.cornerRadius = 10
         liveBadge.clipsToBounds = true
         slider.minimumTrackTintColor = UIColor(red: 0.36, green: 0.58, blue: 1, alpha: 1)
+        slider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.3)
         slider.addTarget(self, action: #selector(scrubStart), for: .touchDown)
+        slider.addTarget(self, action: #selector(scrubMoved), for: .valueChanged)
         slider.addTarget(self, action: #selector(scrubEnd), for: [.touchUpInside, .touchUpOutside, .touchCancel])
 
         let titles = UIStackView(arrangedSubviews: [titleLabel, subtitleLabel])
@@ -376,6 +410,12 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         let bottom = UIStackView(arrangedSubviews: [liveBadge, slider, timeLabel])
         bottom.alignment = .center
         bottom.spacing = 12
+        // The slider takes all the spare width (it collapsed to its thumb before); labels keep their size.
+        slider.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
+        timeLabel.setContentHuggingPriority(.required, for: .horizontal)
+        timeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        liveBadge.setContentHuggingPriority(.required, for: .horizontal)
+        slider.heightAnchor.constraint(equalToConstant: 34).isActive = true
         for v in [top, middle, bottom, statusLabel] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             overlay.addSubview(v)
@@ -400,30 +440,46 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     private func showOverlay(keep: Bool = false) {
         hideTimer?.invalidate()
+        overlay.isUserInteractionEnabled = true
         UIView.animate(withDuration: 0.2) { self.overlay.alpha = 1 }
         if !keep {
-            hideTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
+            hideTimer = Timer.scheduledTimer(withTimeInterval: item.headers["X-Test-Mute"] != nil ? 30 : 4, repeats: false) { [weak self] _ in
                 guard let self = self, self.player.isPlaying, !self.scrubbing else { return }
-                UIView.animate(withDuration: 0.3) { self.overlay.alpha = 0 }
+                self.hideOverlay()
             }
         }
     }
 
-    @objc private func toggleOverlay(_ gesture: UITapGestureRecognizer) {
-        let point = gesture.location(in: overlay)
-        if overlay.alpha > 0.5, let hit = overlay.hitTest(point, with: nil), hit is UIControl { return }
-        if overlay.alpha > 0.5 {
-            hideTimer?.invalidate()
-            UIView.animate(withDuration: 0.25) { self.overlay.alpha = 0 }
-        } else {
-            showOverlay()
-        }
+    private func hideOverlay() {
+        hideTimer?.invalidate()
+        overlay.isUserInteractionEnabled = false   // hidden controls can't be pressed by accident
+        UIView.animate(withDuration: 0.25) { self.overlay.alpha = 0 }
     }
 
-    @objc private func swiped(_ gesture: UISwipeGestureRecognizer) {
+    private var lastTap: (time: TimeInterval, x: CGFloat) = (0, 0)
+    private func tapped(at point: CGPoint) {
+        #if DEBUG
+        NSLog("M3UDBG tap alpha=%.2f", overlay.alpha)
+        #endif
+        let now = ProcessInfo.processInfo.systemUptime, x = point.x, w = view.bounds.width
+        let side = x < w / 3 ? -1 : x > w * 2 / 3 ? 1 : 0
+        let quickSecond = now - lastTap.time < 0.3 && abs(x - lastTap.x) < 80
+        lastTap = (now, x)
+        if quickSecond && side != 0 && !item.live { return skip(side) }
+        if overlay.alpha > 0.5 { hideOverlay() } else { showOverlay() }
+    }
+
+    private func skip(_ dir: Int) {
+        if dir < 0 { player.jumpBackward(10); statusLabel.text = "« 10s" } else { player.jumpForward(10); statusLabel.text = "10s »" }
+        showOverlay()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in if self?.statusLabel.text?.contains("10s") == true { self?.statusLabel.text = "" } }
+    }
+
+
+    private func swipe(up: Bool) {
         guard item.live else { return }
-        if gesture.direction == .up, item.hasNext { onEvent(["type": "step", "dir": 1]) }
-        if gesture.direction == .down, item.hasPrev { onEvent(["type": "step", "dir": -1]) }
+        if up, item.hasNext { onEvent(["type": "step", "dir": 1]) }
+        if !up, item.hasPrev { onEvent(["type": "step", "dir": -1]) }
     }
 
     @objc private func closeTapped() { finish() }
@@ -439,6 +495,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     @objc private func nextTapped() { onEvent(["type": "step", "dir": 1]); showOverlay() }
 
     @objc private func playPause() {
+        #if DEBUG
+        NSLog("M3UDBG playPause playing=%d", player.isPlaying ? 1 : 0)
+        #endif
         if player.isPlaying { player.pause(); showOverlay(keep: true) } else { player.play(); showOverlay() }
     }
 
@@ -447,9 +506,15 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     @objc private func scrubStart() { scrubbing = true; showOverlay(keep: true) }
     @objc private func scrubEnd() {
-        player.position = slider.value
+        // Seek by time (exact), not by VLC's 0-1 position, which jumps back to the start on some streamed files.
+        let d = Double(player.media?.length.intValue ?? 0)
+        if d > 0 { player.time = VLCTime(int: Int32(Double(slider.value) * d)) } else { player.position = slider.value }
         scrubbing = false
         showOverlay()
+    }
+    @objc private func scrubMoved() {
+        let d = Double(player.media?.length.intValue ?? 0) / 1000
+        if d > 0 { timeLabel.text = "\(clock(Double(slider.value) * d)) / \(clock(d))" }
     }
 
     @objc private func pickAudio() { pickTrack(title: "Audio", names: player.audioTrackNames, ids: player.audioTrackIndexes, current: player.currentAudioTrackIndex, source: audioButton) { [weak self] id in self?.player.currentAudioTrackIndex = id } }
