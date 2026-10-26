@@ -858,8 +858,7 @@ html.tv .sheet { left: calc(var(--rail) - 1px) !important; right: 0 !important; 
 html.tv .sheet:has(> .menu), html.tv .sheet:has(.menu) { left: 50% !important; right: auto !important; top: 50% !important; bottom: auto !important; width: 520px !important; transform: translate(-50%, -50%) !important;
   border-radius: 18px !important; padding: 20px !important; background: var(--surface) !important; }
 html.tv .sheet .sheet-grip { display: none; }
-html.tv .sheet .film-hero { height: 300px; margin: 0 -48px 0; }
-html.tv .sheet .detail-top { margin-top: -120px; position: relative; }
+html.tv .sheet .detail { padding-top: 24px; }
 html.tv .sheet .detail-actions .btn { height: 46px; padding: 0 22px; font-size: 16px; }
 html.tv .sheet .detail-plot { font-size: 17px; line-height: 1.5; max-width: 900px; }
 
