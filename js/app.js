@@ -4518,3 +4518,49 @@ async function addRecent(c) {
 init().catch(err => {
   view.innerHTML = `<div class="empty"><p><b>Couldn't start</b></p><p class="muted">${esc(err.message)}</p></div>`;
 });
+
+// ---------- Performance recorder (first 3 minutes after launch) ----------
+// Finds what makes scrolling stutter on a real phone: every frame that freezes for >100ms is logged with what
+// the app was doing just before (timed functions below) and whether the user was scrolling; a summary goes to
+// the server log every 30s as "[client <device>] perf: …". Costs a few timestamps per call.
+const perf = { start: performance.now(), busy: new Map(), last: null, freezes: [], lastScroll: 0, imgs: 0, sent: 0 };
+function timed(name, fn) {
+  return function (...args) {
+    const s = performance.now();
+    try { return fn.apply(this, args); } finally {
+      const d = performance.now() - s;
+      if (d > 4) { perf.busy.set(name, (perf.busy.get(name) || 0) + d); perf.last = { name, end: performance.now(), d }; }
+    }
+  };
+}
+showHome = timed('showHome', showHome); renderDiscover = timed('renderDiscover', renderDiscover); applyFilter = timed('applyFilter', applyFilter);
+homeHub = timed('homeHub', homeHub); patchView = timed('patchView', patchView); ensureGuide = timed('ensureGuide', ensureGuide);
+renderChips = timed('renderChips', renderChips); rerenderRows = timed('rerenderRows', rerenderRows); refreshPlaylistView = timed('refreshPlaylistView', refreshPlaylistView);
+catalogueEntry = timed('catalogueEntry', catalogueEntry); m3uKinds = timed('m3uKinds', m3uKinds); cachedGroups = timed('cachedGroups', cachedGroups);
+liveIndex = timed('liveIndex', liveIndex); renderMore = timed('renderMore', renderMore);
+addEventListener('scroll', () => { perf.lastScroll = performance.now(); }, { passive: true, capture: true });
+document.addEventListener('load', e => { if (e.target?.tagName === 'IMG') perf.imgs++; }, true);
+(function watchFrames() {
+  let prev = performance.now();
+  const tick = now => {
+    const gap = now - prev; prev = now;
+    if (gap > 100 && !document.hidden) {
+      const cause = perf.last && now - perf.last.end < gap + 50 ? `${perf.last.name} ${Math.round(perf.last.d)}ms` : 'unattributed';
+      perf.freezes.push({ at: Math.round((now - perf.start) / 1000), gap: Math.round(gap), scrolling: now - perf.lastScroll < 600, cause });
+    }
+    if (now - perf.start < 180_000) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+})();
+const perfTimer = setInterval(() => {
+  const elapsed = performance.now() - perf.start;
+  if (canSync() && (perf.freezes.length || perf.busy.size)) {
+    const f = perf.freezes.splice(0);
+    const top = [...perf.busy].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, v]) => `${k} ${Math.round(v)}ms`).join(', ');
+    const worst = f.sort((a, b) => b.gap - a.gap).slice(0, 6).map(x => `${x.gap}ms@${x.at}s${x.scrolling ? '(scroll)' : ''}:${x.cause}`).join(' | ');
+    const msg = `t=${Math.round(elapsed / 1000)}s freezes=${f.length} scrollFreezes=${f.filter(x => x.scrolling).length} imgs=${perf.imgs} busy[${top}] worst[${worst}]`;
+    perf.busy.clear(); perf.imgs = 0;
+    fetch(serverApi('log'), { method: 'POST', keepalive: true, body: JSON.stringify({ kind: 'perf', message: msg.slice(0, 900), where: isNative ? 'native' : 'web' }) }).catch(() => {});
+  }
+  if (elapsed > 185_000) clearInterval(perfTimer);
+}, 30_000);

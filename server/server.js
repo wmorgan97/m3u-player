@@ -160,7 +160,7 @@ function handleClientLog(req, res, url) {
         const j = JSON.parse(body);
         const ua = req.headers['user-agent'] || '';
         const dev = /iPhone|iPad/.test(ua) ? 'iPhone' : /Macintosh/.test(ua) ? (/Chrome/.test(ua) ? 'Mac Chrome' : 'Mac Safari') : 'other';
-        console.log(`[client ${dev}] ${String(j.kind || 'error').slice(0, 20)}: ${String(j.message || '').slice(0, 300).replace(/\s+/g, ' ')}${j.where ? ` @ ${String(j.where).slice(0, 120)}` : ''}`);
+        console.log(`[client ${dev}] ${String(j.kind || 'error').slice(0, 20)}: ${String(j.message || '').slice(0, j.kind === 'perf' ? 1000 : 300).replace(/\s+/g, ' ')}${j.where ? ` @ ${String(j.where).slice(0, 120)}` : ''}`);
       } catch {}
     }
     send(res, 204, '');
