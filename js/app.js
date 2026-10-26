@@ -4666,8 +4666,8 @@ const perfTimer = setInterval(() => {
 if (isTV) {
   document.documentElement.classList.add('tv');
   const RAIL = '#mainnav a, #tq, #actions button';
-  const PICKABLE = 'a[href], button:not([disabled]), input:not([type=hidden]), select, textarea, [tabindex], .scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, .epc, [data-go], [data-see], [data-resume]';
-  const CARDISH = '.scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, .epc';
+  const PICKABLE = 'a[href], button:not([disabled]), input:not([type=hidden]), select, textarea, [tabindex], .scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, .epc, .poster, [data-go], [data-see], [data-resume]';
+  const CARDISH = '.scard, .svc, .hero-slide, .row, .hs-row, .cw, .lib, .card, .epc, .poster';
   // Section-header links ("Browse all", "See all 133") aren't stops: the side menu and each row's "+ more" tile cover them.
   const SKIP = '.hero-dots, a.link, .shelf-head, .row-head';
   const visible = el => {
@@ -4909,15 +4909,19 @@ if (isTV) {
   }).observe($('#sheet'), { attributes: true, attributeFilter: ['hidden'], childList: true, subtree: true });
   // A new page starts with its first row picked, so the remote always has somewhere to go.
   // (pages that fetch their titles first get a few tries while they fill in)
-  addEventListener('hashchange', () => {
-    lastContent = null;
-    let n = 0;
-    const tryFocus = () => {
-      if (inRail(document.activeElement) || sheetOpen()) return;
-      if (document.activeElement === document.body || !document.activeElement || !visible(document.activeElement)) leaveRail();
-      if ((document.activeElement === document.body || !document.activeElement) && ++n < 12) setTimeout(tryFocus, 250);
-    };
-    setTimeout(tryFocus, 300);
-  });
+  let n = 0;
+  const lost = () => document.activeElement === document.body || !document.activeElement || !document.activeElement.isConnected;
+  const tryFocus = () => {
+    if (inRail(document.activeElement) || sheetOpen()) return;
+    if (lost()) leaveRail();
+    if (lost() && ++n < 12) setTimeout(tryFocus, 250);
+  };
+  addEventListener('hashchange', () => { lastContent = null; n = 0; setTimeout(tryFocus, 300); });
+  // A page that redraws itself (a category opened, a sort changed) takes the highlight with it: pick up its first item.
+  let redraw = 0;
+  new MutationObserver(() => { clearTimeout(redraw); redraw = setTimeout(() => { if (lost() && !sheetOpen()) { n = 0; tryFocus(); } }, 200); })
+    .observe($('#view'), { childList: true });
+  new MutationObserver(() => { clearTimeout(redraw); redraw = setTimeout(() => { if (lost() && !sheetOpen()) { n = 0; tryFocus(); } }, 200); })
+    .observe($('#list') || $('#view'), { childList: true });
   setTimeout(() => { if (document.activeElement === document.body) leaveRail(); }, 1500);
 }
