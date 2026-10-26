@@ -4891,6 +4891,13 @@ if (isTV) {
   window.__tvBack = () => {
     if (sheetOpen()) { closeSheet(); setTimeout(leaveRail, 30); return true; }
     if (!$('#ts-results').hidden) { $('#ts-results').hidden = true; lastSeen = null; $('#tq').focus(); return true; }
+    // A Movies / Series category: back to the shelves, onto the row you opened it from.
+    if (state.current && state.tab !== 'live' && state.group !== null && !inRail(document.activeElement)) {
+      const from = state.group;
+      state.group = null; updateTopbar(); renderChips(); applyFilter();
+      setTimeout(() => { const shelf = [...document.querySelectorAll('#list > .shelf[data-group]')].find(el => el.dataset.group === from); const c = shelf?.querySelector('.scard'); if (c) focusEl(c); else leaveRail(); }, 80);
+      return true;
+    }
     if (inRail(document.activeElement) && location.hash && location.hash !== '#/') { leaveRail(); return true; }
     if (location.hash && location.hash !== '#/' && location.hash !== '#') { history.back(); return true; }
     if (!inRail(document.activeElement)) { enterRail(); return true; }   // Home: Back opens the menu, Back again leaves
