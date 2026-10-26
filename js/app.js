@@ -4675,7 +4675,7 @@ if (isTV) {
     document.body.classList.remove('rail-open');
     lastContent = el;
     // Instant (holding a key never queues animations) and kept mid-screen, clear of the edges.
-    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    el.scrollIntoView({ block: el.closest('#sheet') ? 'nearest' : 'center', inline: 'nearest' });   // a details page scrolls only as needed
   };
   const enterRail = () => { const a = $('#mainnav a.active') || railPicks()[0]; if (a) focusEl(a); };
   const leaveRail = () => {
@@ -4779,7 +4779,7 @@ if (isTV) {
     sheetTimer = setTimeout(() => {
       if (!sheetOpen() || $('#sheet').contains(document.activeElement)) return;
       const f = [...$('#sheet').querySelectorAll('.detail-actions .btn.primary, .menu-item')].find(visible) || lines(picks())[0]?.items[0]?.el;
-      if (f) { focusEl(f); f.scrollIntoView({ block: 'nearest' }); }
+      if (f) { focusEl(f); $('#sheet').scrollTop = 0; f.scrollIntoView({ block: 'nearest' }); }
     }, 80);
   }).observe($('#sheet'), { attributes: true, attributeFilter: ['hidden'], childList: true, subtree: true });
   // A new page starts with its first row picked, so the remote always has somewhere to go.
