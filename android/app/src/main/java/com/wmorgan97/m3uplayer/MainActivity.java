@@ -7,6 +7,7 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(NativePlayerPlugin.class);   // the TV's own player (see PlayerActivity)
         super.onCreate(savedInstanceState);
         // Back on the TV remote: the page decides first (close a sheet, stop the player, go back a page);
         // only when it has nothing left to close does Back leave the app.

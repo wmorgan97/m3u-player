@@ -7,6 +7,7 @@
 
     <application
         android:allowBackup="true"
+        android:usesCleartextTraffic="true"
         android:banner="@drawable/banner"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -29,6 +30,15 @@
             </intent-filter>
 
         </activity>
+
+        <!-- Full-screen player (remote controlled); landscape, never shown in recents on its own. -->
+        <activity
+            android:name=".PlayerActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode|navigation"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:launchMode="singleTop"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
