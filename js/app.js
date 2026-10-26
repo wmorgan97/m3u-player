@@ -960,7 +960,8 @@ function heroHtml(items) {
   }, 8000);
   queueMicrotask(() => {
     const car = $('.hero-car'), dots = $('.hero-dots');
-    if (!car || !dots) return;
+    if (!car || !dots || car.dataset.bound) return;   // a kept carousel already has its handlers
+    car.dataset.bound = '1';
     const mark = () => { const i = Math.round(car.scrollLeft / car.clientWidth); dots.querySelectorAll('button').forEach((d, k) => d.classList.toggle('on', k === i)); };
     car.addEventListener('scroll', debounce(mark, 60), { passive: true });
     dots.addEventListener('click', e => { const d = e.target.closest('[data-dot]'); if (d) { e.stopPropagation(); go(car, +d.dataset.dot); } });
@@ -984,6 +985,30 @@ function heroHtml(items) {
 // block stays a fixed height: more groups add columns that scroll sideways instead of lengthening the page.
 const browseRows = n => (n <= 2 ? n : Math.min(4, Math.ceil(n / 2)));
 
+// Home updates without flicker: each top-level section is compared with what is on screen and only sections that
+// changed are replaced. Unchanged ones (their images, scroll position, carousel) stay exactly as they are.
+const blockKey = el => `${el.tagName}.${el.className}|${el.id}|${el.querySelector('h2, .hero-title')?.textContent || ''}`;
+function patchView(root, html) {
+  const t = document.createElement('template');
+  t.innerHTML = html;
+  const fresh = [...t.content.children];
+  const old = [...root.children];
+  if (!old.length || old.some(el => el._html === undefined)) {   // another page was showing: plain render
+    root.innerHTML = '';
+    for (const el of fresh) { el._html = el.outerHTML; root.append(el); }
+    return;
+  }
+  const byKey = new Map(old.map(el => [blockKey(el), el]));
+  const next = fresh.map(el => {
+    const html = el.outerHTML, prev = byKey.get(blockKey(el));
+    if (prev && prev._html === html) { byKey.delete(blockKey(el)); return prev; }   // unchanged: keep the live one
+    el._html = html;
+    return el;
+  });
+  // Keep nodes in place where possible (moving the hero would restart its images).
+  next.forEach((el, i) => { if (root.children[i] !== el) root.insertBefore(el, root.children[i] || null); });
+  while (root.children.length > next.length) root.lastElementChild.remove();
+}
 function showHome() {
   state.current = null;
   setTopbar({
@@ -1026,7 +1051,7 @@ function showHome() {
     return (mine.length >= 6 ? mine : gs).sort((a, b) => b.count - a.count).map(g => ({ pid: p.id, name: g.name, count: g.count }));
   }).slice(0, pinnedAny ? 40 : 12);
   const browseEdit = pl.length ? `<button class="link" data-edit-groups="${esc(pl[0].id)}">${pinnedAny ? 'Edit' : 'Choose'}</button>` : '';
-  view.innerHTML = `
+  patchView(view, `
     ${isIOS && !isStandalone && !dismissed ? `<div class="banner">
       ${icon('share')}<span><b>Install on your iPhone:</b> tap Share, then “Add to Home Screen”. It opens full-screen and iOS keeps your playlists safe.</span>
       <button class="icon-btn" id="tip-close" aria-label="Dismiss">${icon('close')}</button></div>` : ''}
@@ -1057,19 +1082,19 @@ function showHome() {
     ${watchlist.length ? `<section class="hub-sec"><div class="hub-head"><h2>Watchlist</h2></div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul></section>` : ''}
     ${pl.length ? '' : `<div class="empty">${icon('tv', 'big')}<p><b>No playlists yet</b></p>
           <p class="muted">Add an Xtream login, an M3U / M3U8 link, or a playlist file.</p>
-          <button class="btn primary" id="add-first">Add playlist</button></div>`}`;
+          <button class="btn primary" id="add-first">Add playlist</button></div>`}`);
 
-  $('#add-first')?.addEventListener('click', addPlaylistSheet);
-  $('#server-key')?.addEventListener('click', enterServerKey);
+  { const b = $('#add-first'); if (b) b.onclick = addPlaylistSheet; }
+  { const b = $('#server-key'); if (b) b.onclick = enterServerKey; }
   addRowArrows(view);
-  $('#tip-close')?.addEventListener('click', () => {
+  if ($('#tip-close')) $('#tip-close').onclick = (() => {
     try { localStorage.setItem('install-tip', 'off'); } catch {}
     $('.banner').remove();
   });
-  $('#home-q')?.addEventListener('keydown', e => {
+  if ($('#home-q')) $('#home-q').onkeydown = (e => {
     if (e.key === 'Enter' && e.target.value.trim()) { pendingQuery = e.target.value.trim(); location.hash = '#/all'; }
   });
-  $('#home-q')?.addEventListener('input', debounce(e => homeSearch(e.target.value.trim()), 250));
+  if ($('#home-q') && !$('#home-q').oninput) $('#home-q').oninput = debounce(e => homeSearch(e.target.value.trim()), 250);
   view.onclick = e => {
     const hp = e.target.closest('[data-hero-play]');
     if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playBestVersion(it); }
