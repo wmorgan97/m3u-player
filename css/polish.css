@@ -803,3 +803,9 @@ button.cw-x { border: 0; padding: 0; margin: 0; -webkit-appearance: none; appear
 #ctl-live, #ctl-live.on, #ctl-live:not(.on) { background: transparent !important; box-shadow: none !important; padding: 0 6px !important; font-weight: 700; letter-spacing: .06em; }
 #ctl-live.on::before { background: #ff4a4f; animation: none; }
 #ctl-live:not(.on) { color: rgba(255,255,255,.7); }
+
+/* Android TV (Shield): a clear highlight on whatever the remote has picked. */
+html.tv :focus { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 10px; }
+html.tv .scard:focus { outline: none; }
+html.tv .scard:focus .poster-img { outline: 3px solid #fff; outline-offset: 2px; transform: scale(1.06); transition: transform .12s; }
+html.tv .row:focus, html.tv .hs-row:focus { background: var(--surface-2); }

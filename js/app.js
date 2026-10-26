@@ -6,7 +6,7 @@ import { Xtream, parseXtreamLink, liveChannels, movieItems, seriesItems } from '
 import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from './epg.js';
 import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
-import { isNative, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
+import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
 const PAGE = 150;
 const UNGROUPED = 'Ungrouped';
@@ -4629,3 +4629,63 @@ const perfTimer = setInterval(() => {
   }
   if (elapsed > 185_000) clearInterval(perfTimer);
 }, 30_000);
+
+// ---- Android TV (NVIDIA Shield) ----
+// The remote has arrows, OK and Back. Arrows move to the nearest thing you can pick in that direction (posters,
+// rows, buttons), OK picks it, Back closes what's open (sheet, player) and then goes back a page. While something
+// plays, the player's own keys apply (up/down channel, left/right skip, OK pause), as on TiviMate.
+if (isTV) {
+  document.documentElement.classList.add('tv');
+  const PICKABLE = 'a[href], button:not([disabled]), input:not([type=hidden]), select, textarea, [tabindex], .scard, .svc, .hero-slide, .row, .hs-row, .cw, [data-see], [data-resume]';
+  const visible = el => {
+    const r = el.getBoundingClientRect();
+    return r.width > 4 && r.height > 4 && !el.closest('[hidden], .hidden') && getComputedStyle(el).visibility !== 'hidden';
+  };
+  const picks = () => {
+    const root = !$('#sheet').hidden ? $('#sheet') : document;   // an open sheet keeps the focus inside it
+    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest('.scard, .svc, .hero-slide, .row, .hs-row, .cw') && visible(el));
+  };
+  const focusEl = el => {
+    if (!el.matches('a[href], button, input, select, textarea') && !el.hasAttribute('tabindex')) el.tabIndex = -1;
+    el.focus({ preventScroll: true });
+    el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+  };
+  const move = dir => {
+    const cur = document.activeElement && document.activeElement !== document.body && visible(document.activeElement) ? document.activeElement : null;
+    const all = picks();
+    if (!cur) { const first = all.find(el => el.getBoundingClientRect().top >= 0); if (first) focusEl(first); return; }
+    const a = cur.getBoundingClientRect(), ax = a.left + a.width / 2, ay = a.top + a.height / 2;
+    let best = null, bestScore = Infinity;
+    for (const el of all) {
+      if (el === cur || cur.contains(el)) continue;
+      const b = el.getBoundingClientRect(), bx = b.left + b.width / 2, by = b.top + b.height / 2;
+      const along = dir === 'ArrowRight' ? b.left - a.right + a.width / 2 : dir === 'ArrowLeft' ? a.left - b.right + a.width / 2 : dir === 'ArrowDown' ? b.top - a.bottom + a.height / 2 : a.top - b.bottom + a.height / 2;
+      const ahead = dir === 'ArrowRight' ? bx > ax + 2 : dir === 'ArrowLeft' ? bx < ax - 2 : dir === 'ArrowDown' ? by > ay + 2 : by < ay - 2;
+      if (!ahead) continue;
+      const across = dir === 'ArrowRight' || dir === 'ArrowLeft' ? Math.abs(by - ay) : Math.abs(bx - ax);
+      const score = Math.max(0, along) + across * 2.5;
+      if (score < bestScore) { bestScore = score; best = el; }
+    }
+    if (best) focusEl(best);
+  };
+  document.addEventListener('keydown', e => {
+    const typing = e.target.matches('input, textarea, select');
+    const arrow = /^Arrow(Up|Down|Left|Right)$/.test(e.key);
+    if (state.playing && $('#sheet').hidden && !typing) return;   // the player's own keys
+    if (arrow) {
+      if (typing && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;   // moving the cursor in a search box
+      e.preventDefault(); e.stopImmediatePropagation();
+      move(e.key);
+    } else if ((e.key === 'Enter' || e.key === ' ') && !typing) {
+      const el = document.activeElement;
+      if (el && el !== document.body && !el.matches('a[href], button, input, select, textarea, summary')) { e.preventDefault(); el.click(); }
+    }
+  }, true);
+  // Back on the remote (MainActivity asks this first): true = handled here, false = leave the app.
+  window.__tvBack = () => {
+    if (!$('#sheet').hidden) { closeSheet(); return true; }
+    if (state.playing) { stopPlaying(); return true; }
+    if (location.hash && location.hash !== '#/' && location.hash !== '#') { history.back(); return true; }
+    return false;
+  };
+}

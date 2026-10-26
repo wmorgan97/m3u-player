@@ -6,6 +6,9 @@ const cap = globalThis.Capacitor;
 // the browser version (server proxy, its player) and has none of the iPhone's native plugins.
 export const isNative = !!(cap?.isNativePlatform?.() && cap?.getPlatform?.() === 'ios' && typeof cap.nativePromise === 'function');
 
+// The Android TV app (NVIDIA Shield): driven by a remote, so the page gets TV navigation (see app.js, "Android TV").
+export const isTV = !!(cap?.isNativePlatform?.() && cap?.getPlatform?.() === 'android');
+
 const call = (plugin, method, options) => cap.nativePromise(plugin, method, options);
 
 function base64ToBytes(b64) {
