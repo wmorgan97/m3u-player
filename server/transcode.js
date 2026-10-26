@@ -155,7 +155,7 @@ function sessionKey(href, p) {
   const au = ['none', 'copy'].includes(p.get('audio')) ? p.get('audio') : 'aac';
   const tr = Math.max(0, Math.min(15, Number(p.get('track')) || 0));
   const av = avOf(p);
-  return sessionId((st ? `${href}#${st}` : href) + (au !== 'aac' ? `#${au}` : '') + (tr ? `#a${tr}` : '') + (p.get('enc') === '1' ? '#enc' : '') + (av ? `#av${av}` : '') + (p.get('fmp4') === '1' && p.get('enc') !== '1' ? '#f4' : ''));
+  return sessionId((st ? `${href}#${st}` : href) + (au !== 'aac' ? `#${au}` : '') + (tr ? `#a${tr}` : '') + (p.get('enc') === '1' ? '#enc' : '') + (av ? `#av${av}` : '') + (p.get('fmp4') === '1' && p.get('enc') !== '1' ? '#f4' : '') + (p.get('surround') === '1' ? '#sr' : ''));
 }
 const avOf = p => Math.max(-3000, Math.min(3000, Math.round((Number(p.get('av')) || 0) / 50) * 50));
 
@@ -188,7 +188,7 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
       : REENCODE
       ? ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
          '-g', '25', '-keyint_min', '25', '-sc_threshold', '0', '-crf', '22', '-maxrate', '5M', '-bufsize', '10M', '-threads', '4']
-      : ['-c:v', 'copy', ...(fmp4 ? ['-tag:v', 'hvc1'] : [])]),
+      : ['-c:v', 'copy', ...(fmp4 && (!vod || vinfo?.codec === 'hevc') ? ['-tag:v', 'hvc1'] : [])]),
     ...audioArgs(audio, av),
     '-flush_packets', '1', '-muxdelay', '0',
     ...(vod
@@ -226,7 +226,7 @@ function spawnRun(s, fromIdx, { fast = s.enc } = {}) {
   return proc;
 }
 
-async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0, enc = false, ua = '', av = 0, fmp4 = false) {
+async function startSession(id, target, vod = false, start = 0, audio = 'aac', track = 0, enc = false, ua = '', av = 0, fmp4 = false, surround = false) {
   // A fresh folder per start, so restarting a crashed stream never races the previous folder's cleanup.
   const dir = join(ROOT, `${id}-${Date.now().toString(36)}`);
   await fs.mkdir(dir, { recursive: true });
@@ -237,7 +237,10 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
     duration: probe?.duration || 0, audio, track, subs, enc, height, vinfo: probe?.video, segLen: enc ? ENC_SEG_S : VOD_SEG_S, ua, av,
     // fMP4 only for HEVC (films: known from the probe; live: the app asks after a TS attempt showed no picture).
     fmp4: fmp4 && !enc && (!vod || probe?.video?.codec === 'hevc') };
-  if (session.fmp4) console.log(`[hls] ${id}: HEVC untouched in fMP4 for Safari`);
+  // Safari takes Dolby Digital / Dolby Digital Plus (Atmos too) untouched, in fMP4: keep the film's own surround sound.
+  const srcAudio = probe?.audio?.[track]?.codec;
+  if (vod && surround && !enc && !av && audio === 'aac' && (srcAudio === 'ac3' || srcAudio === 'eac3')) { session.audio = 'copy'; session.fmp4 = true; }
+  if (session.fmp4) console.log(`[hls] ${id}: untouched in fMP4 for Safari (${probe?.video?.codec || 'live'} video, ${session.audio === 'copy' ? `${srcAudio || 'source'} audio kept` : 'AAC audio'})`);
   // A film whose sound is already AAC keeps it untouched (full quality, surround kept, nothing to drift).
   if (vod && audio === 'aac' && !av && probe?.audio?.[track]?.codec === 'aac') session.audio = 'copy';
   sessions.set(id, session);
@@ -258,6 +261,23 @@ async function startSession(id, target, vod = false, start = 0, audio = 'aac', t
 function restartRun(s, n) {
   try { s.proc?.kill(); } catch {}
   spawnRun(s, n);
+}
+
+// Live feed speed: seconds of video the provider delivered per second of wall clock, over the last ~30s.
+// Below 1.0 the feed can't keep up and playback will stall sooner or later.
+async function liveSpeed(s) {
+  let t;
+  try { t = await fs.readFile(join(s.dir, 'index.m3u8'), 'utf8'); } catch { return null; }
+  s.segSeen ??= -1; s.media ??= 0;
+  for (const m of t.matchAll(/#EXTINF:([\d.]+),\s*\r?\n(?:#[^\n]*\r?\n)*seg(\d+)\.(?:ts|m4s)/g)) {
+    const n = Number(m[2]);
+    if (n > s.segSeen) { s.segSeen = n; s.media += Number(m[1]); }
+  }
+  const now = Date.now();
+  (s.samples ??= []).push([now, s.media]);
+  while (s.samples.length > 2 && now - s.samples[1][0] > 30_000) s.samples.shift();
+  const [t0, m0] = s.samples[0], dt = (now - t0) / 1000;
+  return dt >= 12 ? Math.round(((s.media - m0) / dt) * 100) / 100 : null;
 }
 
 // Highest segment index the current run has finished (from ffmpeg's own playlist).
@@ -447,6 +467,15 @@ export async function handleHls(req, res, url) {
   const target = url.searchParams.get('url');
   const key = url.searchParams.get('key') || '';
   if (!target) return send(res, 400, 'Missing url');
+  if (url.pathname === '/hls/health') {   // the app asks while a live channel plays: is the feed keeping up?
+    if (PROXY_KEY && key !== PROXY_KEY) return send(res, 403, 'Wrong or missing proxy key');
+    let s = null;
+    try { s = sessions.get(sessionKey(new URL(target).href, url.searchParams)); } catch {}
+    if (!s || s.vod) return send(res, 404, 'Not running');
+    const speed = await liveSpeed(s);
+    if (speed !== null && speed < 0.9) console.log(`[hls] ${s.id} feed slow: ${speed}x`);
+    return send(res, 200, JSON.stringify({ speed }), { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  }
   if (stop) {   // the app switched away: free the provider connection right now instead of after the idle timeout
     if (PROXY_KEY && key !== PROXY_KEY) return send(res, 403, 'Wrong or missing proxy key');
     try { stopSession(sessionKey(new URL(target).href, url.searchParams)); } catch {}   // same id recipe as a start
@@ -494,7 +523,7 @@ export async function handleHls(req, res, url) {
     // second ffmpeg is orphaned holding the only provider connection.
     if (!starting.has(id)) {
       const ua = /iPhone|iPad/.test(req.headers['user-agent'] || '') ? 'iPhone' : /Macintosh/.test(req.headers['user-agent'] || '') ? 'Mac' : 'other';
-      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio, track, enc, `${ua}${warm ? ' warm' : ''}`, av, url.searchParams.get('fmp4') === '1'); })().finally(() => starting.delete(id)));
+      starting.set(id, (async () => { await closeOthers(id, t.hostname); return startSession(id, t.href, vod, start, audio, track, enc, `${ua}${warm ? ' warm' : ''}`, av, url.searchParams.get('fmp4') === '1', url.searchParams.get('surround') === '1'); })().finally(() => starting.delete(id)));
     }
     s = await starting.get(id);
   }

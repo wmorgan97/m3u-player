@@ -493,7 +493,7 @@ function transcodeUrl(url) {
   if (serverProxy.needsKey && !key) return null;
   const b = bufferLevel();
   if (/^blob:/.test(url)) return null;       // a downloaded file plays from storage
-  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}${vodEnc ? '&enc=1' : IS_SAFARI && vodInfo?.video?.codec === 'hevc' ? '&fmp4=1' : ''}` : liveEnc.has(url) ? '&enc=1' : liveFmp4.has(url) ? '&fmp4=1' : ''}${avSyncFor(url) ? `&av=${avSyncFor(url)}` : ''}&url=${encodeURIComponent(url)}`;
+  return `/hls?${key ? `key=${encodeURIComponent(key)}&` : ''}ready=${b.ready}&behind=${b.behind}${transcodeVod ? `&vod=1${vodTrack ? `&track=${vodTrack}` : ''}${vodEnc ? '&enc=1' : IS_SAFARI && vodInfo?.video?.codec === 'hevc' ? '&fmp4=1' : ''}${IS_SAFARI && !vodEnc ? '&surround=1' : ''}` : liveEnc.has(url) ? '&enc=1' : liveFmp4.has(url) ? '&fmp4=1' : ''}${avSyncFor(url) ? `&av=${avSyncFor(url)}` : ''}&url=${encodeURIComponent(url)}`;
 }
 
 // Pre-warm: ask the server to start repackaging a stream now, so playing it a moment later is near-instant.
@@ -2540,13 +2540,22 @@ async function versionsOf(m) {
 }
 // Play: with more than one copy, choose (best first, marked); with one, just play.
 async function playBestVersion(m, { resume = true } = {}) {
-  const vs = await versionsOf(m);
-  if (vs.length < 2) return playChannel([m], 0);
-  const q = vs.map(qualityOf), best = 0;
-  sheet(`<div class="sheet-title">Choose quality</div><p class="muted sheet-intro">${esc(displayTitle(m.name))} · ${vs.length} versions</p>
+  const all = await versionsOf(m);
+  // Copies with the same quality are the same film in different groups: show one row each (the first is the
+  // best-ranked), noting how many; the other copies stay available as backups if that one fails.
+  const seenQ = new Map(), vs = [];
+  for (const v of all) {
+    const k = qualityOf(v).tags.join('|');
+    if (seenQ.has(k)) { seenQ.get(k).n++; const kept = seenQ.get(k).v; kept.alts = [...(kept.alts || []), v.url]; continue; }
+    const kept = { ...v, alts: undefined };
+    seenQ.set(k, { v: kept, n: 1 }); vs.push(kept);
+  }
+  if (vs.length < 2) return playChannel([vs[0] || m], 0);
+  const q = vs.map(qualityOf), best = 0, copies = vs.map(v => seenQ.get(qualityOf(v).tags.join('|')).n);
+  sheet(`<div class="sheet-title">Choose quality</div><p class="muted sheet-intro">${esc(niceName(m))}</p>
     <div class="vlist">${vs.map((v, i) => `<button class="vrow${i === best ? ' best' : ''}" data-v="${i}">
       <span class="vq">${esc(q[i].res)}</span>
-      <span class="vtext"><b>${q[i].tags.map(esc).join(' · ')}${i === best ? ' <em>Recommended</em>' : ''}</b><span class="muted">${esc(groupLabel(v.group || ''))}${q[i].converts ? ' · converted in this browser' : ''}${state.progress[v.url]?.t > 30 && !state.progress[v.url]?.done ? ` · ${fmtDur(state.progress[v.url].d - state.progress[v.url].t)} left` : ''}</span></span>
+      <span class="vtext"><b>${q[i].tags.map(esc).join(' · ')}${i === best ? ' <em>Recommended</em>' : ''}</b><span class="muted">${copies[i] > 1 ? `${copies[i]} copies` : esc(groupLabel(v.group || ''))}${q[i].converts ? ' · converted in this browser' : ''}${state.progress[v.url]?.t > 30 && !state.progress[v.url]?.done ? ` · ${fmtDur(state.progress[v.url].d - state.progress[v.url].t)} left` : ''}</span></span>
       ${icon('play')}</button>`).join('')}</div>`, {
     onMount: el => {
       el.querySelector('.vlist').onclick = e => { const b = e.target.closest('[data-v]'); if (!b) return; closeSheet(); playChannel([vs[+b.dataset.v]], 0); };
@@ -3732,6 +3741,7 @@ async function settingsSheet() {
       <label class="switch"><span><b>Show what’s on next</b><span class="muted">After the current programme on each channel row.</span></span><input type="checkbox" name="showNext" ${s.showNext !== false ? 'checked' : ''}></label>
       <div class="section-title">Channels</div>
       <label class="switch"><span><b>Merge duplicate channels</b><span class="muted">Show each channel once; the copies become backup streams, used automatically if one fails.</span></span><input type="checkbox" name="mergeDupes" ${s.mergeDupes !== false ? 'checked' : ''}></label>
+      <label class="switch"><span><b>Prefer 4K live channels</b><span class="muted">Where a channel also comes in 4K, play that copy (Safari and the iPhone app; the normal copy stays as backup).</span></span><input type="checkbox" name="prefer4k" ${s.prefer4k !== false ? 'checked' : ''}></label>
       <label class="switch"><span><b>Continue watching on Home</b><span class="muted">Your last channel at the top of Home, one tap to play.</span></span><input type="checkbox" name="resumeCard" ${s.resumeCard !== false ? 'checked' : ''}></label>
       <div class="section-title">Playback</div>
       ${isNative ? '' : (() => {
@@ -3770,7 +3780,7 @@ async function settingsSheet() {
         const mergeWas = state.settings.mergeDupes !== false, langWas = state.settings.vodLanguage;
         Object.assign(state.settings, {
           ...(f.has('proxy') ? { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')) } : {}),
-          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'), livePlayer: String(f.get('livePlayer') || state.settings.livePlayer || 'app'),
+          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'), prefer4k: f.get('prefer4k') === 'on', livePlayer: String(f.get('livePlayer') || state.settings.livePlayer || 'app'),
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
           showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on', resumeCard: f.get('resumeCard') === 'on',
         });
@@ -4105,6 +4115,28 @@ function bindPlayer() {
     toast('No picture from this stream: converting it for your device…');
     playChannel(state.playing.list, state.playing.index);
   }, 1000);
+  // Feed health: through our server the live feed's speed is measured (seconds of video per second). Two slow
+  // readings in a row (under 0.9x: it will stall) -> switch to another copy of the channel before it freezes.
+  let slowCount = 0, switchedAt = 0, healthFor = '';
+  setInterval(async () => {
+    const c = nowChannel();
+    if (!c || !state.playing || video.paused || document.hidden || !isLiveChannel(c) || isNative) { slowCount = 0; return; }
+    const url = streamOf(c), tc = transcodeUrl(url);
+    if (!tc || /\.m3u8(\?|#|$)/i.test(url)) return;
+    if (healthFor !== url) { healthFor = url; slowCount = 0; }
+    let speed = null;
+    try { const r = await fetch(tc.replace('/hls?', '/hls/health?'), { cache: 'no-store' }); if (r.ok) speed = (await r.json()).speed; } catch {}
+    if (speed === null || nowChannel() !== c) return;
+    slowCount = speed < 0.9 ? slowCount + 1 : 0;
+    if (slowCount < 2 || Date.now() - switchedAt < 60_000) return;
+    const others = liveCopies(c).filter(u => u !== url);
+    if (!others.length) { if (slowCount === 2) toast(`This channel's feed is slow (${speed}×) and has no other copy to switch to`); return; }
+    slowCount = 0; switchedAt = Date.now();
+    c.alts = others; backupIdx.set(c, 0);   // try the other copies in order, from the first
+    if (!nextBackup(c)) return;
+    toast('Feed was slowing down: switched to another copy');
+    playChannel(state.playing.list, state.playing.index);
+  }, 8000);
   // Stall watchdog: live video whose clock hasn't advanced for 12s while it should be playing -> reload the stream.
   let lastT = 0, lastTick = Date.now();
   setInterval(() => {
@@ -4242,9 +4274,49 @@ window.__nativePlayer = ev => {
   if (ev.type === 'error') report('native-play', `${ev.message}: ${c.name}`, isLiveChannel(c) ? 'live' : c.kind);
 };
 
+// Live 4K first: "Sky Sports F1" and "Sky Sports F1 ᵁᴴᴰ ᴴᴰᴿ" are the same channel. Where the device plays 4K HEVC untouched
+// (Safari, the iPhone app), start the 4K copy; the copy you picked stays as its backup.
+const IS_UHD = /\b(4k|uhd|2160p?|3840p?)\b|ᵁᴴᴰ/i;
+const liveBase = name => String(name || '').replace(/[ʰ-˿ᴬ-ᵫ⁰-₟]+/g, ' ').replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+  .replace(/\b(4k|uhd|hdr|fhd|hd|sd|2160p?|3840p?|1080p?|720p?|backup|raw|hevc)\b/gi, ' ').toLowerCase().replace(/[^a-z0-9:]+/g, '');
+const uhdIndex = new WeakMap();   // playlist -> its live channels by base name (never saved with the playlist)
+function liveIndex(p) {
+  let idx = uhdIndex.get(p);
+  if (!idx || idx.n !== p.channels.length) {
+    idx = { n: p.channels.length, uhd: new Map(), all: new Map() };
+    for (const x of (m3uKinds(p)?.live || p.channels)) {
+      if (/^#+|#+$/.test(x.name || '')) continue;   // "##### PPV #####" separators
+      const k = liveBase(x.name);
+      if (!k) continue;
+      if (IS_UHD.test(x.name || '') && !idx.uhd.has(k)) idx.uhd.set(k, x);
+      const l = idx.all.get(k); if (l) l.push(x); else idx.all.set(k, [x]);
+    }
+    uhdIndex.set(p, idx);
+  }
+  return idx;
+}
+// Other copies of a live channel to fall back to: its merged backups, then same-name channels ("(Backup)", 4K/HD).
+function liveCopies(c) {
+  const p = playlistOf(c) || state.playlists.find(p => p.channels.some(x => x.url === c.url));
+  const same = p ? (liveIndex(p).all.get(liveBase(c.name)) || []).map(x => x.url) : [];
+  return [...new Set([...(c.alts || []), ...same])].filter(u => u !== c.url);
+}
+function uhdCopy(c) {
+  if (!isLiveChannel(c) || IS_UHD.test(c.name || '') || state.settings.prefer4k === false || !(IS_SAFARI || isNative)) return null;
+  const p = playlistOf(c) || state.playlists.find(p => p.channels.some(x => x.url === c.url));
+  if (!p) return null;
+  const u = liveIndex(p).uhd.get(liveBase(c.name));
+  return u && u.url !== c.url ? u : null;
+}
 function playChannel(list, index) {
-  const c = list[index];
+  let c = list[index];
   if (!c) return;
+  const up = !c._fromUhd && uhdCopy(c);
+  if (up) {
+    list = list.slice();
+    c = list[index] = { ...up, name: c.name, logo: c.logo || up.logo, group: c.group, num: c.num, src: c.src, _fromUhd: true, alts: [c.url, ...(c.alts || [])] };
+    toast('Playing the 4K version');
+  }
   if (isNative && !c.offline) return playNative(list, index, c);
   // "Play films & series in VLC / Infuse / IINA": hand the provider's link straight to that app.
   const choice = isLiveChannel(c) ? state.settings.livePlayer : state.settings.vodPlayer;
