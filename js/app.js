@@ -4693,7 +4693,19 @@ if (isTV) {
     for (const row of rows) row.items.sort((a, b) => a.r.left - b.r.left);
     return rows;
   };
-  let memX = null, lastContent = null;
+  let memX = null, lastContent = null, lastSeen = null;
+  // Pages redraw under the remote (the Guide as time passes, Home as rows refresh): find the same item again, by its
+  // name first and position second, so the next press carries on instead of restarting at the top.
+  const recover = all => {
+    if (!lastSeen || lastSeen.sheet !== sheetOpen()) return null;
+    let best = null, d = Infinity;
+    for (const el of all) {
+      const r = el.getBoundingClientRect(), dx = r.left + r.width / 2 - lastSeen.x, dy = r.top + r.height / 2 - lastSeen.y;
+      const dd = Math.hypot(dx, dy) - ((el.textContent || '').trim().slice(0, 60) === lastSeen.text ? 10000 : 0);
+      if (dd < d) { d = dd; best = el; }
+    }
+    return d < 200 ? best : null;
+  };
   window.__tvRows = () => lines(picks()).slice(0, 8).map(r => Math.round(r.top) + ': ' + r.items.slice(0, 6).map(i => (i.el.textContent || i.el.className).trim().replace(/\s+/g, ' ').slice(0, 12)).join(' | '));   // for checking the TV layout remotely
   const focusEl = el => {
     if (!el.matches('a[href], button, input, select, textarea') && !el.hasAttribute('tabindex')) el.tabIndex = -1;
@@ -4701,6 +4713,8 @@ if (isTV) {
     if (inRail(el)) { document.body.classList.add('rail-open'); return; }
     document.body.classList.remove('rail-open');
     if (!el.closest('#sheet')) lastContent = el;   // what to come back to when a details page or menu closes
+    const lr = el.getBoundingClientRect();
+    lastSeen = { text: (el.textContent || '').trim().slice(0, 60), x: lr.left + lr.width / 2, y: lr.top + lr.height / 2, sheet: !!el.closest('#sheet') };
     if (!el.closest('#sheet') && !el.closest(SIDE)) lastMain = el;
     // Instant (holding a key never queues animations) and kept mid-screen, clear of the edges.
     el.scrollIntoView({ block: el.closest('#sheet') ? 'nearest' : 'center', inline: 'nearest' });   // a details page scrolls only as needed
@@ -4736,6 +4750,7 @@ if (isTV) {
     const rows = lines(picks());
     if (!rows.length) return;
     let ri = -1, ci = -1;
+    if (!cur) { const back = recover(rows.flatMap(r => r.items.map(i => i.el))); if (back) cur = back; }
     if (cur) rows.forEach((row, i) => { const j = row.items.findIndex(x => x.el === cur); if (j >= 0) { ri = i; ci = j; } });
     if (ri < 0) {   // nothing picked (or the page redrew under it): start at the first row on screen
       const row = rows.find(r => r.top >= 0) || rows[0];
