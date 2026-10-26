@@ -4657,15 +4657,21 @@ if (isTV) {
   const inRail = el => !!el?.closest('.topbar');
   const sheetOpen = () => !$('#sheet').hidden;
   // Everything you can pick on the page (or in an open sheet), minus the small buttons inside cards (hold OK for those).
+  let sideColumn = false;
   const picks = () => {
     const root = sheetOpen() ? $('#sheet') : $('#view');
-    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && !el.closest(SKIP) && (sheetOpen() || !el.closest(SIDE)) && visible(el));   // banner slides are one row: left/right change slide
+    sideColumn = !sheetOpen() && sidePicks().length > 0;
+    return [...root.querySelectorAll(PICKABLE)].filter(el => !el.parentElement.closest(CARDISH) && !el.closest(SKIP) && (!el.closest(SIDE) || !sideColumn) && visible(el));   // banner slides are one row: left/right change slide
   };
   const railPicks = () => [...document.querySelectorAll(RAIL)].filter(visible);
   // A page's own side list (Live TV groups) is a column of its own, like the menu: up/down within it, right into the page.
   const SIDE = '#chips';
-  const inSide = el => !sheetOpen() && !!el?.closest(SIDE);
-  const sidePicks = () => sheetOpen() ? [] : [...document.querySelectorAll(`${SIDE} .chip`)].filter(visible);
+  const inSide = el => !!el?.closest(SIDE) && sidePicks().includes(el);
+  const sidePicks = () => {   // only when the chips really are a column (the Guide lays the same chips out in a row)
+    if (sheetOpen()) return [];
+    const chips = [...document.querySelectorAll(`${SIDE} .chip`)].filter(visible);
+    return chips.length > 1 && chips[1].getBoundingClientRect().top > chips[0].getBoundingClientRect().top + 4 ? chips : [];
+  };
   let lastMain = null;
   // Rows: things whose tops line up (a shelf, even the part scrolled off to the side, a grid line, a row of buttons).
   const lines = items => {
