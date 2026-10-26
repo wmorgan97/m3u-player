@@ -171,7 +171,9 @@ function ffmpegArgs(dir, target, { vod = false, fromIdx = 0, audio = 'aac', trac
     '-rw_timeout', '15000000',                                   // 15s: a dead upstream fails fast instead of hanging
     // Live TS: open fast with a small probe. Files (mkv/mp4): probe properly, or ffmpeg misses the B-frame
     // reorder depth and writes frames with no decode timestamps, which freezes players after half a second.
-    ...(vod ? ['-probesize', '10000000', '-analyzeduration', '2000000'] : ['-probesize', '500000', '-analyzeduration', '500000']),
+    // A converting seek run re-times every frame itself, so a small probe is safe there: each skip then reads ~2MB
+    // from the start of the provider's file instead of 10MB before it can jump.
+    ...(vod ? (enc && fromIdx > 0 ? ['-probesize', '2000000', '-analyzeduration', '1000000'] : ['-probesize', '10000000', '-analyzeduration', '2000000']) : ['-probesize', '500000', '-analyzeduration', '500000']),
     ...(vod && fromIdx > 0 ? ['-ss', String(fromIdx * segLen)] : []),
     ...(vod && fast ? ['-t', String(HEAD_SEGS * segLen)] : []),   // the quick head of a run
     '-fflags', '+genpts+flush_packets', '-i', target,
@@ -353,8 +355,9 @@ export async function handleDownload(req, res, url, send, allowed) {
   const track = Math.max(0, Math.min(15, Number(url.searchParams.get('track')) || 0));
   // One connection per provider: while something from this provider is playing, say so instead of fighting it
   // (the app waits and retries; an exact-file copy then resumes from where it stopped).
-  // "Playing" means segments were fetched in the last 10s; a stream merely kept warm after you stopped is closed to make room.
-  if ([...sessions.values()].some(s => s.host === t.hostname && !s.exited && Date.now() - s.lastAccess < 10_000)) return send(res, 409, 'Busy: something from this provider is playing');
+  // "Playing" means the player asked for a piece in the last 30s, including one it is still waiting for (a slow piece or
+  // a seek, when the run may have just ended), so a queued download can't cut in mid-film. Paused or stopped streams make room.
+  if ([...sessions.values()].some(s => s.host === t.hostname && !s.paused && Date.now() - s.lastAccess < 30_000)) return send(res, 409, 'Busy: something from this provider is playing');
   await closeOthers(null, t.hostname);
   if (q === 'file') {
     // The provider's file exactly as it is (4K stays 4K, HEVC stays HEVC): for saving to a computer and playing in VLC etc.
@@ -436,6 +439,7 @@ export async function handleHls(req, res, url) {
       if (!fresh && (s.exited || n < s.runStart || n > done + 6)) { s.restartAt = Date.now(); s.paused = false; restartRun(s, n); }
       const deadline = Date.now() + (s.enc ? 90_000 : 30_000), waitFrom = Date.now();   // converting the first seconds of a 1080p file can take a while
       while (Date.now() < deadline && sessions.get(id) === s) {
+        s.lastAccess = Date.now();   // still watching while we wait
         try { st = await fs.stat(f); break; } catch {}
         if (s.exited && Date.now() - s.runAt > 3000 && (await producedUpTo(s)) < n) return send(res, 404, 'Segment unavailable');   // run ended before reaching it (past the end of the file)
         await new Promise(r => setTimeout(r, 120));

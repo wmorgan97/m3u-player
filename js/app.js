@@ -1589,7 +1589,7 @@ const discoverMode = () => {
 };
 function cardHtml(it, key, k) {
   return `<li class="scard" data-shelf="${esc(key)}" data-k="${k}">
-    <span class="poster-img${it.logo ? '' : ' no-img'}" data-initials="${initials(displayTitle(it.name))}" data-title="${esc(displayTitle(it.name))}" style="--hue:${hueOf(it.name)}">${it.logo ? `<img src="${esc(thumb(it.logo, 300))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.scard')?.classList.add('noart');this.parentNode.classList.add('no-img');this.remove()">` : ''}
+    <span class="poster-img${it.logo ? '' : ' no-img'}" data-initials="${initials(displayTitle(it.name))}" data-title="${esc(displayTitle(it.name))}" style="--hue:${hueOf(it.name)}">${it.logo ? `<img src="${esc(thumb(it.logo, 300))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.scard')?.classList.add('noart');this.parentNode?.classList.add('no-img');this.remove()">` : ''}
       ${it.rating && it.rating < 9.5 ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
     <span class="poster-name">${esc(it.kind === 'movie' || it.kind === 'series' ? displayTitle(it.name) : it.name)}</span>${it.year ? `<span class="muted">${esc(it.year)}</span>` : ''}</li>`;
 }
@@ -2955,7 +2955,7 @@ function programmeSheet(c, prog) {
   const pct = live ? (((now - prog[0]) / (prog[1] - prog[0])) * 100).toFixed(1) : 0;
   sheet(`<div class="detail prog">
       <div class="prog-hero${x.img ? '' : ' no-img'}" style="--hue:${hueOf(c.name)}">
-        ${x.img ? `<img src="${esc(x.img)}" alt="" referrerpolicy="no-referrer" loading="lazy" onerror="this.parentNode.classList.add('no-img'); this.remove()">` : ''}
+        ${x.img ? `<img src="${esc(x.img)}" alt="" referrerpolicy="no-referrer" loading="lazy" onerror="this.parentNode?.classList.add('no-img'); this.remove()">` : ''}
         <div class="prog-hero-top">${logoHtml(c)}<span class="prog-ch">${esc(c.name)}</span>${live ? '<span class="tag live">ON NOW</span>' : ''}</div>
         <div class="prog-hero-bottom">
           <div class="prog-when"><b>${esc(fmtDay(prog[0]))}</b><span>${fmtRange(prog)}</span></div>
