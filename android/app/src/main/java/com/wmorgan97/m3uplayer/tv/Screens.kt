@@ -339,14 +339,15 @@ fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onFocus:
     val (now, _) = remember(tick, c) { Repo.nowNext(c) }
     Surface(onClick = onClick, onLongClick = onLong, modifier = Modifier.fillMaxWidth().height(40.dp).padding(vertical = 1.dp).holdOk(onLong).onFocusChanged { if (it.isFocused) onFocus() },
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)), scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
-        colors = ClickableSurfaceDefaults.colors(containerColor = Color.Transparent, focusedContainerColor = Tv.text, contentColor = Tv.text, focusedContentColor = Tv.bg)) {
+        // The channel that's playing: a faint blue tint and its name in blue (subtle, TiviMate-like); the highlight stays white.
+        colors = ClickableSurfaceDefaults.colors(containerColor = if (inPreview) Tv.accent.copy(alpha = .12f) else Color.Transparent, focusedContainerColor = Tv.text, contentColor = Tv.text, focusedContentColor = Tv.bg)) {
         Row(Modifier.fillMaxSize().padding(horizontal = 10.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
             Text(if (inPreview) "▶" else "${c.num}", fontSize = Tv.label, color = if (inPreview) Tv.accent else LocalContentColor.current.copy(alpha = .6f), modifier = Modifier.width(40.dp), maxLines = 1)
             LogoTile(c, Modifier.size(width = 40.dp, height = 24.dp))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 14.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f, fill = false))
+                    Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 14.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold, color = if (inPreview) Tv.accent else Color.Unspecified, modifier = Modifier.weight(1f, fill = false))
                     if (fav) { Spacer(Modifier.width(6.dp)); Text("★", fontSize = Tv.label, color = Tv.star) }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {

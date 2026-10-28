@@ -223,11 +223,11 @@ private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Lon
     val shown = remember(all, viewStart) { all.filter { it.end > viewStart && it.start < end } }
     val sel = if (cursor >= 0) at(all, cursor) else null
     Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = 4.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 6.dp).background(if (cursor >= 0) Tv.surface3 else Tv.surface, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 6.dp).background(if (cursor >= 0) Tv.surface3 else if (inPreview) Tv.accent.copy(alpha = .12f) else Tv.surface, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (inPreview) "▶" else "${c.num}", fontSize = 11.sp, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(30.dp), maxLines = 1)
             LogoTile(c, Modifier.size(width = 50.dp, height = 30.dp))
             Spacer(Modifier.width(8.dp))
-            Text(c.name + if (fav) " ★" else "", fontSize = Tv.caption, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            Text(c.name + if (fav) " ★" else "", fontSize = Tv.caption, color = if (inPreview) Tv.accent else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
         }
         Box(Modifier.fillMaxSize().clipToBounds()) {
             if (shown.isEmpty()) Cell("No programme information", null, 0.dp, perMin * SPAN_MIN.toFloat(), on = selected && cursor >= 0, past = false, onAir = false, progress = null, catchup = false)
