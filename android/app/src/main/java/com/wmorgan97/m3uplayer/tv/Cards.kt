@@ -90,12 +90,15 @@ fun cardScale(s: Float = 1.07f) = CardDefaults.scale(focusedScale = s)
  *  what keeps a row of 30 posters smooth to scroll.) */
 @Composable
 fun Picture(url: String?, modifier: Modifier = Modifier, scale: ContentScale = ContentScale.Crop, fallback: @Composable BoxScope.() -> Unit = {}) = traced("Picture") {
-    var failed by remember(url) { mutableStateOf(false) }
+    // If the server's resized copy fails (server away), the picture is fetched from where it really lives.
+    var tries by remember(url) { mutableIntStateOf(0) }
+    val src = remember(url, tries) { if (tries == 1) Repo.imgOriginal(url) else url }
+    val failed = tries >= 2 || (tries == 1 && src == null)
     val ctx = LocalContext.current
     Box(modifier.background(Tv.surface2)) {
-        if (url.isNullOrBlank() || failed) fallback()
-        else AsyncImage(remember(url) { ImageRequest.Builder(ctx).data(url).crossfade(150).build() }, null, contentScale = scale, modifier = Modifier.fillMaxSize(),
-            placeholder = ColorPainter(Tv.surface2), error = ColorPainter(Color.Transparent), onError = { failed = true })
+        if (src.isNullOrBlank() || failed) fallback()
+        else AsyncImage(remember(src) { ImageRequest.Builder(ctx).data(src).crossfade(150).build() }, null, contentScale = scale, modifier = Modifier.fillMaxSize(),
+            placeholder = ColorPainter(Tv.surface2), error = ColorPainter(Color.Transparent), onError = { tries = if (tries == 0 && Repo.imgOriginal(url) != null) 1 else 2 })
     }
 }
 

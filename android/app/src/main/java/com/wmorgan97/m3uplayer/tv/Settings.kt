@@ -23,7 +23,12 @@ import org.json.JSONObject
 fun SettingsScreen(act: TvActivity) {
     var englishOnly by remember { mutableStateOf(Repo.englishOnly) }
     var fourK by remember { mutableStateOf(Repo.fourKFirst) }
+    var preview by remember { mutableStateOf(Repo.preview) }
     var cleared by remember { mutableStateOf(false) }
+    var pinAsk by remember { mutableStateOf<Pair<String, (String) -> Unit>?>(null) }
+    val v = Repo.version
+    val hiddenCount = remember(v) { Repo.hiddenGroups.size + Repo.hiddenChannels.size }
+    val hasPin = remember(v) { Repo.pin.isNotEmpty() }
     val sources = remember(Repo.version) {
         val s = Repo.syncData.optJSONObject("sources") ?: JSONObject()
         s.keys().asSequence().mapNotNull { s.optJSONObject(it) }.filter { !it.optBoolean("deleted") }.toList()
@@ -42,12 +47,23 @@ fun SettingsScreen(act: TvActivity) {
         item { Section("Movies & series") }
         item { Toggle(Icons.Default.Language, "English groups only", "Hide other-language groups from the rows", englishOnly) { englishOnly = it; Repo.englishOnly = it; Repo.version++ } }
         item { Section("Live TV") }
+        item { Toggle(Icons.Default.PictureInPicture, "Channel preview", "Play the highlighted channel in a small window (uses your one connection)", preview) { preview = it; Repo.preview = it } }
         item { Toggle(Icons.Default.HighQuality, "Prefer 4K channels", "Start the 4K copy of a channel when there is one", fourK) { fourK = it; Repo.fourKFirst = it } }
+        item { Section("Parental lock") }
+        item { Row(Icons.Default.Lock, if (hasPin) "Change PIN" else "Set a PIN", if (hasPin) "${Repo.lockedGroups.size} locked group(s)  ·  hold OK on a group in Live TV to lock it" else "Then hold OK on a group in Live TV to lock it") {
+            pinAsk = if (hasPin) "Enter your current PIN" to { _ -> pinAsk = "Choose a new 4-digit PIN" to { n -> Repo.pin = n } } else "Choose a 4-digit PIN" to { n -> Repo.pin = n }
+        } }
+        if (hasPin) item { Row(Icons.Default.LockOpen, "Remove PIN", "Unlocks every group") { pinAsk = "Enter your PIN" to { _ -> Repo.pin = ""; Repo.unlocked.clear() } } }
+        item { Row(Icons.Default.Visibility, "Show hidden groups and channels", if (hiddenCount == 0) "Nothing hidden  ·  hold OK on a group or channel to hide it" else "$hiddenCount hidden") { Repo.showAllHidden() } }
         item { Section("This TV") }
         item { Row(Icons.Default.Dns, "Server", Repo.server.removePrefix("https://")) {} }
         item { Row(Icons.Default.Refresh, if (cleared) "Saved data cleared" else "Clear saved data", "Channel lists and catalogues download again next time") { Repo.clearCache(); cleared = true } }
         item { Row(Icons.Default.OpenInNew, "Full settings", "Playlists, TMDB, player options and more") { act.openWeb("#/settings") } }
         item { Spacer(Modifier.height(24.dp)); Text("M3U Player for Android TV $version", Modifier.padding(start = Tv.margin), fontSize = Tv.label, color = Tv.muted) }
+    }
+    pinAsk?.let { (title, then) ->
+        val checking = title.startsWith("Enter")
+        PinDialog(title) { pin -> pinAsk = null; if (pin != null && (!checking || pin == Repo.pin)) then(pin) }
     }
 }
 

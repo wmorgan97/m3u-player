@@ -21,9 +21,14 @@ import java.util.concurrent.ConcurrentHashMap
 // ---------- models ----------
 
 data class Channel(val name: String, val url: String, val group: String, val logo: String, val tvgId: String, val tvgName: String,
-                   val num: Int, val headers: Map<String, String> = emptyMap()) {
+                   val num: Int, val headers: Map<String, String> = emptyMap(),
+                   val catchupDays: Int = 0, val catchupMode: String = "", val catchupSource: String = "") {
     val title get() = name
+    /** Whether the provider keeps past programmes of this channel (catch-up / archive). */
+    val hasCatchup get() = catchupDays > 0
 }
+
+data class Reminder(val url: String, val channel: String, val title: String, val start: Long)
 
 data class Vod(
     val kind: String,          // movie | series
@@ -69,18 +74,60 @@ object Repo {
 
     // Settings kept on the TV (the rest live in the web app's Settings)
     var englishOnly: Boolean get() = prefs.getBoolean("englishOnly", true); set(v) { prefs.edit().putBoolean("englishOnly", v).apply(); overviews.clear(); groupCache.clear() }
+    var preview: Boolean get() = prefs.getBoolean("preview", true); set(v) { prefs.edit().putBoolean("preview", v).apply(); version++ }
     var fourKFirst: Boolean get() = prefs.getBoolean("fourK", true); set(v) = prefs.edit().putBoolean("fourK", v).apply()
     var lastChannelUrl: String? get() = prefs.getString("lastChannel", null); set(v) = prefs.edit().putString("lastChannel", v).apply()
+
+    // ---------- this TV's own choices: parental lock, hidden / ordered groups, hidden channels, reminders ----------
+    private fun strSet(k: String): Set<String> = prefs.getStringSet(k, emptySet())?.toSet() ?: emptySet()
+    private fun putSet(k: String, v: Set<String>) { prefs.edit().putStringSet(k, v).apply(); version++ }
+    var pin: String get() = prefs.getString("pin", "") ?: ""; set(v) { prefs.edit().putString("pin", v).apply(); version++ }
+    val lockedGroups get() = strSet("lockedGroups")
+    fun toggleLock(g: String) = putSet("lockedGroups", lockedGroups.let { if (g in it) it - g else it + g })
+    /** Groups unlocked with the PIN until the app is closed. */
+    val unlocked: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    fun isLocked(g: String) = pin.isNotEmpty() && g in lockedGroups && g !in unlocked
+    val hiddenGroups get() = strSet("hiddenGroups")
+    fun toggleHidden(g: String) = putSet("hiddenGroups", hiddenGroups.let { if (g in it) it - g else it + g })
+    /** Groups moved to the top of the list, in the order they were moved. */
+    val pinnedGroups: List<String> get() = (prefs.getString("pinnedGroups", "") ?: "").split('\u0001').filter { it.isNotEmpty() }
+    fun togglePinned(g: String) { val l = pinnedGroups.toMutableList(); if (!l.remove(g)) l += g; prefs.edit().putString("pinnedGroups", l.joinToString("\u0001")).apply(); version++ }
+    val hiddenChannels get() = strSet("hiddenChannels")
+    fun toggleHiddenChannel(url: String) = putSet("hiddenChannels", hiddenChannels.let { if (url in it) it - url else it + url })
+    fun showAllHidden() { prefs.edit().remove("hiddenGroups").remove("hiddenChannels").apply(); version++ }
+    /** The group list as arranged on this TV: moved-to-top first, hidden ones left out. */
+    fun arrange(groups: List<String>): List<String> { val hid = hiddenGroups; val pins = pinnedGroups.filter { it in groups && it !in hid }; return pins + groups.filter { it !in pins && it !in hid } }
+
+    var reminders: List<Reminder>
+        get() = runCatching { JSONArray(prefs.getString("reminders", "[]")).let { a -> (0 until a.length()).map { val o = a.getJSONObject(it); Reminder(o.optString("url"), o.optString("channel"), o.optString("title"), o.optLong("start")) } } }.getOrDefault(emptyList())
+        set(v) { prefs.edit().putString("reminders", JSONArray(v.map { JSONObject().put("url", it.url).put("channel", it.channel).put("title", it.title).put("start", it.start) }).toString()).apply(); version++ }
+    fun hasReminder(url: String, start: Long) = reminders.any { it.url == url && it.start == start }
+    fun toggleReminder(c: Channel, p: Programme) {
+        val l = reminders.filter { it.start > System.currentTimeMillis() - 3600_000L }
+        reminders = if (l.any { it.url == c.url && it.start == p.start }) l.filterNot { it.url == c.url && it.start == p.start } else l + Reminder(c.url, c.name, p.title, p.start)
+    }
+
+    /** False while the server can't be reached: screens show the saved copies and say so. */
+    private val onlineState = androidx.compose.runtime.mutableStateOf(true)
+    val online: Boolean get() = onlineState.value
+    private fun markOnline(ok: Boolean) { if (onlineState.value != ok) onlineState.value = ok }
     /** Bumped whenever favourites / cached data change, so screens showing them redraw. */
     private val versionState = androidx.compose.runtime.mutableIntStateOf(0)
     var version: Int get() = versionState.intValue; set(v) { versionState.intValue = v }
-    fun clearCache() { app.filesDir.listFiles()?.forEach { if (it.name.startsWith("vod-") || it.name.startsWith("live-")) it.delete() }; overviews.clear(); groupCache.clear(); live = null; version++ }
+    fun clearCache() { app.filesDir.listFiles()?.forEach { if (it.name.startsWith("vod-") || it.name.startsWith("live-") || it.name.startsWith("group-") || it.name.startsWith("eps-") || it.name == "guide.json") it.delete() }; overviews.clear(); groupCache.clear(); live = null; version++ }
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
     fun api(path: String) = "$server/$path?key=${enc(key)}"
+    /** The original picture address behind one of our server's /img links (null if it isn't one). */
+    fun imgOriginal(url: String?): String? = url?.takeIf { it.startsWith("$server/img?") }?.substringAfter("&u=", "")?.substringBefore('&')?.ifEmpty { null }?.let { java.net.URLDecoder.decode(it, "UTF-8") }
     fun img(url: String?, w: Int = 300): String? = if (url.isNullOrBlank()) null else if (!url.startsWith("http")) url else "$server/img?key=${enc(key)}&w=$w&u=${enc(url)}"
 
     private fun http(url: String, body: String? = null, timeout: Int = 30_000): String {
+        if (!url.startsWith(server)) return httpRaw(url, body, timeout)
+        // Only "couldn't reach it" counts as offline; a reply with an error code still means the server is there.
+        return try { httpRaw(url, body, timeout).also { markOnline(true) } } catch (e: java.io.IOException) { markOnline(false); throw e }
+    }
+    private fun httpRaw(url: String, body: String?, timeout: Int): String {
         val c = URL(url).openConnection() as HttpURLConnection
         c.connectTimeout = 15_000; c.readTimeout = timeout
         c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android TV) M3UPlayer")
@@ -95,7 +142,7 @@ object Repo {
 
     @Volatile var syncData: JSONObject = JSONObject()
     suspend fun sync(): JSONObject = withContext(Dispatchers.IO) {
-        val d = JSONObject(http(api("sync")))
+        val d = JSONObject(http(api("sync"), timeout = 15_000))
         syncData = d
         version++
         File(app.filesDir, "sync.json").writeText(d.toString())
@@ -184,14 +231,23 @@ object Repo {
                 "xtream" -> {
                     val x = v.optJSONObject("xtream") ?: continue
                     val xs = Xtream(x.optString("server").trimEnd('/'), x.optString("user"), x.optString("pass"))
+                    // Saved on the TV and refreshed twice a day, like playlist files: the channel list opens at once
+                    // and still works when the provider's API is slow or down.
+                    val base = "live-x-" + sha(xs.server + "|" + xs.user).take(12)
+                    val fc = File(app.filesDir, "$base-cats.json"); val fs = File(app.filesDir, "$base-streams.json")
+                    if (!fs.exists() || System.currentTimeMillis() - fs.lastModified() > 12 * 3600_000L) try {
+                        val c = http(playerApi(xs, "get_live_categories")); val l = http(playerApi(xs, "get_live_streams"), timeout = 120_000)
+                        if (l.trimStart().startsWith("[")) { fc.writeText(c); fs.writeText(l) }
+                    } catch (_: Exception) {}
                     try {
-                        val cats = JSONArray(http(playerApi(xs, "get_live_categories")))
+                        val cats = JSONArray(fc.readText())
                         val names = (0 until cats.length()).associate { cats.getJSONObject(it).optString("category_id") to cats.getJSONObject(it).optString("category_name") }
-                        val list = JSONArray(http(playerApi(xs, "get_live_streams"), timeout = 120_000))
+                        val list = JSONArray(fs.readText())
                         for (i in 0 until list.length()) {
                             val s = list.getJSONObject(i)
+                            val days = if (s.optInt("tv_archive") == 1) s.optInt("tv_archive_duration", 3).coerceAtLeast(1) else 0
                             all += Channel(s.optString("name"), "${xs.server}/live/${xs.user}/${xs.pass}/${s.optLong("stream_id")}.ts", names[s.optString("category_id")] ?: "",
-                                s.optString("stream_icon"), s.optString("epg_channel_id"), s.optString("name"), all.size + 1)
+                                s.optString("stream_icon"), s.optString("epg_channel_id"), s.optString("name"), all.size + 1, catchupDays = days, catchupMode = if (days > 0) "xc" else "")
                         }
                         epg += "${xs.server}/xmltv.php?username=${enc(xs.user)}&password=${enc(xs.pass)}"
                     } catch (_: Exception) {}
@@ -237,10 +293,39 @@ object Repo {
             val g = attrs["group-title"]?.ifEmpty { null } ?: grp
             if (isLive && !SEP_RE.containsMatchIn(name) && name.any { it.isLetterOrDigit() } && !PROMO_RE.containsMatchIn(name) && !PROMO_RE.containsMatchIn(g) && !u.contains("epgenius.org"))
                 out += Channel(name, line, attrs["group-title"]?.ifEmpty { null } ?: grp, attrs["tvg-logo"] ?: "", attrs["tvg-id"] ?: "", attrs["tvg-name"] ?: "",
-                    attrs["tvg-chno"]?.toIntOrNull() ?: (offset + out.size + 1), HashMap(opts))
+                    attrs["tvg-chno"]?.toIntOrNull() ?: (offset + out.size + 1), HashMap(opts),
+                    catchupDays = attrs["catchup-days"]?.toIntOrNull() ?: if (!attrs["catchup"].isNullOrEmpty() || !attrs["catchup-source"].isNullOrEmpty() || !attrs["catchup-type"].isNullOrEmpty()) 7 else 0,
+                    catchupMode = (attrs["catchup"] ?: attrs["catchup-type"] ?: "").lowercase(), catchupSource = attrs["catchup-source"] ?: "")
             attrs = emptyMap(); title = ""; grp = ""; opts.clear()
         }
         return out to epg
+    }
+
+    // ---------- catch-up ----------
+
+    private val XC_RE = Regex("""^(https?://[^/]+)/(?:live/)?([^/]+)/([^/]+)/(\d+)(?:\.\w+)?$""", RegexOption.IGNORE_CASE)
+    private val PLACEHOLDER_RE = Regex("""\$?\{\(?(\w+)\)?(?::[^\}]*)?\}""")
+
+    /** The link for a past programme on a channel with an archive (ported from the web app's m3uCatchupUrl). */
+    fun catchupUrl(c: Channel, start: Long, stop: Long, now: Long = System.currentTimeMillis()): String? {
+        if (!c.hasCatchup || start > now || start < now - c.catchupDays * 86_400_000L) return null
+        val utc = java.util.TimeZone.getTimeZone("UTC")
+        val xc = XC_RE.find(c.url)
+        if (xc != null && (c.catchupMode == "xc" || c.catchupMode == "xtream" || (c.catchupSource.isEmpty() && c.url.contains("/live/")))) {
+            val f = java.text.SimpleDateFormat("yyyy-MM-dd:HH-mm", java.util.Locale.ROOT).apply { timeZone = utc }
+            val (host, user, pass, id) = xc.destructured
+            return "$host/timeshift/$user/$pass/${Math.ceil((stop - start) / 60000.0).toInt().coerceAtLeast(1)}/${f.format(java.util.Date(start))}/$id.ts"
+        }
+        var source = c.catchupSource
+        if (source.isEmpty() || c.catchupMode == "shift" || c.catchupMode == "timeshift") source = (if (c.url.contains('?')) "&" else "?") + "utc={utc}&lutc={lutc}"
+        val s = start / 1000; val e = stop / 1000; val n = now / 1000
+        val cal = java.util.Calendar.getInstance(utc).apply { timeInMillis = start }
+        fun p2(v: Int) = v.toString().padStart(2, '0')
+        val values = mapOf("utc" to "$s", "start" to "$s", "timestamp" to "$s", "lutc" to "$n", "now" to "$n", "utcend" to "$e", "end" to "$e", "duration" to "${e - s}", "offset" to "${n - s}",
+            "Y" to "${cal.get(java.util.Calendar.YEAR)}", "m" to p2(cal.get(java.util.Calendar.MONTH) + 1), "d" to p2(cal.get(java.util.Calendar.DAY_OF_MONTH)),
+            "H" to p2(cal.get(java.util.Calendar.HOUR_OF_DAY)), "M" to p2(cal.get(java.util.Calendar.MINUTE)), "S" to p2(cal.get(java.util.Calendar.SECOND)))
+        val filled = PLACEHOLDER_RE.replace(source) { m -> values[m.groupValues[1]] ?: m.value }
+        return if (filled.startsWith("http", true)) filled else c.url + filled
     }
 
     // ---------- TV guide ----------
@@ -257,6 +342,36 @@ object Repo {
     fun nowNext(c: Channel, t: Long = System.currentTimeMillis()): Pair<Programme?, Programme?> {
         val l = guideFor(c); val i = l.indexOfLast { it.start <= t }
         return (if (i >= 0 && l[i].end > t) l[i] else null) to l.getOrNull(i + 1)
+    }
+
+    // The guide is saved on the TV (6 hours back to 30 ahead), so it shows at once on the next start and while the server is away.
+    private var guideSave: kotlinx.coroutines.Job? = null
+    private fun saveGuideSoon() {
+        guideSave?.cancel()
+        guideSave = guideScope.launch {
+            kotlinx.coroutines.delay(3000)
+            val now = System.currentTimeMillis()
+            val p = JSONObject()
+            for ((k, l) in programmes) {
+                val keep = l.filter { it.end > now - 6 * 3600_000L && it.start < now + 30 * 3600_000L }
+                if (keep.isNotEmpty()) p.put(k, JSONArray(keep.map { JSONArray().put(it.start).put(it.end).put(it.title).put(it.desc.take(400)) }))
+            }
+            runCatching { File(app.filesDir, "guide.json").writeText(JSONObject().put("programmes", p).put("names", JSONObject(HashMap(guideNames) as Map<*, *>)).toString()) }
+        }
+    }
+    @Volatile private var guideLoaded = false
+    /** Reads the saved guide (once, in the background) so rows show what's on before the server answers. */
+    fun loadSavedGuide() {
+        if (guideLoaded) return; guideLoaded = true
+        guideScope.launch {
+            runCatching {
+                val d = JSONObject(File(app.filesDir, "guide.json").readText())
+                val p = d.optJSONObject("programmes") ?: JSONObject()
+                for (k in p.keys()) if (!programmes.containsKey(k)) { val arr = p.getJSONArray(k); programmes[k] = (0 until arr.length()).map { val a = arr.getJSONArray(it); Programme(a.optLong(0), a.optLong(1), a.optString(2), a.optString(3)) } }
+                d.optJSONObject("names")?.let { n -> for (k in n.keys()) guideNames.putIfAbsent(k, n.getString(k)) }
+                guideState.intValue++
+            }
+        }
     }
 
     /** Bumped when guide data arrives: anything showing what's on redraws. */
@@ -288,6 +403,7 @@ object Repo {
                 }
                 d.optJSONObject("names")?.let { n -> for (k in n.keys()) guideNames[k] = n.getString(k) }
                 got = true
+                saveGuideSoon()
             } catch (_: Exception) { batch.forEach { asked.remove(chanKey(it)) } }
         }
         got
@@ -363,8 +479,11 @@ object Repo {
         groupCache["$kind|$tmdbId"]?.let { return@withContext it }
         val x = xtream() ?: return@withContext emptyList()
         val cats = overview(kind)?.catNames ?: emptyMap()
-        val d = JSONObject(http(api("vod"), vodBody(x, kind).put("tmdb", tmdbId).toString(), 60_000))
-        tidy(arr(d, "items", kind, cats)).also { groupCache["$kind|$tmdbId"] = it }
+        // Saved per row: a copy under 6 hours old is used as is, an older one when the server can't be reached.
+        val file = File(app.filesDir, "group-$kind-" + sha(tmdbId).take(12) + ".json")
+        val text = if (file.exists() && System.currentTimeMillis() - file.lastModified() < 6 * 3600_000L) file.readText()
+            else try { http(api("vod"), vodBody(x, kind).put("tmdb", tmdbId).toString(), 60_000).also { file.writeText(it) } } catch (e: Exception) { if (file.exists()) file.readText() else throw e }
+        tidy(arr(JSONObject(text), "items", kind, cats)).also { groupCache["$kind|$tmdbId"] = it }
     }
 
     suspend fun search(q: String): Pair<List<Vod>, List<Vod>> = coroutineScope {
@@ -384,7 +503,9 @@ object Repo {
 
     suspend fun episodes(v: Vod): Map<Int, List<Episode>> = withContext(Dispatchers.IO) {
         val x = xtream() ?: return@withContext emptyMap()
-        val d = JSONObject(http(playerApi(x, "get_series_info", "&series_id=${v.id}"), timeout = 60_000))
+        val file = File(app.filesDir, "eps-${v.id}.json")
+        val text = try { http(playerApi(x, "get_series_info", "&series_id=${v.id}"), timeout = 60_000).also { file.writeText(it) } } catch (e: Exception) { if (file.exists()) file.readText() else throw e }
+        val d = JSONObject(text)
         val eps = d.optJSONObject("episodes") ?: return@withContext emptyMap()
         val out = sortedMapOf<Int, List<Episode>>()
         for (s in eps.keys()) {

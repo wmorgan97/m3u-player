@@ -3,15 +3,12 @@ package com.wmorgan97.m3uplayer.tv
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarViewWeek
@@ -19,168 +16,307 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.input.key.*
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.tv.material3.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Calendar
 
-// The TV guide: channels down the left, time across the top, programme cells sized by their length. The remote
-// moves cell to cell; the grid scrolls to keep the picked cell in view and a red line marks now. OK on what's on
-// plays the channel; OK on anything else shows its details.
+// The TV guide, TiviMate-style: what's picked is described at the top, channels run down the left and a two-hour
+// window of programmes across. The grid is ONE focus target that moves a highlight itself (no focusable cells), and
+// only the programmes inside the window are drawn, so a move redraws two rows instead of hundreds of cells.
+// OK: on now = watch; finished with catch-up = play it from the archive; anything else = details (remind me, etc.).
 
-private val PX_PER_MIN = 6.dp          // 30 minutes = 180dp
-private val ROW_H = 58.dp
-private val CHAN_W = 200.dp
-private const val HOURS_AHEAD = 24
+private val ROW_H = 56.dp
+private val CHAN_W = 210.dp
+private const val SPAN_MIN = 120
+private const val HALF_HOUR = 30 * 60_000L
+
+private fun floor30(t: Long): Long { val c = java.util.Calendar.getInstance().apply { timeInMillis = t; set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0) }; c.set(java.util.Calendar.MINUTE, c.get(java.util.Calendar.MINUTE) / 30 * 30); return c.timeInMillis }
+private fun at(l: List<Programme>, t: Long): Programme? { val i = l.indexOfLast { it.start <= t }; return if (i >= 0 && l[i].end > t) l[i] else null }
 
 @Composable
 fun GuideScreen(act: TvActivity, startGroup: String?) {
     val live by produceState<Repo.Live?>(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: Repo.Live(emptyList(), emptyList(), emptyList()) }
     val l = live ?: run { Box(Modifier.fillMaxSize()) { PageTitle("TV Guide", "Loading channels…") }; return }
     if (l.channels.isEmpty()) { EmptyState(Icons.Default.CalendarViewWeek, "No live channels", "Add a playlist with live TV in Settings"); return }
-    val favUrls = remember(Repo.version) { Repo.favorites().map { it.optString("url") }.toSet() }
+    LaunchedEffect(Unit) { Repo.loadSavedGuide() }
+    val v = Repo.version
+    val favUrls = remember(v) { Repo.favorites().map { it.optString("url") }.toSet() }
+    val hiddenCh = remember(v) { Repo.hiddenChannels }
     val byGroup = remember(l) { l.channels.groupBy { it.group } }
-    val groups = remember(l, favUrls) { listOfNotNull(if (favUrls.isNotEmpty()) "★ Favourites" else null) + l.groups.filter { it.isNotBlank() } }
+    val groups = remember(l, favUrls, v) { listOfNotNull(if (favUrls.isNotEmpty()) "★ Favourites" else null) + Repo.arrange(l.groups.filter { it.isNotBlank() }) }
     var group by rememberSaveable { mutableStateOf(startGroup?.takeIf { it in groups } ?: groups.firstOrNull() ?: "") }
-    val chans = remember(group, l, favUrls) { (if (group == "★ Favourites") l.channels.filter { it.url in favUrls } else byGroup[group] ?: emptyList()).take(400) }
+    var unlockTick by remember { mutableIntStateOf(0) }
+    val locked = remember(group, v, unlockTick) { Repo.isLocked(group) }
+    val chans = remember(group, l, favUrls, hiddenCh) { (if (group == "★ Favourites") l.channels.filter { it.url in favUrls } else byGroup[group] ?: emptyList()).filter { it.url !in hiddenCh }.take(600) }
 
-    // The day starts at the hour before now and runs 24 hours.
-    val dayStart = remember { Calendar.getInstance().apply { add(Calendar.HOUR_OF_DAY, -1); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = System.currentTimeMillis() } }
     val tick = Repo.guideVersion
-    LaunchedEffect(group) { Repo.requestGuide(chans) }
-    val scroll = rememberScrollState()
-    val density = LocalDensity.current
-    LaunchedEffect(group) { scroll.scrollTo(with(density) { (((now - dayStart) / 60_000f - 30) * PX_PER_MIN.value).dp.roundToPx() }.coerceAtLeast(0)) }
+    LaunchedEffect(group, locked) { if (!locked) Repo.requestGuide(chans.take(300)) }
+
+    // Where the highlight is: a row, and a moment in time (the programme under it is the one picked).
+    var row by remember(group) { mutableIntStateOf(0) }
+    var cursor by remember(group) { mutableLongStateOf(System.currentTimeMillis()) }
+    var viewStart by remember(group) { mutableLongStateOf(floor30(System.currentTimeMillis())) }
+    val anyArchive = remember(chans) { chans.any { it.hasCatchup } }
+    val earliest = floor30(now) - (if (anyArchive) 24 * 3600_000L else 2 * 3600_000L)
+    val latest = now + 24 * 3600_000L
+    val span = SPAN_MIN * 60_000L
+    val listState = rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = 4, nested = 0) })   // rows built before they scroll in
+    val gridFocus = remember { FocusRequester() }
+    var gridFocused by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf<Pair<Channel, Programme>?>(null) }
+    var pinFor by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun progs(i: Int) = chans.getOrNull(i)?.let { Repo.guideFor(it) } ?: emptyList()
+    /** Moves the highlight onto a programme, shifting the window (by whole half hours) only when it's out of sight. */
+    fun pick(p: Programme) {
+        if (p.start >= viewStart + span) viewStart = floor30(p.start)
+        else if (p.end <= viewStart) viewStart = maxOf(earliest, floor30(maxOf(p.start, p.end - span)))
+        cursor = maxOf(p.start, viewStart)
+    }
+    fun keepRowVisible() = scope.launch {
+        val vis = listState.layoutInfo.visibleItemsInfo
+        val first = vis.firstOrNull()?.index ?: 0; val last = (vis.lastOrNull()?.index ?: 0) - 1
+        if (row < first) listState.scrollToItem(row) else if (row > last && vis.isNotEmpty()) listState.scrollToItem(maxOf(0, row - (vis.size - 2)))
+    }
+    fun ok(hold: Boolean) {
+        val c = chans.getOrNull(row) ?: return
+        val p = at(progs(row), cursor)
+        // TiviMate: the first OK puts a channel in the preview, OK again (on the one in the preview) goes full screen.
+        fun watch() { if (Repo.preview && Preview.channel?.url != c.url) Preview.select(c, chans) else act.playLive(chans, row) }
+        if (p == null) { if (!hold) watch(); return }
+        val onAir = p.start <= now && p.end > now
+        when {
+            hold -> info = c to p
+            onAir -> watch()
+            p.end <= now && Repo.catchupUrl(c, p.start, p.end) != null -> act.playCatchup(c, p)
+            else -> info = c to p
+        }
+    }
+    fun move(k: Key): Boolean {
+        val l0 = progs(row); val cur = at(l0, cursor)
+        when (k) {
+            Key.DirectionRight -> {
+                val next = if (cur != null) l0.firstOrNull { it.start >= cur.end } else l0.firstOrNull { it.start > cursor }
+                if (next != null && next.start < latest && next.start <= (cur?.end ?: cursor) + HALF_HOUR) pick(next)
+                else if (viewStart + span < latest) { viewStart += HALF_HOUR; cursor = maxOf(cursor, viewStart) }
+            }
+            Key.DirectionLeft -> {
+                if (cur != null && cur.start < viewStart) { if (viewStart <= earliest) return false; viewStart -= HALF_HOUR; cursor = maxOf(cur.start, viewStart) }
+                else {
+                    val prev = if (cur != null) l0.lastOrNull { it.end <= cur.start } else l0.lastOrNull { it.end <= cursor }
+                    // (a programme right next to this one; across a gap in the listings it steps half an hour instead)
+                    if (prev != null && prev.end > earliest && prev.end >= (cur?.start ?: cursor) - HALF_HOUR) pick(prev)
+                    else if (viewStart > earliest) { viewStart -= HALF_HOUR; cursor = viewStart }
+                    else return false   // the start of the guide: the menu opens
+                }
+            }
+            Key.DirectionUp -> { if (row == 0) return false; row--; keepRowVisible() }
+            Key.DirectionDown -> { if (row >= chans.size - 1) return true; row++; keepRowVisible() }
+            Key.PageDown, Key.ChannelDown -> { row = minOf(chans.size - 1, row + 8); keepRowVisible() }
+            Key.PageUp, Key.ChannelUp -> { row = maxOf(0, row - 8); keepRowVisible() }
+            else -> return false
+        }
+        return true
+    }
 
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, top = Tv.topMargin, bottom = 12.dp), verticalAlignment = Alignment.Bottom) {
-            Text("TV Guide", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)
-            Spacer(Modifier.width(14.dp))
-            Text(java.text.SimpleDateFormat("EEEE d MMMM", java.util.Locale.UK).format(java.util.Date(now)), fontSize = Tv.bodySmall, color = Tv.muted, modifier = Modifier.padding(bottom = 3.dp))
-            Spacer(Modifier.weight(1f))
-            Text("OK on a programme for details", fontSize = Tv.label, color = Tv.muted, modifier = Modifier.padding(bottom = 3.dp))
+        // What's picked, described at the top (TiviMate's info area).
+        val selC = chans.getOrNull(row)
+        val selP = remember(row, cursor, tick, chans) { at(progs(row), cursor) }
+        val pc = remember(l, Preview.channel) { Preview.current() }
+        Row(Modifier.fillMaxWidth().height(186.dp)) {
+        if (!locked && Repo.preview) PreviewBox(pc, act.resumeTick, Modifier.padding(start = Tv.margin, top = Tv.topMargin - 8.dp, bottom = 12.dp).fillMaxHeight().aspectRatio(16 / 9f))
+        Column(Modifier.weight(1f).fillMaxHeight().padding(start = if (Repo.preview) 24.dp else Tv.margin, end = Tv.margin + 80.dp, top = Tv.topMargin).clearAndSetSemantics { }) {
+            if (locked || selC == null) {
+                Text("TV Guide", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)
+                Text(java.text.SimpleDateFormat("EEEE d MMMM", java.util.Locale.UK).format(java.util.Date(now)), fontSize = Tv.bodySmall, color = Tv.muted)
+            } else {
+                Text(selP?.title ?: selC.name, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val bits = listOfNotNull(selC.name, selP?.let { "${dayLabel(it.start, now)}${hhmm(it.start)}–${hhmm(it.end)}" }, selP?.let { "${(it.end - it.start) / 60_000} min" },
+                    selP?.let { p -> when { p.start <= now && p.end > now -> "On now"; p.end <= now && Repo.catchupUrl(selC, p.start, p.end) != null -> "Catch-up"; Repo.hasReminder(selC.url, p.start) -> "Reminder set"; else -> null } })
+                Text(bits.joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
+                Text(selP?.desc?.ifBlank { null } ?: if (selP == null) "No programme information" else "", fontSize = Tv.caption, color = Tv.muted, maxLines = 3, overflow = TextOverflow.Ellipsis, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
+            }
+        }
         }
         LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(groups, key = { it }) { g -> FilterChip(selected = g == group, onClick = { group = g }) { Text(prettyGroup(g), fontSize = Tv.caption, maxLines = 1) } }
+            items(groups, key = { it }) { g -> FilterChip(selected = g == group, onClick = { group = g }) { Text((if (g in Repo.lockedGroups && Repo.pin.isNotEmpty()) "🔒 " else "") + prettyGroup(g), fontSize = Tv.caption, maxLines = 1) } }
         }
-        Spacer(Modifier.height(12.dp))
-        // Time header
-        Row(Modifier.fillMaxWidth().padding(start = Tv.margin)) {
-            Spacer(Modifier.width(CHAN_W))
-            Row(Modifier.horizontalScroll(scroll, enabled = false)) {
-                repeat(HOURS_AHEAD * 2) { i ->
-                    Box(Modifier.width(PX_PER_MIN * 30).height(26.dp)) {
-                        Text(hhmm(dayStart + i * 30 * 60_000L), Modifier.align(Alignment.CenterStart).padding(start = 6.dp), fontSize = Tv.label, color = if (i % 2 == 0) Tv.text2 else Tv.muted, fontWeight = FontWeight.Medium)
-                        Box(Modifier.align(Alignment.BottomStart).width(1.dp).height(8.dp).background(Tv.line))
+        Spacer(Modifier.height(10.dp))
+        if (locked) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("This group is locked", fontSize = Tv.body, color = Tv.text, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = { pinFor = group }) { Text("Enter PIN", fontSize = Tv.bodySmall) }
+                }
+            }
+        } else BoxWithConstraints(Modifier.fillMaxSize().padding(start = Tv.margin, end = Tv.margin - 16.dp)) {
+            val gridW = maxWidth - CHAN_W
+            val perMin = gridW / SPAN_MIN.toFloat()
+            Column(Modifier.fillMaxSize()) {
+                // Time header: four half-hour marks across the window.
+                Box(Modifier.fillMaxWidth().height(26.dp).padding(start = CHAN_W).clipToBounds()) {
+                    for (k in 0 until SPAN_MIN / 30) {
+                        val t = viewStart + k * HALF_HOUR
+                        Text((if (k == 0) dayLabel(t, now) else "") + hhmm(t), Modifier.offset(x = perMin * (k * 30f)).padding(start = 6.dp).align(Alignment.CenterStart), fontSize = Tv.label, color = Tv.text2, fontWeight = FontWeight.Medium)
+                    }
+                }
+                Box(Modifier.fillMaxSize()) {
+                    LazyColumn(Modifier.fillMaxSize().clearAndSetSemantics { }.focusRequester(gridFocus).onFocusChanged { gridFocused = it.isFocused }
+                        .onPreviewKeyEvent { e ->
+                            if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            move(e.key)
+                        }
+                        .holdOk { ok(hold = true) }
+                        .onKeyEvent { e -> if (e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter)) { ok(hold = false); true } else false }
+                        .focusable(), state = listState, userScrollEnabled = false, contentPadding = PaddingValues(bottom = 24.dp)) {
+                        itemsIndexed(chans, key = { i, c -> "$i|${c.url}" }) { i, c ->
+                            GuideRow(c, i == row && gridFocused, if (i == row) cursor else -1L, viewStart, span, now, tick, perMin, c.url in favUrls, c.url == Preview.channel?.url)
+                        }
+                    }
+                    if (now in viewStart until viewStart + span)
+                        Box(Modifier.padding(start = CHAN_W).offset(x = perMin * ((now - viewStart) / 60_000f)).width(2.dp).fillMaxHeight().background(Tv.live.copy(alpha = .9f)))
+                }
+            }
+        }
+    }
+    // Back goes to the channel in the preview, full screen (the menu is one press of left away).
+    androidx.activity.compose.BackHandler(enabled = Repo.preview && Preview.channel != null && info == null && pinFor == null) {
+        val pl = Preview.list; val c = Preview.channel!!
+        act.playLive(pl.ifEmpty { listOf(c) }, pl.indexOf(c).coerceAtLeast(0))
+    }
+    LaunchedEffect(locked, chans) { if (!locked && chans.isNotEmpty()) { delay(120); runCatching { gridFocus.requestFocus() } } }
+    info?.let { (c, p) ->
+        ProgrammeDialog(act, c, p, now, chans) { info = null }
+    }
+    pinFor?.let { g -> PinDialog("Enter PIN to open ${prettyGroup(g)}") { pin -> pinFor = null; if (pin != null && pin == Repo.pin) { Repo.unlocked += g; unlockTick++ } } }
+}
+
+private fun dayLabel(t: Long, now: Long): String {
+    val a = java.util.Calendar.getInstance().apply { timeInMillis = t }; val b = java.util.Calendar.getInstance().apply { timeInMillis = now }
+    val d = (a.get(java.util.Calendar.YEAR) - b.get(java.util.Calendar.YEAR)) * 400 + a.get(java.util.Calendar.DAY_OF_YEAR) - b.get(java.util.Calendar.DAY_OF_YEAR)
+    return when (d) { 0 -> ""; 1 -> "Tomorrow "; -1 -> "Yesterday "; else -> java.text.SimpleDateFormat("EEE ", java.util.Locale.UK).format(java.util.Date(t)) }
+}
+
+/** One channel's row: the channel on the left, then only the programmes inside the window, drawn as plain boxes. */
+@Composable
+private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Long, span: Long, now: Long, tick: Int, perMin: Dp, fav: Boolean, inPreview: Boolean) {
+    val all = remember(tick, c) { Repo.guideFor(c) }
+    val end = viewStart + span
+    val shown = remember(all, viewStart) { all.filter { it.end > viewStart && it.start < end } }
+    val sel = if (cursor >= 0) at(all, cursor) else null
+    Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = 4.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 6.dp).background(if (cursor >= 0) Tv.surface3 else Tv.surface, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (inPreview) "▶" else "${c.num}", fontSize = 11.sp, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(30.dp), maxLines = 1)
+            LogoTile(c, Modifier.size(width = 50.dp, height = 30.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(c.name + if (fav) " ★" else "", fontSize = Tv.caption, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+        }
+        Box(Modifier.fillMaxSize().clipToBounds()) {
+            if (shown.isEmpty()) Cell("No programme information", null, 0.dp, perMin * SPAN_MIN.toFloat(), on = selected && cursor >= 0, past = false, onAir = false, progress = null, catchup = false)
+            for (p in shown) {
+                val s = maxOf(p.start, viewStart); val e = minOf(p.end, end)
+                val onAir = p.start <= now && p.end > now
+                Cell(p.title, "${hhmm(p.start)}–${hhmm(p.end)}", perMin * ((s - viewStart) / 60_000f), perMin * ((e - s) / 60_000f),
+                    on = selected && sel == p, past = p.end <= now, onAir = onAir, progress = if (onAir) (now - p.start).toFloat() / (p.end - p.start) else null,
+                    catchup = p.end <= now && c.hasCatchup && p.start > now - c.catchupDays * 86_400_000L)
+            }
+        }
+    }
+}
+
+@Composable
+private fun Cell(title: String, sub: String?, x: Dp, w: Dp, on: Boolean, past: Boolean, onAir: Boolean, progress: Float?, catchup: Boolean) {
+    val shape = RoundedCornerShape(6.dp)
+    val bg = when { on -> Tv.text; onAir -> Tv.accentDeep.copy(alpha = .5f); past -> Tv.surface.copy(alpha = .55f); else -> Tv.surface2 }
+    val fg = when { on -> Tv.bg; past -> Tv.muted; else -> Tv.text }
+    Box(Modifier.offset(x = x).width(w).fillMaxHeight().padding(end = 3.dp).background(bg, shape).let { if (on) it.border(2.dp, Tv.focusRing, shape) else it }) {
+        Column(Modifier.padding(start = 10.dp, end = 6.dp, top = 7.dp)) {
+            Text((if (catchup) "↺ " else "") + title, fontSize = Tv.caption, fontWeight = if (on || onAir) FontWeight.SemiBold else FontWeight.Normal, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (sub != null && w > 90.dp) Text(sub, fontSize = 11.sp, color = if (on) Tv.bg.copy(alpha = .7f) else Tv.muted, maxLines = 1)
+        }
+        if (progress != null && !on) ProgressLine(progress, Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
+    }
+}
+
+/** A programme's details with what you can do: watch, watch from the start / play from the archive, remind me. */
+@Composable
+fun ProgrammeDialog(act: TvActivity, c: Channel, p: Programme, now: Long, chans: List<Channel>, onDismiss: () -> Unit) {
+    val onAir = p.start <= now && p.end > now
+    val archive = Repo.catchupUrl(c, p.start, p.end)
+    val first = remember { FocusRequester() }
+    var reminded by remember { mutableStateOf(Repo.hasReminder(c.url, p.start)) }
+    val actions = buildList<Pair<String, () -> Unit>> {
+        if (onAir) add("Watch now" to { onDismiss(); act.playLive(chans, chans.indexOf(c).coerceAtLeast(0)) })
+        if (archive != null) add((if (onAir) "Watch from the start" else "Play (catch-up)") to { onDismiss(); act.playCatchup(c, p) })
+        if (p.start > now) add((if (reminded) "Cancel reminder" else "Remind me") to { Repo.toggleReminder(c, p); reminded = !reminded })
+        if (!onAir) add("Watch ${c.name}" to { onDismiss(); act.playLive(chans, chans.indexOf(c).coerceAtLeast(0)) })
+        add("Close" to onDismiss)
+    }
+    Dialog(onDismissRequest = onDismiss) {
+        Column(Modifier.width(600.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)) {
+            Text(c.name, fontSize = Tv.label, color = Tv.muted, fontWeight = FontWeight.SemiBold)
+            Text(p.title, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 2, modifier = Modifier.padding(top = 2.dp))
+            Text("${dayLabel(p.start, now)}${hhmm(p.start)}–${hhmm(p.end)}  ·  ${(p.end - p.start) / 60_000} min" + (if (onAir) "  ·  On now" else if (p.end <= now) "  ·  Finished" else "") + (if (reminded) "  ·  Reminder set" else ""),
+                fontSize = Tv.bodySmall, color = Tv.text2, modifier = Modifier.padding(top = 6.dp))
+            if (p.desc.isNotBlank()) Text(p.desc, fontSize = Tv.bodySmall, color = Tv.text2, lineHeight = 20.sp, maxLines = 6, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 12.dp))
+            Spacer(Modifier.height(18.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                actions.forEachIndexed { i, (label, fn) ->
+                    if (i == 0) Button(onClick = fn, modifier = Modifier.focusRequester(first)) { Text(label, fontSize = Tv.bodySmall) }
+                    else OutlinedButton(onClick = fn) { Text(label, fontSize = Tv.bodySmall) }
+                }
+            }
+        }
+        LaunchedEffect(Unit) { delay(50); runCatching { first.requestFocus() } }
+    }
+}
+
+/** Four-digit PIN pad (the Shield remote has no number keys, so it's on screen; number keys work too). null = cancelled. */
+@Composable
+fun PinDialog(title: String, onResult: (String?) -> Unit) {
+    var pin by remember { mutableStateOf("") }
+    val first = remember { FocusRequester() }
+    fun press(d: String) { if (pin.length < 4) pin += d; if (pin.length == 4) onResult(pin) }
+    Dialog(onDismissRequest = { onResult(null) }) {
+        Column(Modifier.width(360.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)
+            .onPreviewKeyEvent { e ->
+                val n = e.nativeKeyEvent.keyCode - android.view.KeyEvent.KEYCODE_0
+                if (e.type == KeyEventType.KeyDown && n in 0..9) { press("$n"); true } else false
+            }, horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(title, fontSize = Tv.body, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 2)
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) { repeat(4) { k -> Box(Modifier.size(16.dp).background(if (k < pin.length) Tv.text else Tv.surface3, RoundedCornerShape(8.dp))) } }
+            Spacer(Modifier.height(18.dp))
+            val keys = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "✕")
+            for (r in 0 until 4) Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
+                for (k in keys.subList(r * 3, r * 3 + 3)) {
+                    Surface(onClick = { when (k) { "⌫" -> pin = pin.dropLast(1); "✕" -> onResult(null); else -> press(k) } },
+                        modifier = Modifier.size(width = 72.dp, height = 48.dp).let { if (k == "1") it.focusRequester(first) else it },
+                        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)),
+                        colors = ClickableSurfaceDefaults.colors(containerColor = Tv.surface2, focusedContainerColor = Tv.text, contentColor = Tv.text, focusedContentColor = Tv.bg),
+                        scale = ClickableSurfaceDefaults.scale(focusedScale = 1f)) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(k, fontSize = Tv.body, fontWeight = FontWeight.SemiBold) }
                     }
                 }
             }
         }
-        Box(Modifier.fillMaxSize()) {
-            LazyColumn(Modifier.fillMaxSize().padding(start = Tv.margin), contentPadding = PaddingValues(bottom = 40.dp)) {
-                itemsIndexed(chans, key = { _, c -> c.url }) { _, c -> GuideRow(act, c, dayStart, now, tick, scroll, c.url in favUrls) { info = c to it } }
-            }
-            // Now line, drawn over the grid in the scrolled position
-            val nowX = with(density) { (((now - dayStart) / 60_000f) * PX_PER_MIN.value).dp.roundToPx() } - scroll.value
-            if (nowX >= 0) Box(Modifier.padding(start = Tv.margin + CHAN_W).offset(x = with(density) { nowX.toDp() }).width(2.dp).fillMaxHeight().background(Tv.live.copy(alpha = .9f)))
-        }
-    }
-    info?.let { (c, p) ->
-        ProgrammeDialog(c, p, now, onWatch = { info = null; act.playLive(chans, chans.indexOf(c).coerceAtLeast(0)) }) { info = null }
-    }
-}
-
-@Composable
-private fun GuideRow(act: TvActivity, c: Channel, dayStart: Long, now: Long, tick: Int, scroll: androidx.compose.foundation.ScrollState, fav: Boolean, onInfo: (Programme) -> Unit) {
-    val progs = remember(tick, c) { Repo.guideFor(c).filter { it.end > dayStart && it.start < dayStart + HOURS_AHEAD * 3600_000L } }
-    val scope = rememberCoroutineScope()
-    Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 8.dp).background(Tv.surface, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            LogoTile(c, Modifier.size(width = 54.dp, height = 32.dp))
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(c.name, fontSize = Tv.caption, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
-                Text("${c.num}${if (fav) "  ★" else ""}", fontSize = 11.sp, color = Tv.muted)
-            }
-        }
-        Row(Modifier.horizontalScroll(scroll, enabled = false).fillMaxHeight()) {
-            if (progs.isEmpty()) {
-                Cell("No programme information", Modifier.width(PX_PER_MIN * 240), muted = true, onClick = { act.playLive(listOf(c), 0) })
-            } else {
-                var cursor = dayStart
-                for (p in progs) {
-                    val start = maxOf(p.start, dayStart)
-                    if (start > cursor) { Spacer(Modifier.width(PX_PER_MIN * ((start - cursor) / 60_000f))); }
-                    val w = PX_PER_MIN * ((minOf(p.end, dayStart + HOURS_AHEAD * 3600_000L) - start) / 60_000f)
-                    val onAir = p.start <= now && p.end > now
-                    val past = p.end <= now
-                    Cell("${p.title}", Modifier.width(w), sub = "${hhmm(p.start)}–${hhmm(p.end)}", onAir = onAir, past = past,
-                        progress = if (onAir) ((now - p.start).toFloat() / (p.end - p.start)) else null, scroll = scroll,
-                        startMin = ((start - dayStart) / 60_000f), widthMin = ((minOf(p.end, dayStart + HOURS_AHEAD * 3600_000L) - start) / 60_000f),
-                        onClick = { if (onAir) act.playLive(listOf(c), 0) else onInfo(p) })
-                    cursor = maxOf(cursor, p.end)
-                }
-            }
-        }
-    }
-}
-
-/** One programme in the grid. Picked: a white frame; on air: a tinted cell with a progress line. */
-@Composable
-private fun Cell(title: String, modifier: Modifier, sub: String? = null, onAir: Boolean = false, past: Boolean = false, muted: Boolean = false, progress: Float? = null,
-                 scroll: androidx.compose.foundation.ScrollState? = null, startMin: Float = 0f, widthMin: Float = 0f, onClick: () -> Unit) {
-    var focused by remember { mutableStateOf(false) }
-    // A long programme that began off the left edge keeps its name in view: the text slides along with the scroll.
-    val density = LocalDensity.current
-    val slide = if (scroll == null || widthMin <= 0f) 0.dp else with(density) {
-        val startPx = (startMin * PX_PER_MIN.value).dp.roundToPx(); val widthPx = (widthMin * PX_PER_MIN.value).dp.roundToPx()
-        (scroll.value - startPx).coerceIn(0, maxOf(0, widthPx - 140.dp.roundToPx())).toDp()
-    }
-    val bring = remember { BringIntoViewRequester() }
-    val scope = rememberCoroutineScope()
-    Box(modifier.fillMaxHeight().padding(end = 3.dp)) {
-        Surface(onClick = onClick, shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(6.dp)),
-            colors = ClickableSurfaceDefaults.colors(containerColor = when { onAir -> Tv.accentDeep.copy(alpha = .45f); past -> Tv.surface.copy(alpha = .6f); else -> Tv.surface2 },
-                focusedContainerColor = if (onAir) Tv.accentDeep.copy(alpha = .75f) else Tv.surface3, contentColor = Tv.text, focusedContentColor = Tv.text),
-            border = ClickableSurfaceDefaults.border(focusedBorder = Border(androidx.compose.foundation.BorderStroke(3.dp, Tv.focusRing), shape = RoundedCornerShape(6.dp))),
-            scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
-            modifier = Modifier.fillMaxSize().bringIntoViewRequester(bring).onFocusChanged { focused = it.isFocused; if (it.isFocused) scope.launch { bring.bringIntoView() } }) {
-            Box(Modifier.fillMaxSize()) {
-                Column(Modifier.padding(start = 10.dp + slide, end = 8.dp, top = 7.dp)) {
-                    Text(title, fontSize = Tv.caption, fontWeight = if (onAir || focused) FontWeight.SemiBold else FontWeight.Normal, color = if (muted || (past && !focused)) Tv.muted else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (sub != null) Text(sub, fontSize = 11.sp, color = Tv.muted, maxLines = 1)
-                }
-                if (progress != null) ProgressLine(progress, Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ProgrammeDialog(c: Channel, p: Programme, now: Long, onWatch: () -> Unit, onDismiss: () -> Unit) {
-    Dialog(onDismissRequest = onDismiss) {
-        Column(Modifier.width(560.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)) {
-            Text(c.name, fontSize = Tv.label, color = Tv.muted, fontWeight = FontWeight.SemiBold)
-            Text(p.title, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 2, modifier = Modifier.padding(top = 2.dp))
-            Text("${hhmm(p.start)}–${hhmm(p.end)}  ·  ${(p.end - p.start) / 60_000} min" + (if (p.start <= now && p.end > now) "  ·  On now" else if (p.end <= now) "  ·  Finished" else ""), fontSize = Tv.bodySmall, color = Tv.text2, modifier = Modifier.padding(top = 6.dp))
-            if (p.desc.isNotBlank()) Text(p.desc, fontSize = Tv.bodySmall, color = Tv.text2, lineHeight = 20.sp, maxLines = 6, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 12.dp))
-            Spacer(Modifier.height(18.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = onWatch) { Text(if (p.start <= now && p.end > now) "Watch now" else "Watch channel", fontSize = Tv.bodySmall) }
-                OutlinedButton(onClick = onDismiss) { Text("Close", fontSize = Tv.bodySmall) }
-            }
-        }
+        LaunchedEffect(Unit) { delay(50); runCatching { first.requestFocus() } }
     }
 }

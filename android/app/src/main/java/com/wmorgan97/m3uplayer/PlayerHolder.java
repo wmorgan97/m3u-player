@@ -30,6 +30,8 @@ public final class PlayerHolder {
         if (spare == null) spare = p; else p.release();
     }
 
+    public static ExoPlayer create(Context c) { return build(c.getApplicationContext()); }
+
     private static ExoPlayer build(Context c) {
         DefaultLoadControl load = new DefaultLoadControl.Builder()
             .setBufferDurationsMs(12_000, 40_000, 700, 1500)
@@ -46,7 +48,7 @@ public final class PlayerHolder {
     }
 
     /** MPEG-TS streams: read far less of the stream before deciding where it starts (the default reads ~110KB first). */
-    static DefaultExtractorsFactory extractors() {
+    public static DefaultExtractorsFactory extractors() {
         return new DefaultExtractorsFactory()
             .setTsExtractorTimestampSearchBytes(TsExtractor.TS_PACKET_SIZE * 60)
             .setTsExtractorFlags(androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_IGNORE_SPLICE_INFO_STREAM);

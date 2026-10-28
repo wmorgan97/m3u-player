@@ -79,7 +79,12 @@ public class PlayerActivity extends AppCompatActivity {
     private TextView title, subtitle, badge, liveTag, elapsed, total, hud, status, nextCount, nextName;
     private SeekBar seek;
     private ProgressBar spinner;
-    private ImageButton playBtn, prevBtn, nextBtn, backBtn, fwdBtn, audioBtn, subsBtn, aspectBtn, infoBtn, listBtn;
+    private ImageButton playBtn, prevBtn, nextBtn, backBtn, fwdBtn, audioBtn, subsBtn, aspectBtn, infoBtn, listBtn, sleepBtn;
+    private TextView noticeView;          // reminders: "Starting now on …  ·  OK to watch"
+    private Runnable noticeAction;
+    private final Runnable noticeOff = () -> { noticeView.setVisibility(View.GONE); noticeAction = null; };
+    private long sleepAt = 0;             // sleep timer: when playback stops (0 = off)
+    private final Runnable sleepRun = () -> { if (player != null) player.pause(); finish(); };
     private Button playNow;
     private int aspect = 0;
     private static final String[] ASPECTS = {"Best fit", "Fill screen", "Stretch"};
@@ -219,7 +224,13 @@ public class PlayerActivity extends AppCompatActivity {
 
     private void onTick() {
         if (player == null) return;
-        clockLabel.setText(new java.text.SimpleDateFormat("HH:mm", Locale.UK).format(new java.util.Date()));
+        String clk = new java.text.SimpleDateFormat("HH:mm", Locale.UK).format(new java.util.Date());
+        if (sleepAt > 0) {
+            long left = Math.max(0, sleepAt - System.currentTimeMillis());
+            clk += "   ·   Sleep in " + Math.max(1, (left + 59_999) / 60_000) + " min";
+            if (left <= 60_000 && left > 59_000) showHud("Sleep in 1 minute");
+        }
+        clockLabel.setText(clk);
         long t = Math.max(0, player.getCurrentPosition()), d = Math.max(0, player.getDuration());
         if (!live && d > 0) {
             if (pendingSeek < 0 && !seek.isPressed()) { seek.setMax((int) (d / 1000)); seek.setProgress((int) (t / 1000)); elapsed.setText(clock(t / 1000)); }
@@ -250,6 +261,11 @@ public class PlayerActivity extends AppCompatActivity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
         int k = e.getKeyCode();
+        if (noticeAction != null && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+            if (e.getAction() == KeyEvent.ACTION_UP) { Runnable r = noticeAction; noticeOff.run(); ui.removeCallbacks(noticeOff); r.run(); }
+            return true;
+        }
+        if (noticeAction != null && k == KeyEvent.KEYCODE_BACK && e.getAction() == KeyEvent.ACTION_DOWN) { noticeOff.run(); ui.removeCallbacks(noticeOff); return true; }
         if (e.getAction() == KeyEvent.ACTION_UP && live && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER)
             && overlay.getVisibility() != View.VISIBLE && channelList.getVisibility() != View.VISIBLE && nextPanel.getVisibility() != View.VISIBLE) {
             if (okHeld) { okHeld = false; return true; }
@@ -496,6 +512,28 @@ public class PlayerActivity extends AppCompatActivity {
             .setTitle(item.optString("title")).setMessage(s.toString().trim()).setPositiveButton("Close", null).show();
     }
 
+    /** A reminder coming up while you watch: shown at the top for 20 seconds; OK runs it, Back dismisses it. */
+    public void notice(String text, String hint, Runnable onOk) {
+        noticeView.setText(text + "      " + hint);
+        noticeView.setVisibility(View.VISIBLE);
+        noticeAction = onOk;
+        ui.removeCallbacks(noticeOff); ui.postDelayed(noticeOff, 20_000);
+    }
+
+    private static final int[] SLEEP_MIN = {0, 15, 30, 45, 60, 90, 120};
+    private void pickSleep() {
+        String[] rows = {"Off", "15 minutes", "30 minutes", "45 minutes", "1 hour", "1½ hours", "2 hours"};
+        int cur = 0;
+        if (sleepAt > 0) { long left = (sleepAt - System.currentTimeMillis()) / 60_000; for (int i = 1; i < SLEEP_MIN.length; i++) if (left <= SLEEP_MIN[i]) { cur = i; break; } }
+        dialog("Sleep timer", rows, cur, w -> {
+            ui.removeCallbacks(sleepRun);
+            sleepAt = w == 0 ? 0 : System.currentTimeMillis() + SLEEP_MIN[w] * 60_000L;
+            if (sleepAt > 0) ui.postDelayed(sleepRun, SLEEP_MIN[w] * 60_000L);
+            showHud(w == 0 ? "Sleep timer off" : "Sleep in " + rows[w]);
+            onTick();
+        });
+    }
+
     private interface Pick { void on(int which); }
     private void dialog(String heading, String[] rows, int checked, Pick pick) {
         new AlertDialog.Builder(this, R.style.TvDialog)
@@ -688,10 +726,11 @@ public class PlayerActivity extends AppCompatActivity {
         aspectBtn = icon(androidx.media3.ui.R.drawable.exo_icon_fullscreen_enter, "Picture size", v -> aspectNext());
         infoBtn = icon(android.R.drawable.ic_menu_info_details, "Info", v -> showInfo());
         listBtn = icon(android.R.drawable.ic_menu_sort_by_size, "List", v -> showList());
+        sleepBtn = icon(android.R.drawable.ic_lock_idle_alarm, "Sleep timer", v -> pickSleep());
         for (View b : new View[]{prevBtn, backBtn, playBtn, fwdBtn, nextBtn}) buttons.addView(b);
         View gap = new View(this);
         buttons.addView(gap, new LinearLayout.LayoutParams(0, 1, 1));
-        for (View b : new View[]{audioBtn, subsBtn, aspectBtn, infoBtn, listBtn}) buttons.addView(b);
+        for (View b : new View[]{audioBtn, subsBtn, aspectBtn, sleepBtn, infoBtn, listBtn}) buttons.addView(b);
         bottom.addView(buttons);
         ov.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
 
@@ -706,6 +745,14 @@ public class PlayerActivity extends AppCompatActivity {
         hud.setPadding(dp(22), dp(10), dp(22), dp(10));
         hud.setVisibility(View.GONE);
         root.addView(hud, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+
+        noticeView = text(18, Color.WHITE, true);
+        GradientDrawable noticeBg = new GradientDrawable(); noticeBg.setColor(0xF01A1D24); noticeBg.setCornerRadius(dp(10)); noticeBg.setStroke(dp(1), 0x33FFFFFF);
+        noticeView.setBackground(noticeBg);
+        noticeView.setPadding(dp(22), dp(12), dp(22), dp(12));
+        noticeView.setVisibility(View.GONE);
+        FrameLayout.LayoutParams nl = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL); nl.setMargins(0, dp(28), 0, 0);
+        root.addView(noticeView, nl);
 
         // "Next episode in 10"
         LinearLayout np = new LinearLayout(this);

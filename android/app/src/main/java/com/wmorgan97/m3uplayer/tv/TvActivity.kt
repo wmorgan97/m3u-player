@@ -55,6 +55,8 @@ class TvActivity : ComponentActivity() {
     var refresh by mutableIntStateOf(0)                 // bumped when history / progress change (after watching)
     private var focusTick by mutableIntStateOf(0)       // bumped to pull the highlight back into the page
     private var zap by mutableStateOf("")               // digits typed on the remote
+    private var due by mutableStateOf<Reminder?>(null)
+    var resumeTick by mutableIntStateOf(0)                // bumped on coming back (from the player): the preview starts again   // a reminder that just came up (shown over the app)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,6 +70,8 @@ class TvActivity : ComponentActivity() {
         lifecycleScope.launch { runCatching { Repo.liveChannels() } }   // channels ready before Live TV is opened
         lifecycleScope.launch { delay(1500); runCatching { Repo.overview("movies") }; runCatching { Repo.overview("series") } }   // rows ready before Movies / Series are opened
         lifecycleScope.launch { delay(2500); com.wmorgan97.m3uplayer.PlayerHolder.warm(this@TvActivity) }   // a player ready before play is pressed
+        Repo.loadSavedGuide()
+        lifecycleScope.launch { while (true) { checkReminders(); delay(15_000) } }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Tv.accent, background = Tv.bg, surface = Tv.surface, onSurface = Tv.text, onBackground = Tv.text, surfaceVariant = Tv.surface2)) {
                 CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides QuickBringIntoView) { App() }
@@ -78,13 +82,16 @@ class TvActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (Repo.hasKey()) lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
+        resumeTick++
         testHook(intent)
     }
+    override fun onStop() { super.onStop(); Preview.stop() }   // Home / the player: the preview's stream closes
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); testHook(intent) }
 
     /** Test hook (adb only): `--es testStream <url> --ei testIndex n` plays a pretend channel list on that stream, so the
      *  player's channel panel, last-channel entry and zapping can be checked without touching the provider. */
     private fun testHook(i: Intent?) {
+        i?.getStringExtra("testPreview")?.let { Preview.testUrl = it.ifEmpty { null }; i.removeExtra("testPreview") }
         val url = i?.getStringExtra("testStream") ?: return
         i.removeExtra("testStream")
         val names = listOf("Sky Sports Main Event", "Sky Sports F1", "BBC One HD", "BBC Two HD", "ITV1 HD", "Channel 4 HD", "Channel 5 HD", "Sky Atlantic")
@@ -175,7 +182,13 @@ class TvActivity : ComponentActivity() {
                         Screen.Settings -> SettingsScreen(this@TvActivity)
                     }
                 } }
-                if (screen !is Screen.Details) Clock(Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = Tv.margin))
+                if (screen !is Screen.Details) Row(Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = Tv.margin), verticalAlignment = Alignment.CenterVertically) {
+                    if (!Repo.online) { Text("Offline · showing saved data", fontSize = Tv.label, color = Tv.muted); Spacer(Modifier.width(14.dp)) }
+                    Clock()
+                }
+                due?.let { r ->
+                    Options("Starting now on ${r.channel}: ${r.title}", listOf("Watch now" to { due = null; watchReminder(r) })) { due = null }
+                }
                 if (zap.isNotEmpty()) Box(Modifier.align(Alignment.TopEnd).padding(top = 70.dp, end = Tv.margin).background(Tv.surface, RoundedCornerShape(10.dp)).padding(horizontal = 18.dp, vertical = 8.dp)) {
                     Column(horizontalAlignment = Alignment.End) {
                         Text(zap, fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Tv.text)
@@ -191,6 +204,7 @@ class TvActivity : ComponentActivity() {
     private var playList: List<JSONObject> = emptyList()   // the items up/down / next episode step through
     private var playIndex = 0
     private var lastLive: Pair<List<JSONObject>, Int>? = null   // for "last channel"
+    private val liveLists = ArrayList<Pair<List<JSONObject>, List<Channel>>>()   // player lists -> their channels (the preview follows what you watch)
 
     /** Live TV: plays one of a list of channels, preferring the 4K copy when that setting is on. */
     fun playLive(chans: List<Channel>, index: Int) {
@@ -203,6 +217,7 @@ class TvActivity : ComponentActivity() {
             }
         }
         val items = list.map { channelItem(it) }
+        liveLists.add(0, items to list); while (liveLists.size > 3) liveLists.removeAt(3)
         val prev = lastLive?.let { (l, k) -> l.getOrNull(k) }
         if (prev != null && prev.optString("url") != items[i].optString("url")) items[i].put("last", prev.optString("title"))
         Repo.lastChannelUrl = list[i].url
@@ -210,13 +225,42 @@ class TvActivity : ComponentActivity() {
         lastLive = items to i
     }
 
+    /** A past programme from the channel's archive (or the current one from its start), played like a recording. */
+    fun playCatchup(c: Channel, p: Programme) {
+        val url = Repo.catchupUrl(c, p.start, p.end) ?: return
+        val item = JSONObject().put("url", url).put("title", p.title).put("subtitle", "${c.name}  ·  ${hhmm(p.start)}–${hhmm(p.end)}  ·  Catch-up").put("info", p.desc)
+            .put("live", false).put("start", 0.0).put("art", c.logo).put("headers", JSONObject(c.headers)).put("listTitle", p.title)
+        play(listOf(item), 0)
+    }
+
+    // ---------- reminders ----------
+
+    private val fired = HashSet<String>()
+    private fun checkReminders() {
+        val now = System.currentTimeMillis()
+        val l = Repo.reminders
+        val r = l.firstOrNull { it.start in (now - 90_000)..(now + 30_000) && "${it.url}|${it.start}" !in fired } ?: return
+        fired += "${r.url}|${r.start}"
+        Repo.reminders = l.filter { it.start > now - 90_000 && it != r }
+        val p = PlayerActivity.current
+        if (p != null && !p.isFinishing) p.notice("Starting now on ${r.channel}: ${r.title}", "OK to watch") { watchReminder(r) }
+        else due = r
+    }
+    private fun watchReminder(r: Reminder) {
+        val c = Repo.channelByUrl(r.url) ?: Channel(r.channel, r.url, "", "", "", "", 0)
+        val group = Repo.live?.channels?.filter { it.group == c.group && c.group.isNotEmpty() }?.takeIf { it.contains(c) } ?: listOf(c)
+        playLive(group, group.indexOf(c).coerceAtLeast(0))
+    }
+
     /** Plays one of a list (channels of a group, episodes of a season) in the TV player. */
     fun play(items: List<JSONObject>, index: Int) {
         playList = items; playIndex = index
+        Preview.release()   // one stream at a time: the preview's connection is closed before the full-screen one opens
+        liveLists.firstOrNull { it.first === items }?.second?.let { l -> l.getOrNull(index)?.let { Preview.select(it, l) } }
         NativePlayerPlugin.listener = NativePlayerPlugin.Listener { onPlayerEvent(it) }
         val it = playerItem(index)
         val sync = items[index].optJSONObject("sync") ?: JSONObject()
-        if (sync.optString("group") != "Test") lifecycleScope.launch { Repo.saveRecent(sync) }   // (test-hook channels stay out of your history)
+        if (sync.optString("url").isNotEmpty() && sync.optString("group") != "Test") lifecycleScope.launch { Repo.saveRecent(sync) }   // (catch-up has no sync entry)   // (test-hook channels stay out of your history)
         PlayerActivity.current?.let { p -> p.load(com.getcapacitor.JSObject(it.toString())); return }
         startActivity(Intent(this, PlayerActivity::class.java).putExtra("item", it.toString()))
     }
@@ -246,7 +290,7 @@ class TvActivity : ComponentActivity() {
             "zap" -> { val c = Repo.channelByNumber(e.optInt("num")); if (c != null) playLive(Repo.live?.channels ?: listOf(c), Repo.live?.channels?.indexOf(c)?.coerceAtLeast(0) ?: 0) }
             "progress", "closed" -> {
                 val cur = playList.getOrNull(playIndex) ?: return
-                if (!cur.optBoolean("live")) lifecycleScope.launch {
+                if (!cur.optBoolean("live") && cur.has("sync")) lifecycleScope.launch {
                     Repo.saveProgress(cur.optString("url"), e.optDouble("t"), e.optDouble("d"), cur.optJSONObject("sync") ?: JSONObject())
                     if (e.optString("type") == "closed") refresh++
                 }

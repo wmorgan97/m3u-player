@@ -39,6 +39,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -117,7 +118,8 @@ fun HomeScreen(act: TvActivity) {
 
 /** A row of channel cards with what's on now (favourites, recent). */
 @Composable
-fun ChannelRowCards(act: TvActivity, chans: List<Channel>, tick: Int, onLong: (Channel) -> Unit) {
+fun ChannelRowCards(act: TvActivity, all: List<Channel>, tick: Int, onLong: (Channel) -> Unit) {
+    val chans = remember(all) { all.distinctBy { it.url } }   // a playlist can list one stream twice; row keys must be unique
     CardRow(chans, { it.url }) { c, i ->
         val (now, _) = remember(tick, c) { Repo.nowNext(c) }
         val p = now?.let { ((System.currentTimeMillis() - it.start).toFloat() / (it.end - it.start)) }
@@ -133,6 +135,7 @@ fun ChannelOptions(act: TvActivity, c: Channel, onDone: () -> Unit) {
         "Watch" to { onDone(); act.playLive(listOf(c), 0) },
         (if (fav) "Remove from favourites" else "Add to favourites") to { onDone(); scope.launch { Repo.toggleFavourite(c); act.refresh++ } },
         "TV guide" to { onDone(); act.go(Screen.Guide(c.group)) },
+        "Hide this channel" to { onDone(); Repo.toggleHiddenChannel(c.url) },
     ), onDone)
 }
 
@@ -208,11 +211,20 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     if (l.channels.isEmpty()) { EmptyState(Icons.Default.LiveTv, "No live channels", "Add a playlist with live TV in Settings"); return }
     val refresh = act.refresh + Repo.version
     val favUrls = remember(refresh) { Repo.favorites().map { it.optString("url") }.toSet() }
+    val hiddenCh = remember(Repo.version) { Repo.hiddenChannels }
     val byGroup = remember(l) { l.channels.groupBy { it.group } }
-    val groups = remember(l, favUrls) { listOfNotNull(if (favUrls.isNotEmpty()) "★ Favourites" else null, "All channels") + l.groups.filter { it.isNotBlank() } }
+    val groups = remember(l, favUrls, Repo.version) { listOfNotNull(if (favUrls.isNotEmpty()) "★ Favourites" else null, "All channels") + Repo.arrange(l.groups.filter { it.isNotBlank() }) }
     var group by rememberSaveable { mutableStateOf(startGroup ?: groups.firstOrNull { it != "All channels" && it != "★ Favourites" } ?: groups[0]) }
-    val list = remember(group, l, favUrls) {
-        when (group) { "All channels" -> l.channels; "★ Favourites" -> l.channels.filter { it.url in favUrls }; else -> byGroup[group] ?: emptyList() }
+    // The highlight moves through the groups at once; the channel list only follows once it rests there (TiviMate does
+    // the same), so holding down through the groups doesn't build a whole list for every group passed.
+    var focusedGroup by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(focusedGroup) { val g = focusedGroup ?: return@LaunchedEffect; if (g != group) { delay(280); group = g } }
+    var unlockTick by remember { mutableIntStateOf(0) }
+    val locked = remember(group, Repo.version, unlockTick) { Repo.isLocked(group) }
+    val list = remember(group, l, favUrls, hiddenCh, Repo.version) {
+        val hidden = Repo.hiddenGroups; val lockedGs = if (Repo.pin.isEmpty()) emptySet() else Repo.lockedGroups - Repo.unlocked
+        when (group) { "All channels" -> l.channels.filter { it.group !in hidden && it.group !in lockedGs }; "★ Favourites" -> l.channels.filter { it.url in favUrls }; else -> byGroup[group] ?: emptyList() }
+            .filter { it.url !in hiddenCh }
     }
     var minute by remember { mutableIntStateOf(0) }
     val guideTick = Repo.guideVersion + minute * 1000
@@ -222,10 +234,26 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
     LaunchedEffect(firstVisible / 100) { if (firstVisible > 200) Repo.requestGuide(list.drop(firstVisible).take(300)) }
     var chanMenu by remember { mutableStateOf<Channel?>(null) }
+    var groupMenu by remember { mutableStateOf<String?>(null) }
+    var focusedChan by remember(group) { mutableStateOf<Channel?>(null) }
+    var pinFor by remember { mutableStateOf<Pair<String, (String) -> Unit>?>(null) }   // PIN prompt: title, then what to do with the right PIN
     val groupFocus = remember { FocusRequester() }   // entering the group list lands on the group that's open
 
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, top = Tv.topMargin, bottom = 14.dp), verticalAlignment = Alignment.Bottom) {
+        val pc = remember(l, Preview.channel) { Preview.current() }
+        if (Repo.preview && !locked) Row(Modifier.fillMaxWidth().height(186.dp).padding(bottom = 12.dp)) {
+            // TiviMate-style top: the preview (last channel, or the one picked with OK) and what's on the highlighted channel.
+            PreviewBox(pc, act.resumeTick, Modifier.padding(start = Tv.margin, top = Tv.topMargin - 8.dp).fillMaxHeight().aspectRatio(16 / 9f))
+            val fc = focusedChan ?: pc
+            Column(Modifier.weight(1f).padding(start = 24.dp, end = Tv.margin + 80.dp, top = Tv.topMargin).clearAndSetSemantics { }) {
+                if (fc != null) {
+                    val (n, nx) = remember(fc, guideTick) { Repo.nowNext(fc) }
+                    Text(n?.title ?: fc.name, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(listOfNotNull(fc.name, n?.let { "${hhmm(it.start)}–${hhmm(it.end)}" }, nx?.let { "Next  ${hhmm(it.start)}  ${it.title}" }).joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+                    if (!n?.desc.isNullOrBlank()) Text(n!!.desc, fontSize = Tv.caption, color = Tv.muted, maxLines = 3, overflow = TextOverflow.Ellipsis, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
+                } else Text("Live TV", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)
+            }
+        } else Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, top = Tv.topMargin, bottom = 14.dp), verticalAlignment = Alignment.Bottom) {
             Text("Live TV", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)
             Spacer(Modifier.width(14.dp))
             Text("${prettyGroup(group)}  ·  ${list.size} channels", fontSize = Tv.bodySmall, color = Tv.muted, modifier = Modifier.padding(bottom = 3.dp))
@@ -235,17 +263,51 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
         Row(Modifier.fillMaxSize()) {
             LazyColumn(Modifier.width(290.dp).fillMaxHeight().padding(start = Tv.margin - 12.dp).focusProperties { enter = { groupFocus } }.focusGroup(), contentPadding = PaddingValues(bottom = 24.dp)) {
                 items(groups, key = { it }) { g ->
-                    ListItem(selected = g == group, onClick = { group = g }, modifier = Modifier.let { if (g == group) it.focusRequester(groupFocus) else it }.onFocusChanged { if (it.isFocused && g != group) group = g },
-                        headlineContent = { Text(prettyGroup(g), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal) },
+                    val special = g == "All channels" || g == "★ Favourites"
+                    ListItem(selected = g == group, onClick = { focusedGroup = g; group = g }, onLongClick = { if (!special) groupMenu = g },
+                        modifier = Modifier.let { if (g == group) it.focusRequester(groupFocus) else it }.holdOk { if (!special) groupMenu = g }.onFocusChanged { if (it.isFocused) focusedGroup = g },
+                        headlineContent = { Text((if (Repo.pin.isNotEmpty() && g in Repo.lockedGroups) "🔒 " else if (g in Repo.pinnedGroups) "↑ " else "") + prettyGroup(g), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal) },
                         trailingContent = { Text("${when (g) { "All channels" -> l.channels.size; "★ Favourites" -> favUrls.size; else -> byGroup[g]?.size ?: 0 }}", fontSize = Tv.label, color = Tv.muted) })
                 }
             }
-            LazyColumn(Modifier.weight(1f).fillMaxHeight().padding(start = 12.dp, end = Tv.margin - 16.dp), state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
-                itemsIndexed(list, key = { i, c -> "$i|${c.url}" }) { i, c -> ChannelRow(c, guideTick, c.url in favUrls, onLong = { chanMenu = c }) { act.playLive(list, i) } }
+            if (locked) Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.Lock, null, Modifier.size(36.dp), tint = Tv.muted)
+                    Spacer(Modifier.height(10.dp))
+                    Text("This group is locked", fontSize = Tv.body, color = Tv.text, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(14.dp))
+                    Button(onClick = { pinFor = "Enter PIN to open ${prettyGroup(group)}" to { _ -> Repo.unlocked += group; unlockTick++ } }) { Text("Enter PIN", fontSize = Tv.bodySmall) }
+                }
+            }
+            else LazyColumn(Modifier.weight(1f).fillMaxHeight().padding(start = 12.dp, end = Tv.margin - 16.dp), state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
+                itemsIndexed(list, key = { i, c -> "$i|${c.url}" }) { i, c -> ChannelRow(c, guideTick, c.url in favUrls, onLong = { chanMenu = c }, onFocus = { focusedChan = c }, inPreview = c.url == Preview.channel?.url) {
+                    if (Repo.preview && Preview.channel?.url != c.url) Preview.select(c, list) else act.playLive(list, i)   // first OK: preview; again: full screen
+                } }
             }
         }
     }
     chanMenu?.let { c -> ChannelOptions(act, c) { chanMenu = null } }
+    groupMenu?.let { g ->
+        val isLocked = g in Repo.lockedGroups && Repo.pin.isNotEmpty()
+        Options(prettyGroup(g), listOf(
+            (if (g in Repo.pinnedGroups) "Move back to its place" else "Move to the top") to { groupMenu = null; Repo.togglePinned(g) },
+            "Hide this group" to { groupMenu = null; if (group == g) group = groups.firstOrNull { it != g && it != "★ Favourites" } ?: "All channels"; Repo.toggleHidden(g) },
+            (if (isLocked) "Unlock this group" else "Lock with PIN") to {
+                groupMenu = null
+                if (Repo.pin.isEmpty()) pinFor = "Choose a 4-digit PIN for locked groups" to { pin -> Repo.pin = pin; if (g !in Repo.lockedGroups) Repo.toggleLock(g) }
+                else pinFor = "Enter PIN" to { _ -> Repo.toggleLock(g) }
+            },
+            "TV guide for this group" to { groupMenu = null; act.go(Screen.Guide(g)) },
+        )) { groupMenu = null }
+    }
+    androidx.activity.compose.BackHandler(enabled = Repo.preview && Preview.channel != null && chanMenu == null && groupMenu == null && pinFor == null) {
+        val pl = Preview.list; val c = Preview.channel!!
+        act.playLive(pl.ifEmpty { listOf(c) }, pl.indexOf(c).coerceAtLeast(0))
+    }
+    pinFor?.let { (title, then) ->
+        val choosing = Repo.pin.isEmpty()
+        PinDialog(title) { pin -> pinFor = null; if (pin != null && (choosing || pin == Repo.pin)) then(pin) }
+    }
 }
 
 @Composable
@@ -261,13 +323,13 @@ private fun LiveSkeleton() {
 }
 
 @Composable
-fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onClick: () -> Unit) {
+fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onFocus: () -> Unit = {}, inPreview: Boolean = false, onClick: () -> Unit) {
     val (now, next) = remember(tick, c) { Repo.nowNext(c) }
-    ListItem(selected = false, onClick = onClick, onLongClick = onLong, modifier = Modifier.holdOk(onLong),
+    ListItem(selected = false, onClick = onClick, onLongClick = onLong, modifier = Modifier.holdOk(onLong).onFocusChanged { if (it.isFocused) onFocus() },
         leadingContent = { LogoTile(c, Modifier.size(width = 68.dp, height = 40.dp)) },
         headlineContent = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${c.num}", fontSize = Tv.caption, color = Tv.muted, modifier = Modifier.width(44.dp))
+                Text(if (inPreview) "▶" else "${c.num}", fontSize = Tv.caption, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(44.dp))
                 Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.body, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f, fill = false))
                 if (fav) { Spacer(Modifier.width(8.dp)); Text("★", fontSize = Tv.label, color = Tv.star) }
             }
@@ -278,7 +340,7 @@ fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onClick:
                 if (now != null) ProgressLine(((System.currentTimeMillis() - now.start).toFloat() / (now.end - now.start)), Modifier.padding(top = 5.dp).width(220.dp), 3.dp)
             }
         },
-        trailingContent = { if (next != null) Text("Next  ${next.title}", fontSize = Tv.label, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 240.dp)) })
+        trailingContent = { if (next != null && !Repo.preview) Text("Next  ${next.title}", fontSize = Tv.label, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 240.dp)) })
 }
 
 // ---------- Movies / Series ----------
