@@ -64,14 +64,14 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = System.currentTimeMillis() } }
     val tick = Repo.guideVersion
-    LaunchedEffect(group, locked) { if (!locked) Repo.requestGuide(chans.take(300)) }
 
     // Where the highlight is: a row, and a moment in time (the programme under it is the one picked).
     var row by remember(group) { mutableIntStateOf(0) }
     var cursor by remember(group) { mutableLongStateOf(System.currentTimeMillis()) }
     var viewStart by remember(group) { mutableLongStateOf(floor30(System.currentTimeMillis())) }
+    LaunchedEffect(group, locked, row / 100) { if (!locked) Repo.requestGuide(chans.drop(maxOf(0, row - 50)).take(300)) }   // (rows further down get theirs as you reach them)
     val anyArchive = remember(chans) { chans.any { it.hasCatchup } }
-    val earliest = floor30(now) - (if (anyArchive) 24 * 3600_000L else 2 * 3600_000L)
+    val earliest = floor30(now) - (if (anyArchive) 24 * 3600_000L else 0L)   // the past is only worth visiting with catch-up; otherwise left from now opens the menu
     val latest = now + 24 * 3600_000L
     val span = SPAN_MIN * 60_000L
     val listState = rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = 4, nested = 0) })   // rows built before they scroll in
@@ -138,7 +138,8 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
         // What's picked, described at the top (TiviMate's info area).
         val selC = chans.getOrNull(row)
         val selP = remember(row, cursor, tick, chans) { at(progs(row), cursor) }
-        val pc = remember(l, Preview.channel) { Preview.current() }
+        LaunchedEffect(l) { Preview.current() }
+        val pc = Preview.channel
         Row(Modifier.fillMaxWidth().height(186.dp)) {
         if (!locked && Repo.preview) PreviewBox(pc, act.resumeTick, Modifier.padding(start = Tv.margin, top = Tv.topMargin - 8.dp, bottom = 12.dp).fillMaxHeight().aspectRatio(16 / 9f))
         Column(Modifier.weight(1f).fillMaxHeight().padding(start = if (Repo.preview) 24.dp else Tv.margin, end = Tv.margin + 80.dp, top = Tv.topMargin).clearAndSetSemantics { }) {
@@ -205,7 +206,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     info?.let { (c, p) ->
         ProgrammeDialog(act, c, p, now, chans) { info = null }
     }
-    pinFor?.let { g -> PinDialog("Enter PIN to open ${prettyGroup(g)}") { pin -> pinFor = null; if (pin != null && pin == Repo.pin) { Repo.unlocked += g; unlockTick++ } } }
+    pinFor?.let { g -> PinDialog("Enter PIN to open ${prettyGroup(g)}") { pin -> pinFor = null; if (pin != null && Repo.checkPin(pin)) { Repo.unlocked += g; unlockTick++ } } }
 }
 
 private fun dayLabel(t: Long, now: Long): String {

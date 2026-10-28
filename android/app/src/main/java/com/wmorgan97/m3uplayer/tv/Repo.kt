@@ -81,7 +81,11 @@ object Repo {
     // ---------- this TV's own choices: parental lock, hidden / ordered groups, hidden channels, reminders ----------
     private fun strSet(k: String): Set<String> = prefs.getStringSet(k, emptySet())?.toSet() ?: emptySet()
     private fun putSet(k: String, v: Set<String>) { prefs.edit().putStringSet(k, v).apply(); version++ }
-    var pin: String get() = prefs.getString("pin", "") ?: ""; set(v) { prefs.edit().putString("pin", v).apply(); version++ }
+    /** The parental PIN, kept only as a salted hash ("" = no PIN). Set it with the plain digits. */
+    var pin: String get() = prefs.getString("pinHash", "") ?: ""; set(v) { prefs.edit().putString("pinHash", if (v.isEmpty()) "" else sha("m3u-pin|$v")).remove("pin").apply(); version++ }
+    fun checkPin(p: String) = pin.isNotEmpty() && sha("m3u-pin|$p") == pin
+    /** A channel whose group is locked (and not unlocked this session): playing it asks for the PIN. */
+    fun isChannelLocked(c: Channel) = isLocked(c.group)
     val lockedGroups get() = strSet("lockedGroups")
     fun toggleLock(g: String) = putSet("lockedGroups", lockedGroups.let { if (g in it) it - g else it + g })
     /** Groups unlocked with the PIN until the app is closed. */
@@ -258,75 +262,11 @@ object Repo {
         Live(all, groups.toList(), epg.distinct()).also { live = it }
     }
 
-    private val ATTR_RE = Regex("""([\w-]+)=("([^"]*)"|'([^']*)'|(\S+))""")
-    private val SEP_RE = Regex("""^\s*[#*=_~·•▬—–-]{2,}|[#*=_~·•▬—–-]{2,}\s*$""")
-    private val PROMO_RE = Regex("""⬇️|release update|learn that|^epgenius$""", RegexOption.IGNORE_CASE)   // provider notice rows, not channels
-    private fun parseM3U(text: String, offset: Int): Pair<List<Channel>, List<String>> {
-        val out = ArrayList<Channel>(20000); val epg = ArrayList<String>()
-        var attrs: Map<String, String> = emptyMap(); var title = ""; var grp = ""; val opts = HashMap<String, String>()
-        for (raw in text.lineSequence()) {
-            val line = raw.trim()
-            if (line.isEmpty()) continue
-            if (line.startsWith("#EXTM3U", true)) {
-                ATTR_RE.findAll(line).forEach { m -> if (m.groupValues[1].lowercase() in setOf("url-tvg", "x-tvg-url")) epg += m.groupValues.drop(3).first { it.isNotEmpty() }.split(Regex("[\\s,]+")).filter { it.isNotBlank() } }
-                continue
-            }
-            if (line.startsWith("#EXTINF:", true)) {
-                val body = line.substring(8)
-                var q: Char? = null; var cut = -1
-                for (i in body.indices) { val ch = body[i]; if (q != null) { if (ch == q) q = null } else if ((ch == '"' || ch == '\'') && i > 0 && body[i - 1] == '=') q = ch else if (ch == ',') { cut = i; break } }
-                val head = if (cut >= 0) body.substring(0, cut) else body
-                title = if (cut >= 0) body.substring(cut + 1).trim() else ""
-                attrs = ATTR_RE.findAll(head).associate { it.groupValues[1].lowercase() to it.groupValues.drop(3).firstOrNull { v -> v.isNotEmpty() }.orEmpty() }
-                continue
-            }
-            if (line.startsWith("#EXTGRP:", true)) { grp = line.substring(8).trim(); continue }
-            if (line.startsWith("#EXTVLCOPT:", true)) {
-                val o = line.substring(11).trim(); val i = o.indexOf('=')
-                if (i > 0) when (o.substring(0, i).lowercase()) { "http-user-agent" -> opts["User-Agent"] = o.substring(i + 1); "http-referrer", "http-referer" -> opts["Referer"] = o.substring(i + 1) }
-                continue
-            }
-            if (line.startsWith("#")) continue
-            val u = line.lowercase().substringBefore('?')
-            val isLive = !u.contains("/series/") && !u.contains("/movie/") && !Regex("""\.(mp4|mkv|avi|mov|m4v)$""").containsMatchIn(u)
-            val name = title.ifEmpty { attrs["tvg-name"] ?: line }
-            val g = attrs["group-title"]?.ifEmpty { null } ?: grp
-            if (isLive && !SEP_RE.containsMatchIn(name) && name.any { it.isLetterOrDigit() } && !PROMO_RE.containsMatchIn(name) && !PROMO_RE.containsMatchIn(g) && !u.contains("epgenius.org"))
-                out += Channel(name, line, attrs["group-title"]?.ifEmpty { null } ?: grp, attrs["tvg-logo"] ?: "", attrs["tvg-id"] ?: "", attrs["tvg-name"] ?: "",
-                    attrs["tvg-chno"]?.toIntOrNull() ?: (offset + out.size + 1), HashMap(opts),
-                    catchupDays = attrs["catchup-days"]?.toIntOrNull() ?: if (!attrs["catchup"].isNullOrEmpty() || !attrs["catchup-source"].isNullOrEmpty() || !attrs["catchup-type"].isNullOrEmpty()) 7 else 0,
-                    catchupMode = (attrs["catchup"] ?: attrs["catchup-type"] ?: "").lowercase(), catchupSource = attrs["catchup-source"] ?: "")
-            attrs = emptyMap(); title = ""; grp = ""; opts.clear()
-        }
-        return out to epg
-    }
+    // The playlist parser and catch-up links live in Parsing.kt (pure, unit-tested).
 
-    // ---------- catch-up ----------
-
-    private val XC_RE = Regex("""^(https?://[^/]+)/(?:live/)?([^/]+)/([^/]+)/(\d+)(?:\.\w+)?$""", RegexOption.IGNORE_CASE)
-    private val PLACEHOLDER_RE = Regex("""\$?\{\(?(\w+)\)?(?::[^\}]*)?\}""")
-
-    /** The link for a past programme on a channel with an archive (ported from the web app's m3uCatchupUrl). */
-    fun catchupUrl(c: Channel, start: Long, stop: Long, now: Long = System.currentTimeMillis()): String? {
-        if (!c.hasCatchup || start > now || start < now - c.catchupDays * 86_400_000L) return null
-        val utc = java.util.TimeZone.getTimeZone("UTC")
-        val xc = XC_RE.find(c.url)
-        if (xc != null && (c.catchupMode == "xc" || c.catchupMode == "xtream" || (c.catchupSource.isEmpty() && c.url.contains("/live/")))) {
-            val f = java.text.SimpleDateFormat("yyyy-MM-dd:HH-mm", java.util.Locale.ROOT).apply { timeZone = utc }
-            val (host, user, pass, id) = xc.destructured
-            return "$host/timeshift/$user/$pass/${Math.ceil((stop - start) / 60000.0).toInt().coerceAtLeast(1)}/${f.format(java.util.Date(start))}/$id.ts"
-        }
-        var source = c.catchupSource
-        if (source.isEmpty() || c.catchupMode == "shift" || c.catchupMode == "timeshift") source = (if (c.url.contains('?')) "&" else "?") + "utc={utc}&lutc={lutc}"
-        val s = start / 1000; val e = stop / 1000; val n = now / 1000
-        val cal = java.util.Calendar.getInstance(utc).apply { timeInMillis = start }
-        fun p2(v: Int) = v.toString().padStart(2, '0')
-        val values = mapOf("utc" to "$s", "start" to "$s", "timestamp" to "$s", "lutc" to "$n", "now" to "$n", "utcend" to "$e", "end" to "$e", "duration" to "${e - s}", "offset" to "${n - s}",
-            "Y" to "${cal.get(java.util.Calendar.YEAR)}", "m" to p2(cal.get(java.util.Calendar.MONTH) + 1), "d" to p2(cal.get(java.util.Calendar.DAY_OF_MONTH)),
-            "H" to p2(cal.get(java.util.Calendar.HOUR_OF_DAY)), "M" to p2(cal.get(java.util.Calendar.MINUTE)), "S" to p2(cal.get(java.util.Calendar.SECOND)))
-        val filled = PLACEHOLDER_RE.replace(source) { m -> values[m.groupValues[1]] ?: m.value }
-        return if (filled.startsWith("http", true)) filled else c.url + filled
-    }
+    /** The link for a past programme on a channel with an archive (see Parsing.kt). */
+    fun catchupUrl(c: Channel, start: Long, stop: Long, now: Long = System.currentTimeMillis()): String? =
+        com.wmorgan97.m3uplayer.tv.catchupUrl(c, start, stop, now)
 
     // ---------- TV guide ----------
 

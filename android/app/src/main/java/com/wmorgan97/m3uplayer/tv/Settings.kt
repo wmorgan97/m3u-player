@@ -63,7 +63,7 @@ fun SettingsScreen(act: TvActivity) {
     }
     pinAsk?.let { (title, then) ->
         val checking = title.startsWith("Enter")
-        PinDialog(title) { pin -> pinAsk = null; if (pin != null && (!checking || pin == Repo.pin)) then(pin) }
+        PinDialog(title) { pin -> pinAsk = null; if (pin != null && (!checking || Repo.checkPin(pin))) then(pin) }
     }
 }
 

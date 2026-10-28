@@ -221,15 +221,19 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     LaunchedEffect(focusedGroup) { val g = focusedGroup ?: return@LaunchedEffect; if (g != group) { delay(280); group = g } }
     var unlockTick by remember { mutableIntStateOf(0) }
     val locked = remember(group, Repo.version, unlockTick) { Repo.isLocked(group) }
-    val list = remember(group, l, favUrls, hiddenCh, Repo.version) {
-        val hidden = Repo.hiddenGroups; val lockedGs = if (Repo.pin.isEmpty()) emptySet() else Repo.lockedGroups - Repo.unlocked
-        when (group) { "All channels" -> l.channels.filter { it.group !in hidden && it.group !in lockedGs }; "★ Favourites" -> l.channels.filter { it.url in favUrls }; else -> byGroup[group] ?: emptyList() }
-            .filter { it.url !in hiddenCh }
+    // Built off the main thread ("All channels" can be ~19k channels): the old list stays up until the new one is ready.
+    val list by produceState(emptyList<Channel>(), group, l, favUrls, hiddenCh, Repo.version) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val hidden = Repo.hiddenGroups; val lockedGs = if (Repo.pin.isEmpty()) emptySet() else Repo.lockedGroups - Repo.unlocked
+            when (group) { "All channels" -> l.channels.filter { it.group !in hidden && it.group !in lockedGs }; "★ Favourites" -> l.channels.filter { it.url in favUrls }; else -> byGroup[group] ?: emptyList() }
+                .let { if (hiddenCh.isEmpty()) it else it.filter { c -> c.url !in hiddenCh } }
+        }
     }
     var minute by remember { mutableIntStateOf(0) }
     val guideTick = Repo.guideVersion + minute * 1000
     val listState = rememberLazyListState()
-    LaunchedEffect(group) { listState.scrollToItem(0); Repo.requestGuide(list.take(300)) }
+    var shownGroup by remember { mutableStateOf<String?>(null) }   // back to the top only when the list is a new group's
+    LaunchedEffect(list) { if (list.isEmpty()) return@LaunchedEffect; if (shownGroup != group) { shownGroup = group; listState.scrollToItem(0) }; Repo.requestGuide(list.take(300)) }
     LaunchedEffect(Unit) { while (true) { delay(60_000); minute++ } }
     val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
     LaunchedEffect(firstVisible / 100) { if (firstVisible > 200) Repo.requestGuide(list.drop(firstVisible).take(300)) }
@@ -240,7 +244,8 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     val groupFocus = remember { FocusRequester() }   // entering the group list lands on the group that's open
 
     Column(Modifier.fillMaxSize()) {
-        val pc = remember(l, Preview.channel) { Preview.current() }
+        LaunchedEffect(l) { Preview.current() }   // (falls back to the last channel watched; not during drawing)
+        val pc = Preview.channel
         if (Repo.preview && !locked) Row(Modifier.fillMaxWidth().height(186.dp).padding(bottom = 12.dp)) {
             // TiviMate-style top: the preview (last channel, or the one picked with OK) and what's on the highlighted channel.
             PreviewBox(pc, act.resumeTick, Modifier.padding(start = Tv.margin, top = Tv.topMargin - 8.dp).fillMaxHeight().aspectRatio(16 / 9f))
@@ -264,10 +269,16 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
             LazyColumn(Modifier.width(290.dp).fillMaxHeight().padding(start = Tv.margin - 12.dp).focusProperties { enter = { groupFocus } }.focusGroup(), contentPadding = PaddingValues(bottom = 24.dp)) {
                 items(groups, key = { it }) { g ->
                     val special = g == "All channels" || g == "★ Favourites"
-                    ListItem(selected = g == group, onClick = { focusedGroup = g; group = g }, onLongClick = { if (!special) groupMenu = g },
-                        modifier = Modifier.let { if (g == group) it.focusRequester(groupFocus) else it }.holdOk { if (!special) groupMenu = g }.onFocusChanged { if (it.isFocused) focusedGroup = g },
-                        headlineContent = { Text((if (Repo.pin.isNotEmpty() && g in Repo.lockedGroups) "🔒 " else if (g in Repo.pinnedGroups) "↑ " else "") + prettyGroup(g), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal) },
-                        trailingContent = { Text("${when (g) { "All channels" -> l.channels.size; "★ Favourites" -> favUrls.size; else -> byGroup[g]?.size ?: 0 }}", fontSize = Tv.label, color = Tv.muted) })
+                    // Slim group row (38dp): the open group keeps a quiet tint, the highlight is white.
+                    Surface(onClick = { focusedGroup = g; group = g }, onLongClick = { if (!special) groupMenu = g },
+                        modifier = Modifier.fillMaxWidth().height(38.dp).padding(vertical = 1.dp).let { if (g == group) it.focusRequester(groupFocus) else it }.holdOk { if (!special) groupMenu = g }.onFocusChanged { if (it.isFocused) focusedGroup = g },
+                        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)), scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+                        colors = ClickableSurfaceDefaults.colors(containerColor = if (g == group) Tv.surface2 else Color.Transparent, focusedContainerColor = Tv.text, contentColor = Tv.text, focusedContentColor = Tv.bg)) {
+                        Row(Modifier.fillMaxSize().padding(horizontal = 12.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
+                            Text((if (Repo.pin.isNotEmpty() && g in Repo.lockedGroups) "🔒 " else if (g in Repo.pinnedGroups) "↑ " else "") + prettyGroup(g), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal, modifier = Modifier.weight(1f))
+                            Text("${when (g) { "All channels" -> l.channels.size; "★ Favourites" -> favUrls.size; else -> byGroup[g]?.size ?: 0 }}", fontSize = Tv.label, color = LocalContentColor.current.copy(alpha = .6f))
+                        }
+                    }
                 }
             }
             if (locked) Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
@@ -306,7 +317,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     }
     pinFor?.let { (title, then) ->
         val choosing = Repo.pin.isEmpty()
-        PinDialog(title) { pin -> pinFor = null; if (pin != null && (choosing || pin == Repo.pin)) then(pin) }
+        PinDialog(title) { pin -> pinFor = null; if (pin != null && (choosing || Repo.checkPin(pin))) then(pin) }
     }
 }
 
@@ -324,23 +335,28 @@ private fun LiveSkeleton() {
 
 @Composable
 fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onFocus: () -> Unit = {}, inPreview: Boolean = false, onClick: () -> Unit) {
-    val (now, next) = remember(tick, c) { Repo.nowNext(c) }
-    ListItem(selected = false, onClick = onClick, onLongClick = onLong, modifier = Modifier.holdOk(onLong).onFocusChanged { if (it.isFocused) onFocus() },
-        leadingContent = { LogoTile(c, Modifier.size(width = 68.dp, height = 40.dp)) },
-        headlineContent = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (inPreview) "▶" else "${c.num}", fontSize = Tv.caption, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(44.dp))
-                Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.body, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f, fill = false))
-                if (fav) { Spacer(Modifier.width(8.dp)); Text("★", fontSize = Tv.label, color = Tv.star) }
+    // Slim, TiviMate-dense row (40dp): number, logo, name with what's on under it and a hairline progress bar.
+    val (now, _) = remember(tick, c) { Repo.nowNext(c) }
+    Surface(onClick = onClick, onLongClick = onLong, modifier = Modifier.fillMaxWidth().height(40.dp).padding(vertical = 1.dp).holdOk(onLong).onFocusChanged { if (it.isFocused) onFocus() },
+        shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)), scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+        colors = ClickableSurfaceDefaults.colors(containerColor = Color.Transparent, focusedContainerColor = Tv.text, contentColor = Tv.text, focusedContentColor = Tv.bg)) {
+        Row(Modifier.fillMaxSize().padding(horizontal = 10.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
+            Text(if (inPreview) "▶" else "${c.num}", fontSize = Tv.label, color = if (inPreview) Tv.accent else LocalContentColor.current.copy(alpha = .6f), modifier = Modifier.width(40.dp), maxLines = 1)
+            LogoTile(c, Modifier.size(width = 40.dp, height = 24.dp))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 14.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f, fill = false))
+                    if (fav) { Spacer(Modifier.width(6.dp)); Text("★", fontSize = Tv.label, color = Tv.star) }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(now?.title ?: "No programme information", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 11.5.sp, lineHeight = 13.sp, color = LocalContentColor.current.copy(alpha = .7f), modifier = Modifier.weight(1f))
+                    // progress bars line up in one column at the row's end
+                    Box(Modifier.padding(start = 12.dp).width(64.dp)) { if (now != null) ProgressLine(((System.currentTimeMillis() - now.start).toFloat() / (now.end - now.start)), Modifier.fillMaxWidth(), 2.dp) }
+                }
             }
-        },
-        supportingContent = {
-            Column(Modifier.padding(start = 44.dp)) {
-                Text(if (now != null) "${now.title}   ${hhmm(now.start)}–${hhmm(now.end)}" else "No programme information", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.caption)
-                if (now != null) ProgressLine(((System.currentTimeMillis() - now.start).toFloat() / (now.end - now.start)), Modifier.padding(top = 5.dp).width(220.dp), 3.dp)
-            }
-        },
-        trailingContent = { if (next != null && !Repo.preview) Text("Next  ${next.title}", fontSize = Tv.label, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 240.dp)) })
+        }
+    }
 }
 
 // ---------- Movies / Series ----------
@@ -514,48 +530,103 @@ private fun Seasons(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>) {
 
 // ---------- Search ----------
 
+/** One search for everything: live channels (name, number, group), what's on TV now and later from the loaded guide,
+ *  films and series. Channels and programmes come from in-memory indexes (SearchIndex.kt), so they appear as you type;
+ *  films and series follow from the server. */
 @Composable
 fun SearchScreen(act: TvActivity) {
     var q by rememberSaveable { mutableStateOf("") }
-    var results by remember { mutableStateOf<Triple<List<Channel>, List<Vod>, List<Vod>>?>(null) }
-    var busy by remember { mutableStateOf(false) }
     val field = remember { FocusRequester() }
     var fieldFocused by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(100); runCatching { field.requestFocus() } }
-    LaunchedEffect(q) {
-        val t = q.trim()
-        if (t.length < 2) { results = null; return@LaunchedEffect }
-        delay(350); busy = true
-        val chans = (Repo.live ?: runCatching { Repo.liveChannels() }.getOrNull())?.channels?.filter { it.name.contains(t, true) }?.take(40) ?: emptyList()
-        val (m, s) = Repo.search(t)
-        results = Triple(chans, m, s); busy = false
+    val live by produceState(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: value }
+    val chanIndex by produceState<ChannelIndex?>(null, live) { value = live?.let { ChannelIndex.forLive(it) } }
+    val guideTick = Repo.guideVersion
+    val query = q.trim().replace(Regex("\\s+"), " ")
+    var debounced by remember { mutableStateOf(query) }
+    LaunchedEffect(query) { if (query.isEmpty()) debounced = "" else { delay(250); debounced = query } }
+
+    // Channels and programmes: local, so they follow every pause in typing.
+    var chans by remember { mutableStateOf<List<Channel>>(emptyList()) }
+    var progs by remember { mutableStateOf<List<ProgrammeHit>>(emptyList()) }
+    LaunchedEffect(debounced, chanIndex) {
+        val ix = chanIndex
+        chans = if (debounced.isEmpty() || ix == null) emptyList() else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { ix.search(debounced, 40) }
+        if (chans.isNotEmpty()) Repo.requestGuide(chans)   // what's on for the channels found (3-hourly at most per channel)
     }
+    LaunchedEffect(debounced, live, guideTick) {
+        val l = live
+        progs = if (debounced.length < 2 || l == null) emptyList() else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { ProgrammeIndex.forGuide(l, guideTick).search(debounced, 40) }
+    }
+    // Films and series: the server's search, two letters or more.
+    var vods by remember { mutableStateOf<Pair<List<Vod>, List<Vod>>?>(null) }
+    var vodBusy by remember { mutableStateOf(false) }
+    LaunchedEffect(debounced) {
+        if (debounced.length < 2) { vods = null; vodBusy = false; return@LaunchedEffect }
+        vodBusy = true
+        try { vods = runCatching { Repo.search(debounced) }.getOrNull()?.let { (m, s) -> m.take(40) to s.take(40) } ?: (emptyList<Vod>() to emptyList()) } finally { vodBusy = false }
+    }
+    val recent = remember(act.refresh, Repo.version, live) { Repo.recentChannels().map { liveFromSync(it) }.filter { it.url.isNotEmpty() } }
+    LaunchedEffect(recent) { if (recent.isNotEmpty()) Repo.requestGuide(recent) }
+
     var chanMenu by remember { mutableStateOf<Channel?>(null) }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = Tv.topMargin, bottom = 56.dp)) {
+    val settled = debounced == query
+    LazyColumn(Modifier.fillMaxSize(), state = rememberPageState(), contentPadding = PaddingValues(top = Tv.topMargin, bottom = 56.dp)) {
         item {
             Row(Modifier.padding(horizontal = Tv.margin).fillMaxWidth(.66f).background(if (fieldFocused) Tv.surface2 else Tv.surface, RoundedCornerShape(14.dp))
                 .border(2.dp, if (fieldFocused) Tv.focusRing else Color.Transparent, RoundedCornerShape(14.dp)).padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Search, null, tint = Tv.muted, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.width(12.dp))
                 Box(Modifier.weight(1f)) {
-                    if (q.isEmpty()) Text("Search channels, movies and series", color = Tv.muted, fontSize = Tv.body)
+                    if (q.isEmpty()) Text("Search channels, TV programmes, movies and series", color = Tv.muted, fontSize = Tv.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     BasicTextField(q, { q = it }, singleLine = true, textStyle = TextStyle(color = Tv.text, fontSize = Tv.body), cursorBrush = SolidColor(Tv.accent),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { }),
-                        modifier = Modifier.fillMaxWidth().focusRequester(field).onFocusChanged { fieldFocused = it.isFocused })
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { debounced = query }),
+                        modifier = Modifier.fillMaxWidth().focusRequester(field).onFocusChanged { fieldFocused = it.isFocused }.searchFieldKeys())
                 }
             }
         }
-        val r = results
-        if (r == null && q.trim().length < 2) item { Box(Modifier.fillMaxWidth().padding(top = 120.dp)) { EmptyState(Icons.Default.Search, "Find anything", "Channels, movies and series, all at once") } }
-        if (busy && r == null) { item { SkeletonTitle() }; item { SkeletonRow() } }
-        if (r != null) {
-            if (r.first.isEmpty() && r.second.isEmpty() && r.third.isEmpty()) item { Box(Modifier.fillMaxWidth().padding(top = 120.dp)) { EmptyState(Icons.Default.SearchOff, "Nothing matches \"${q.trim()}\"", "Try a shorter word") } }
-            if (r.first.isNotEmpty()) { item { RowTitle("Channels", count = r.first.size) }; item { ChannelRowCards(act, r.first, 0) { chanMenu = it } } }
-            if (r.second.isNotEmpty()) { item { RowTitle("Movies", count = r.second.size) }; item { CardRow(r.second, { it.id }) { v, _ -> PosterCard(v) { act.go(Screen.Details(v)) } } } }
-            if (r.third.isNotEmpty()) { item { RowTitle("Series", count = r.third.size) }; item { CardRow(r.third, { it.id }) { v, _ -> PosterCard(v) { act.go(Screen.Details(v)) } } } }
+        if (query.isEmpty()) {
+            if (recent.isNotEmpty()) { item(key = "recent-t") { RowTitle("Recent channels") }; item(key = "recent") { ChannelRowCards(act, recent, guideTick) { chanMenu = it } } }
+            else item { Box(Modifier.fillMaxWidth().padding(top = 120.dp)) { EmptyState(Icons.Default.Search, "Find anything", "Channels, what's on TV, movies and series, all at once") } }
+            return@LazyColumn
         }
+        val v = vods
+        if (chans.isNotEmpty()) { item(key = "ch-t") { RowTitle("Live channels", count = chans.size) }; item(key = "ch") { ChannelRowCards(act, chans, guideTick) { chanMenu = it } } }
+        if (progs.isNotEmpty()) {
+            item(key = "pg-t") { RowTitle("On TV now and later", extra = "from the TV guide", count = progs.size) }
+            item(key = "pg") { CardRow(progs, { "${it.channel.url}|${it.p.start}" }) { h, _ -> SearchProgrammeCard(act, h) { chanMenu = h.channel } } }
+        }
+        if (v != null && v.first.isNotEmpty()) { item(key = "mv-t") { RowTitle("Movies", count = v.first.size) }; item(key = "mv") { CardRow(v.first, { it.id }) { m, _ -> PosterCard(m) { act.go(Screen.Details(m)) } } } }
+        if (v != null && v.second.isNotEmpty()) { item(key = "sr-t") { RowTitle("Series", count = v.second.size) }; item(key = "sr") { CardRow(v.second, { it.id }) { s, _ -> PosterCard(s) { act.go(Screen.Details(s)) } } } }
+        if (vodBusy || !settled) { item(key = "sk-t") { SkeletonTitle() }; item(key = "sk") { SkeletonRow() } }
+        else if (chans.isEmpty() && progs.isEmpty() && (v == null || (v.first.isEmpty() && v.second.isEmpty())))
+            item { Box(Modifier.fillMaxWidth().padding(top = 120.dp)) { EmptyState(Icons.Default.SearchOff, "Nothing matches \"$query\"", "Try a shorter word, a channel number or a programme name") } }
     }
     chanMenu?.let { c -> ChannelOptions(act, c) { chanMenu = null } }
+}
+
+/** A programme from the guide: the channel's logo, the title, and when it's on. OK on one that's on now plays the
+ *  channel; one later shows its time (hold OK for the channel's options). */
+@Composable
+private fun SearchProgrammeCard(act: TvActivity, h: ProgrammeHit, onLong: () -> Unit) {
+    val c = h.channel; val p = h.p
+    val now = System.currentTimeMillis()
+    val onAir = h.onAir(now)
+    val day = if (!onAir && java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.UK).let { it.format(java.util.Date(p.start)) != it.format(java.util.Date(now)) }) "Tomorrow " else ""
+    val sub = (if (onAir) "Now · until ${hhmm(p.end)}" else "$day${hhmm(p.start)}–${hhmm(p.end)}") + " · " + c.name
+    Column(Modifier.width(Tv.channel)) {
+        FocusCard(Modifier.width(Tv.channel).aspectRatio(16f / 9f), label = "${p.title}, $sub", onLongClick = onLong, onClick = { if (onAir) act.playLive(listOf(c), 0) }) {
+            Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
+                if (c.logo.isBlank()) Text(initials(c.name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
+                else Picture(Repo.img(c.logo, 200), Modifier.fillMaxSize().padding(16.dp).background(Color.Transparent), ContentScale.Fit) {
+                    Text(initials(c.name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
+                }
+                Box(Modifier.align(Alignment.TopStart).padding(6.dp)) { Tag(if (onAir) "LIVE" else "$day${hhmm(p.start)}".trim(), bg = if (onAir) Tv.accentDeep else Color(0xB3000000), color = Tv.text, size = 11.sp) }
+                if (onAir) ProgressLine((now - p.start).toFloat() / (p.end - p.start), Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
+            }
+        }
+        Caption(p.title, sub, Tv.channel)
+    }
 }
 
 // ---------- options (hold OK) ----------

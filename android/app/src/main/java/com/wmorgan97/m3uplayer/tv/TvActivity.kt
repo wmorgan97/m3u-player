@@ -20,6 +20,7 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,6 +57,7 @@ class TvActivity : ComponentActivity() {
     private var focusTick by mutableIntStateOf(0)       // bumped to pull the highlight back into the page
     private var zap by mutableStateOf("")               // digits typed on the remote
     private var due by mutableStateOf<Reminder?>(null)
+    private var pinGate by mutableStateOf<(() -> Unit)?>(null)   // a locked channel waiting for its PIN
     var resumeTick by mutableIntStateOf(0)                // bumped on coming back (from the player): the preview starts again   // a reminder that just came up (shown over the app)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -133,14 +135,16 @@ class TvActivity : ComponentActivity() {
             if (back()) { drawer.setValue(DrawerValue.Closed); focusTick++ } else drawer.setValue(DrawerValue.Open)
         }
         val section = stack.firstOrNull() ?: Screen.Home
+        var railPx by remember { mutableIntStateOf(0) }   // the closed menu's width: the page starts after it (the open menu lies over the page)
         val contentFocus = remember { FocusRequester() }
         var contentHasFocus by remember { mutableStateOf(false) }
         val saveable = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
-        NavigationDrawer(
+        ModalNavigationDrawer(scrimBrush = androidx.compose.ui.graphics.SolidColor(androidx.compose.ui.graphics.Color(0x99000000)),   // over the page (TiviMate), so opening it never re-lays the page out
             drawerState = drawer,
             drawerContent = {
                 val current = remember { FocusRequester() }   // moving into the menu lands on the section you're in
-                Column(Modifier.fillMaxHeight().background(Tv.rail).padding(horizontal = 12.dp, vertical = 24.dp).focusProperties { enter = { current } }.focusGroup(),
+                Column(Modifier.fillMaxHeight().background(Tv.rail).onSizeChanged { if (drawer.currentValue == DrawerValue.Closed && it.width > 0) railPx = it.width }
+                    .padding(horizontal = 12.dp, vertical = 24.dp).focusProperties { enter = { current } }.focusGroup(),
                     verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     val item: @Composable (String, ImageVector, Boolean, () -> Unit) -> Unit = { label, icon, selected, onClick ->
                         NavigationDrawerItem(selected = selected, onClick = { drawer.setValue(DrawerValue.Closed); onClick(); if (selected) focusTick++ }, leadingContent = { Icon(icon, null) },
@@ -157,7 +161,7 @@ class TvActivity : ComponentActivity() {
                 }
             },
         ) {
-            Box(Modifier.fillMaxSize().background(Tv.bg).focusRequester(contentFocus).onFocusChanged { contentHasFocus = it.hasFocus }) {
+            Box(Modifier.fillMaxSize().background(Tv.bg).padding(start = with(androidx.compose.ui.platform.LocalDensity.current) { railPx.toDp() }).focusRequester(contentFocus).onFocusChanged { contentHasFocus = it.hasFocus }) {
                 // Each page starts with the remote on its content (not the menu): retried while its rows load in.
                 val fromBack = focusTick > 0
                 LaunchedEffect(screen, focusTick) {
@@ -186,6 +190,7 @@ class TvActivity : ComponentActivity() {
                     if (!Repo.online) { Text("Offline · showing saved data", fontSize = Tv.label, color = Tv.muted); Spacer(Modifier.width(14.dp)) }
                     Clock()
                 }
+                pinGate?.let { go -> PinDialog("Enter PIN to watch this channel") { pin -> pinGate = null; if (pin != null && Repo.checkPin(pin)) go() } }
                 due?.let { r ->
                     Options("Starting now on ${r.channel}: ${r.title}", listOf("Watch now" to { due = null; watchReminder(r) })) { due = null }
                 }
@@ -208,6 +213,8 @@ class TvActivity : ComponentActivity() {
 
     /** Live TV: plays one of a list of channels, preferring the 4K copy when that setting is on. */
     fun playLive(chans: List<Channel>, index: Int) {
+        // Parental lock: every way into a channel (favourites, home rows, search, number zap, guide) comes through here.
+        chans.getOrNull(index)?.let { c -> if (Repo.isChannelLocked(c)) { pinGate = { Repo.unlocked += c.group; playLive(chans, index) }; return } }
         var list = chans; var i = index
         if (Repo.fourKFirst) {
             val c = chans[index]

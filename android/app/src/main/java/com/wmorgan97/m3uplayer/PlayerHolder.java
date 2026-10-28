@@ -26,6 +26,7 @@ public final class PlayerHolder {
     }
 
     static synchronized void giveBack(ExoPlayer p) {
+        if (p == null || p == spare) return;   // handed back twice: it's already the spare (or gone), don't release it again
         try { p.stop(); p.clearMediaItems(); } catch (Exception ignored) {}
         if (spare == null) spare = p; else p.release();
     }

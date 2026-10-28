@@ -72,15 +72,18 @@ fun PreviewBox(channel: Channel?, resumeTick: Int, modifier: Modifier = Modifier
     if (!Repo.preview) return
     val ctx = LocalContext.current
     var playing by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
     var view by remember { mutableStateOf<PlayerView?>(null) }
     LaunchedEffect(channel?.url, resumeTick) {
-        playing = false
+        playing = false; failed = false
         if (channel == null) { Preview.stop(); return@LaunchedEffect }
         delay(150)
         Preview.play(ctx, channel)
         val p = Preview.player(ctx)
         view?.player = p
-        while (true) { if (p.playbackState == Player.STATE_READY && p.videoSize.width > 0) { playing = true; break }; delay(100) }   // the name card stays until there's a picture
+        // The name card stays until there's a picture; after 15 s (or an error) the preview gives up and closes the stream.
+        repeat(150) { if (p.playbackState == Player.STATE_READY && p.videoSize.width > 0) { playing = true; return@LaunchedEffect }; if (p.playerError != null) { failed = true; Preview.stop(); return@LaunchedEffect }; delay(100) }
+        failed = true; Preview.stop()
     }
     DisposableEffect(Unit) { onDispose { Preview.stop() } }
     Box(modifier.clip(RoundedCornerShape(10.dp)).background(Tv.surface)) {
@@ -93,7 +96,7 @@ fun PreviewBox(channel: Channel?, resumeTick: Int, modifier: Modifier = Modifier
             }.also { view = it }
         }, modifier = Modifier.fillMaxSize(), onRelease = { it.player = null })
         if (!playing) Box(Modifier.fillMaxSize().background(Tv.surface), contentAlignment = Alignment.Center) {
-            Text(if (channel == null) "" else channel.name, fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Medium)
+            Text(if (channel == null) "Press OK on a channel to preview it" else if (failed) "${channel.name}\nNo picture" else channel.name, fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Medium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         }
     }
 }

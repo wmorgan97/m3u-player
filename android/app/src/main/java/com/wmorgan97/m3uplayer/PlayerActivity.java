@@ -66,8 +66,28 @@ public class PlayerActivity extends AppCompatActivity {
     private PlayerView playerView;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private JSObject item = new JSObject();
-    private boolean live, finished, retried;
+    private boolean live, finished, stopped, resumePending;
     private int ticks;
+
+    // Playback state, tracked here rather than read off ExoPlayer: ExoPlayer can't tell "connecting to a new channel"
+    // from "rebuffering the one you're watching", and the UI treats them differently.
+    private static final int S_IDLE = 0, S_PREPARING = 1, S_BUFFERING = 2, S_PLAYING = 3, S_FAILED = 4;
+    private int state = S_IDLE;
+    private boolean frameShown;        // the current attempt has put a picture on screen
+    private long playingSince;         // when it last reached "playing" (a long healthy run resets the retry budget)
+    private int videoW, videoH;        // held back until the first frame, so the HD badge never shows for a channel that isn't on yet
+    // Every load() takes a new token; anything posted for an older one (retries, watchdog, a coalesced start) does nothing.
+    private int token;
+    private int attempts;              // reconnects used on this load (max 3: 1s, 2s, 4s)
+    private long lastLoadReq;
+    private static final int MAX_ATTEMPTS = 3;
+    private static final long SPINNER_DELAY_MS = 400, STALL_MS = 12_000, ZAP_BURST_MS = 500, ZAP_SETTLE_MS = 200;
+    private final Object RETRY = new Object(), STALL = new Object();   // Handler tokens, so each kind can be cancelled as a group
+    private final Runnable spinOn = () -> this.spinner.setVisibility(View.VISIBLE);
+    private final Runnable startRun = () -> begin(token);
+    private View errorPanel;
+    private TextView errorText;
+    private Button retryBtn, lastBtn;
 
     private View overlay, nextPanel, infoBar;
     private TextView infoNum, infoName, infoNow, infoTime, infoNext, infoClock;
@@ -76,7 +96,7 @@ public class PlayerActivity extends AppCompatActivity {
     private final Runnable infoOff = () -> infoBar.setVisibility(View.GONE);
     private android.widget.ListView channelList;   // live TV: TiviMate-style channel panel on OK
     private TextView clockLabel;
-    private TextView title, subtitle, badge, liveTag, elapsed, total, hud, status, nextCount, nextName;
+    private TextView title, subtitle, badge, liveTag, elapsed, total, hud, nextCount, nextName;
     private SeekBar seek;
     private ProgressBar spinner;
     private ImageButton playBtn, prevBtn, nextBtn, backBtn, fwdBtn, audioBtn, subsBtn, aspectBtn, infoBtn, listBtn, sleepBtn;
@@ -92,7 +112,7 @@ public class PlayerActivity extends AppCompatActivity {
     private int countdown;
 
     private final Runnable hideRun = this::hideOverlay;
-    private final Runnable tick = new Runnable() { public void run() { onTick(); ui.postDelayed(this, 1000); } };
+    private final Runnable tick = new Runnable() { public void run() { if (player == null) return; onTick(); ui.postDelayed(this, 1000); } };
     private final Runnable commitSeek = () -> { if (pendingSeek >= 0 && player != null) { player.seekTo(pendingSeek); pendingSeek = -1; } };
     private final Runnable hudOff = () -> hud.setVisibility(View.GONE);
     private String zapDigits = "";
@@ -114,22 +134,28 @@ public class PlayerActivity extends AppCompatActivity {
         buildUi();
         player = PlayerHolder.take(this);   // built ahead of time while you browse, so the player screen opens with it ready
         playerView.setPlayer(player);
-        // Captions off until asked for (broadcast captions were coming on by themselves); the subtitles button turns them on.
-        player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build());
         player.addListener(listener = new Player.Listener() {
             @Override public void onRenderedFirstFrame() {
                 if (loadAt > 0) { android.util.Log.i("M3U", "picture in " + (System.currentTimeMillis() - loadAt) + "ms"); loadAt = 0; }
+                frameShown = true;
+                if (state == S_FAILED) return;
+                setState(player.getPlaybackState() == Player.STATE_READY ? S_PLAYING : S_BUFFERING);
             }
-            @Override public void onPlaybackStateChanged(int state) {
-                spinner.setVisibility(state == Player.STATE_BUFFERING ? View.VISIBLE : View.GONE);
-                if (state == Player.STATE_READY) { status.setVisibility(View.GONE); retried = false; }
-                if (state == Player.STATE_ENDED) onEnded();
+            @Override public void onPlaybackStateChanged(int s) {
+                if (state == S_FAILED) return;
+                if (s == Player.STATE_BUFFERING) {
+                    setState(frameShown ? S_BUFFERING : S_PREPARING);
+                    armStall();
+                } else ui.removeCallbacksAndMessages(STALL);
+                // Playing means a picture: READY alone can come a beat before the first frame. Radio has no frame to wait for.
+                if (s == Player.STATE_READY && (frameShown || !player.getCurrentTracks().isTypeSelected(C.TRACK_TYPE_VIDEO))) setState(S_PLAYING);
+                if (s == Player.STATE_ENDED) { setState(S_IDLE); onEnded(); }
             }
             @Override public void onIsPlayingChanged(boolean playing) {
                 playBtn.setImageResource(playing ? androidx.media3.ui.R.drawable.exo_icon_pause : androidx.media3.ui.R.drawable.exo_icon_play);
                 if (!playing && overlay.getVisibility() == View.VISIBLE) ui.removeCallbacks(hideRun);
             }
-            @Override public void onVideoSizeChanged(VideoSize size) { updateBadge(size.width, size.height); }
+            @Override public void onVideoSizeChanged(VideoSize size) { videoW = size.width; videoH = size.height; if (state == S_PLAYING) updateBadge(videoW, videoH); }
             @Override public void onPlayerError(PlaybackException e) { onError(e); }
         });
         load(NativePlayerPlugin.item(getIntent().getStringExtra("item")));
@@ -139,15 +165,26 @@ public class PlayerActivity extends AppCompatActivity {
     // ---------- stream ----------
 
     public void load(JSObject next) {
+        if (player == null) return;   // destroyed
         loadAt = System.currentTimeMillis();
         item = next;
         live = next.optBoolean("live", true);
         finished = false;
-        retried = false;
+        attempts = 0;
+        playingSince = 0;
+        resumePending = false;
+        token++;
+        // Whatever was pending belongs to the channel we're leaving.
+        ui.removeCallbacks(startRun);
+        ui.removeCallbacksAndMessages(RETRY);
+        ui.removeCallbacksAndMessages(STALL);
         ui.removeCallbacks(countdownRun);
         nextPanel.setVisibility(View.GONE);
         if (channelList != null) channelList.setVisibility(View.GONE);
-        status.setVisibility(View.GONE);
+        errorPanel.setVisibility(View.GONE);
+        frameShown = false;
+        videoW = videoH = 0;
+        setState(S_PREPARING);
         title.setText(next.optString("title", ""));
         String sub = next.optString("subtitle", "");
         subtitle.setText(sub);
@@ -159,6 +196,23 @@ public class PlayerActivity extends AppCompatActivity {
         nextBtn.setAlpha(next.optBoolean("hasNext") ? 1f : .35f);
         listBtn.setVisibility(list().length() > 1 ? View.VISIBLE : View.GONE);
 
+        // Holding up/down fires a load every ~150ms and the provider allows one connection: the first press starts at once,
+        // but loads that follow quickly drop the stream and wait for the key to settle, so only the last channel connects.
+        long now = android.os.SystemClock.uptimeMillis();
+        boolean burst = now - lastLoadReq < ZAP_BURST_MS;
+        lastLoadReq = now;
+        if (burst) { player.stop(); ui.postDelayed(startRun, ZAP_SETTLE_MS); } else begin(token);
+        if (live) { hideOverlay(); showBanner(); } else { showOverlay(); }   // live: the channel banner, as on a TV; films: the controls
+        justShown = live;
+    }
+
+    /** Opens the stream for load number t, unless a newer load has replaced it. */
+    private void begin(int t) {
+        if (t != token || player == null) return;
+        if (stopped) { resumePending = true; return; }   // in the background: connect when the screen comes back
+        frameShown = false;
+        applyTrackPrefs();
+        JSObject next = item;
         Map<String, String> headers = new HashMap<>();
         JSONObject h = next.optJSONObject("headers");
         String agent = "Mozilla/5.0 (Linux; Android TV) AppleWebKit/537.36";
@@ -177,8 +231,51 @@ public class PlayerActivity extends AppCompatActivity {
         if (!live && start > 1) player.seekTo((long) (start * 1000));
         player.prepare();
         player.play();
-        if (live) { hideOverlay(); showBanner(); } else { showOverlay(); }   // live: the channel banner, as on a TV; films: the controls
-        justShown = live;
+    }
+
+    /** UI follows the state: the spinner only once a wait passes 400ms (fast zaps never flash it); the badge only once there's a picture. */
+    private void setState(int s) {
+        state = s;
+        ui.removeCallbacks(spinOn);
+        if (s == S_PREPARING || s == S_BUFFERING) { if (spinner.getVisibility() != View.VISIBLE) ui.postDelayed(spinOn, SPINNER_DELAY_MS); }
+        else spinner.setVisibility(View.GONE);
+        if (s == S_PLAYING) {
+            if (playingSince == 0) playingSince = android.os.SystemClock.uptimeMillis();
+            updateBadge(videoW, videoH);
+        } else if (s != S_BUFFERING) playingSince = 0;
+    }
+
+    /** Live: a stream that sits buffering for 12s has stalled without an error; reconnect as if it had failed. */
+    private void armStall() {
+        ui.removeCallbacksAndMessages(STALL);
+        if (!live) return;
+        final int t = token;
+        ui.postAtTime(() -> {
+            if (t != token || player == null || stopped || !player.getPlayWhenReady() || player.getPlaybackState() != Player.STATE_BUFFERING) return;
+            android.util.Log.w("M3U", "live stream stalled for " + STALL_MS + "ms");
+            player.stop();   // drop the dead connection now, so the retry isn't refused for using a second one
+            recover(t, true, "The stream stopped sending video.", null);
+        }, STALL, android.os.SystemClock.uptimeMillis() + STALL_MS);
+    }
+
+    /** Remembered audio/subtitle languages, applied to every new stream. Subtitles stay off unless you turned them on. */
+    private void applyTrackPrefs() {
+        android.content.SharedPreferences p = getSharedPreferences("player", MODE_PRIVATE);
+        boolean textOn = p.getBoolean("textOn", false);
+        player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_AUDIO).clearOverridesOfType(C.TRACK_TYPE_TEXT)   // picks from the last stream don't apply here
+            .setPreferredAudioLanguage(p.getString("audioLang", null))
+            .setPreferredTextLanguage(p.getString("textLang", null))
+            .setSelectUndeterminedTextLanguage(textOn)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !textOn)
+            .build());
+    }
+
+    private void savePref(String lang, String key, Boolean textOn) {
+        android.content.SharedPreferences.Editor ed = getSharedPreferences("player", MODE_PRIVATE).edit();
+        if (key != null && lang != null && !lang.isEmpty() && !lang.equals("und")) ed.putString(key, lang);
+        if (textOn != null) ed.putBoolean("textOn", textOn);
+        ed.apply();
     }
 
     /** The channel banner (TiviMate-style): number, name, what's on with a progress bar, what's next; shown on every zap. */
@@ -201,17 +298,67 @@ public class PlayerActivity extends AppCompatActivity {
     private JSArray list() { return NativePlayerPlugin.array(item.opt("list")); }
 
     private void onError(PlaybackException e) {
-        // A live stream that fell behind, or a one-off network drop: quietly reconnect once.
-        if (!retried && (e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW || (e.errorCode >= 2000 && e.errorCode < 3000))) {
-            retried = true;
-            ui.postDelayed(() -> { if (live) player.seekToDefaultPosition(); player.prepare(); player.play(); }, 1500);
+        android.util.Log.w("M3U", "playback error " + e.getErrorCodeName());   // the code name only: messages can carry the stream URL
+        // A live stream that fell behind, or a network drop: reconnect quietly, a few times.
+        boolean recoverable = e.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW || (e.errorCode >= 2000 && e.errorCode < 3000);
+        recover(token, recoverable, why(e), e.getErrorCodeName());
+    }
+
+    /** Up to 3 reconnects (1s, 2s, 4s) per load, then the error panel. A long good run in between earns the budget back. */
+    private void recover(int t, boolean recoverable, String message, String code) {
+        if (t != token || player == null) return;
+        ui.removeCallbacksAndMessages(STALL);
+        if (playingSince > 0 && android.os.SystemClock.uptimeMillis() - playingSince > 30_000) attempts = 0;
+        if (recoverable && attempts < MAX_ATTEMPTS) {
+            long delay = 1000L << attempts;
+            attempts++;
+            setState(S_PREPARING);
+            ui.postAtTime(() -> retry(t), RETRY, android.os.SystemClock.uptimeMillis() + delay);
             return;
         }
-        status.setText("This stream couldn't be played");
-        status.setVisibility(View.VISIBLE);
-        spinner.setVisibility(View.GONE);
-        showOverlay(true);
-        try { NativePlayerPlugin.emit(new JSONObject().put("type", "error").put("message", "This stream couldn't be played (" + e.getErrorCodeName() + ")")); } catch (Exception ignored) {}
+        fail(message, code);
+    }
+
+    private void retry(int t) {
+        if (t != token || player == null) return;
+        if (stopped) { resumePending = true; return; }
+        frameShown = false;
+        if (live) begin(t);   // a fresh connection at the live edge
+        else { player.prepare(); player.play(); }   // films: carry on from where it stopped
+    }
+
+    private void fail(String message, String code) {
+        setState(S_FAILED);
+        ui.removeCallbacksAndMessages(RETRY);
+        player.stop();   // let go of the provider's one connection
+        hideOverlay();
+        if (channelList != null) channelList.setVisibility(View.GONE);
+        errorText.setText(message);
+        String last = item.optString("last", "");
+        lastBtn.setVisibility(live && !last.isEmpty() ? View.VISIBLE : View.GONE);
+        errorPanel.setVisibility(View.VISIBLE);
+        retryBtn.requestFocus();
+        try { NativePlayerPlugin.emit(new JSONObject().put("type", "error").put("message", message + (code != null ? " (" + code + ")" : ""))); } catch (Exception ignored) {}
+    }
+
+    private void tryAgain() {
+        errorPanel.setVisibility(View.GONE);
+        lastLoadReq = 0;   // a deliberate retry, not a zap: start straight away
+        load(item);
+    }
+
+    /** Plain words for the panel. Never the exception's own message, which can include the stream URL and its login. */
+    private static String why(PlaybackException e) {
+        switch (e.errorCode) {
+            case PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED:
+            case PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT: return "Couldn't reach the server. Check the connection and try again.";
+            case PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS: return "The provider refused the stream. It may be in use on another device.";
+            case PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW: return "The stream fell behind and couldn't catch up.";
+            case PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED:
+            case PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED: return "The stream sent data the player couldn't read.";
+        }
+        if (e.errorCode >= 4000 && e.errorCode < 5000) return "This device can't play this stream's format.";
+        return "This stream couldn't be played.";
     }
 
     private void onEnded() {
@@ -267,7 +414,7 @@ public class PlayerActivity extends AppCompatActivity {
         }
         if (noticeAction != null && k == KeyEvent.KEYCODE_BACK && e.getAction() == KeyEvent.ACTION_DOWN) { noticeOff.run(); ui.removeCallbacks(noticeOff); return true; }
         if (e.getAction() == KeyEvent.ACTION_UP && live && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER)
-            && overlay.getVisibility() != View.VISIBLE && channelList.getVisibility() != View.VISIBLE && nextPanel.getVisibility() != View.VISIBLE) {
+            && errorPanel.getVisibility() != View.VISIBLE && overlay.getVisibility() != View.VISIBLE && channelList.getVisibility() != View.VISIBLE && nextPanel.getVisibility() != View.VISIBLE) {
             if (okHeld) { okHeld = false; return true; }
             if (list().length() > 1) openChannels(); else showOverlay();
             return true;
@@ -289,6 +436,15 @@ public class PlayerActivity extends AppCompatActivity {
             case KeyEvent.KEYCODE_CHANNEL_DOWN: case KeyEvent.KEYCODE_MEDIA_PREVIOUS: step(-1); return true;
             case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD: seekBy(30_000); return true;
             case KeyEvent.KEYCODE_MEDIA_REWIND: seekBy(-30_000); return true;
+        }
+        // Error panel: left/right/OK work its buttons, Back closes the player, up/down still change channel.
+        if (errorPanel.getVisibility() == View.VISIBLE) {
+            if (k == KeyEvent.KEYCODE_BACK) { finish(); return true; }
+            if (live && (k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN)) {
+                if (e.getRepeatCount() == 0 || e.getRepeatCount() % 3 == 0) step(k == KeyEvent.KEYCODE_DPAD_UP ? -1 : 1);
+                return true;
+            }
+            return super.dispatchKeyEvent(e);
         }
         if (nextPanel.getVisibility() == View.VISIBLE && k == KeyEvent.KEYCODE_BACK) { cancelNext(); return true; }
         if (channelList.getVisibility() == View.VISIBLE) {
@@ -345,6 +501,7 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     private void togglePlay() {
+        if (state == S_FAILED) { tryAgain(); return; }
         if (player.isPlaying()) { player.pause(); showOverlay(true); } else { player.play(); showOverlay(); }
     }
 
@@ -401,7 +558,10 @@ public class PlayerActivity extends AppCompatActivity {
         int checked = -1;
         if (type == C.TRACK_TYPE_TEXT) {
             names.add("Off");
-            picks.add(() -> player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()));
+            picks.add(() -> {
+                player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build());
+                savePref(null, null, false);
+            });
             if (player.getTrackSelectionParameters().disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)) checked = 0;
         }
         for (Tracks.Group g : player.getCurrentTracks().getGroups()) {
@@ -412,8 +572,12 @@ public class PlayerActivity extends AppCompatActivity {
                 if (g.isTrackSelected(i) && checked < 0 || g.isTrackSelected(i) && type != C.TRACK_TYPE_TEXT) checked = names.size();
                 names.add(trackName(f, type, names.size()));
                 final int index = i;
-                picks.add(() -> player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
-                    .setTrackTypeDisabled(type, false).setOverrideForType(new TrackSelectionOverride(g.getMediaTrackGroup(), index)).build()));
+                picks.add(() -> {
+                    player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+                        .setTrackTypeDisabled(type, false).setOverrideForType(new TrackSelectionOverride(g.getMediaTrackGroup(), index)).build());
+                    // Remember the language, so the next channel or episode starts on it too.
+                    if (type == C.TRACK_TYPE_TEXT) savePref(f.language, "textLang", true); else savePref(f.language, "audioLang", null);
+                });
             }
         }
         if (names.isEmpty() || (type == C.TRACK_TYPE_TEXT && names.size() == 1)) { showHud(type == C.TRACK_TYPE_TEXT ? "No subtitles in this stream" : "No other audio"); return; }
@@ -454,11 +618,21 @@ public class PlayerActivity extends AppCompatActivity {
         channelList.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, rows) {
             @Override public View getView(int pos, View convert, ViewGroup parent) {
                 TextView v = (TextView) super.getView(pos, convert, parent);
-                v.setTextColor(pos == cur ? 0xFF7FAAFF : Color.WHITE);   // the channel playing now, in blue
-                v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+                // Slim two-line rows (TiviMate-dense): the name, and what's on in smaller grey text under it.
+                String s = rows.get(pos); int nl = s.indexOf('\n');
+                android.text.SpannableString sp = new android.text.SpannableString(s);
+                if (nl > 0) {
+                    sp.setSpan(new android.text.style.RelativeSizeSpan(.8f), nl + 1, s.length(), 0);
+                    sp.setSpan(new android.text.style.ForegroundColorSpan(0x99FFFFFF), nl + 1, s.length(), 0);
+                }
+                v.setText(sp);
+                v.setTextColor(s.startsWith("▶") ? 0xFF7FAAFF : Color.WHITE);   // the channel playing now, in blue
+                v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
                 v.setMaxLines(2);
+                v.setLineSpacing(0, 1f);
                 v.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                v.setPadding(dp(18), dp(10), dp(18), dp(10));
+                v.setMinHeight(0); v.setMinimumHeight(0);
+                v.setPadding(dp(18), dp(5), dp(18), dp(5));
                 return v;
             }
         });
@@ -538,7 +712,7 @@ public class PlayerActivity extends AppCompatActivity {
     private void dialog(String heading, String[] rows, int checked, Pick pick) {
         new AlertDialog.Builder(this, R.style.TvDialog)
             .setTitle(heading)
-            .setSingleChoiceItems(rows, checked, (d, w) -> { d.dismiss(); pick.on(w); })
+            .setSingleChoiceItems(rows, checked, (d, w) -> { d.dismiss(); if (player != null) pick.on(w); })
             .setNegativeButton("Cancel", null).show();
     }
 
@@ -576,8 +750,17 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        stopped = false;
+        if (resumePending) { resumePending = false; begin(token); }   // a start or reconnect that was due while we were away
+    }
+
+    @Override
     protected void onStop() {
         super.onStop();
+        stopped = true;   // pending starts/reconnects wait for onStart instead of reopening the stream in the background
+        ui.removeCallbacksAndMessages(STALL);
         if (!isFinishing() && player != null) player.pause();   // Home button: don't keep a stream (and the provider's one connection) open
     }
 
@@ -593,13 +776,20 @@ public class PlayerActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
-        ui.removeCallbacksAndMessages(null);
+        ui.removeCallbacksAndMessages(null);   // every runnable posted on ui (spinner, retries, watchdog, zaps); each also checks player != null
         if (!finished && player != null) {
             finished = true;
             double d = player.getDuration() > 0 ? player.getDuration() / 1000.0 : 0;
             event("closed", Math.max(0, player.getCurrentPosition()) / 1000.0, d);
         }
-        if (player != null) { if (listener != null) player.removeListener(listener); playerView.setPlayer(null); PlayerHolder.giveBack(player); player = null; }
+        if (player != null) {
+            ExoPlayer p = player;
+            player = null;   // first, so nothing that runs from here on can reach a player that's been handed back
+            if (listener != null) p.removeListener(listener);
+            listener = null;
+            playerView.setPlayer(null);
+            PlayerHolder.giveBack(p);
+        }
         if (current == this) current = null;
         super.onDestroy();
     }
@@ -734,10 +924,41 @@ public class PlayerActivity extends AppCompatActivity {
         bottom.addView(buttons);
         ov.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
 
-        status = text(18, Color.WHITE, true);
-        status.setVisibility(View.GONE);
-        ov.addView(status, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
         root.addView(ov, new FrameLayout.LayoutParams(-1, -1));
+
+        // Error panel: what went wrong in plain words, Try again, and (live) Last channel. Back closes the player.
+        LinearLayout ep = new LinearLayout(this);
+        errorPanel = ep;
+        ep.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable epBg = new GradientDrawable(); epBg.setColor(0xF0181B22); epBg.setCornerRadius(dp(16));
+        ep.setBackground(epBg);
+        ep.setPadding(dp(26), dp(22), dp(26), dp(20));
+        TextView eh = text(20, Color.WHITE, true);
+        eh.setText("Can't play this");
+        errorText = text(16, 0xCCFFFFFF, false);
+        errorText.setSingleLine(false);
+        errorText.setMaxLines(3);
+        errorText.setPadding(0, dp(6), 0, 0);
+        ep.addView(eh);
+        ep.addView(errorText);
+        LinearLayout eb = new LinearLayout(this);
+        eb.setPadding(0, dp(16), 0, 0);
+        retryBtn = new Button(this);
+        retryBtn.setText("Try again");
+        retryBtn.setAllCaps(false);
+        retryBtn.setOnClickListener(v -> tryAgain());
+        lastBtn = new Button(this);
+        lastBtn.setText("Last channel");
+        lastBtn.setAllCaps(false);
+        lastBtn.setOnClickListener(v -> {
+            errorPanel.setVisibility(View.GONE);
+            try { NativePlayerPlugin.emit(new JSONObject().put("type", "last")); } catch (Exception ignored) {}
+        });
+        eb.addView(retryBtn);
+        eb.addView(lastBtn);
+        ep.addView(eb);
+        ep.setVisibility(View.GONE);
+        root.addView(ep, new FrameLayout.LayoutParams(dp(480), -2, Gravity.CENTER));
 
         hud = text(30, Color.WHITE, true);
         GradientDrawable hb = new GradientDrawable(); hb.setColor(0x99000000); hb.setCornerRadius(dp(14));
