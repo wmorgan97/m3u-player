@@ -38,8 +38,8 @@ import kotlinx.coroutines.launch
 // only the programmes inside the window are drawn, so a move redraws two rows instead of hundreds of cells.
 // OK: on now = watch; finished with catch-up = play it from the archive; anything else = details (remind me, etc.).
 
-private val ROW_H = 56.dp
-private val CHAN_W = 210.dp
+private val ROW_H = 40.dp   // TiviMate-dense: ~13 channels on screen
+private val CHAN_W = 180.dp
 private const val SPAN_MIN = 120
 private const val HALF_HOUR = 30 * 60_000L
 
@@ -141,8 +141,8 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
         val selP = remember(row, cursor, tick, chans) { at(progs(row), cursor) }
         LaunchedEffect(l) { Preview.current() }
         val pc = Preview.channel
-        Row(Modifier.fillMaxWidth().height(186.dp)) {
-        if (!locked && Repo.preview) PreviewBox(pc, act.resumeTick, Modifier.padding(start = Tv.margin, top = Tv.topMargin - 8.dp, bottom = 12.dp).fillMaxHeight().aspectRatio(16 / 9f))
+        Row(Modifier.fillMaxWidth().height(150.dp)) {
+        if (!locked && Repo.preview) PreviewBox(pc, act.resumeTick, Modifier.padding(start = Tv.margin, top = Tv.topMargin - 8.dp, bottom = 10.dp).fillMaxHeight().aspectRatio(16 / 9f))
         Column(Modifier.weight(1f).fillMaxHeight().padding(start = if (Repo.preview) 24.dp else Tv.margin, end = Tv.margin + 80.dp, top = Tv.topMargin).clearAndSetSemantics { }) {
             if (locked || selC == null) {
                 Text("TV Guide", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)
@@ -152,14 +152,23 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                 val bits = listOfNotNull(selC.name, selP?.let { "${dayLabel(it.start, now)}${hhmm(it.start)}–${hhmm(it.end)}" }, selP?.let { "${(it.end - it.start) / 60_000} min" },
                     selP?.let { p -> when { p.start <= now && p.end > now -> "On now"; p.end <= now && Repo.catchupUrl(selC, p.start, p.end) != null -> "Catch-up"; Repo.hasReminder(selC.url, p.start) -> "Reminder set"; else -> null } })
                 Text(bits.joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
-                Text(selP?.desc?.ifBlank { null } ?: if (selP == null) "No programme information" else "", fontSize = Tv.caption, color = Tv.muted, maxLines = 3, overflow = TextOverflow.Ellipsis, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
+                Text(selP?.desc?.ifBlank { null } ?: if (selP == null) "No programme information" else "", fontSize = Tv.caption, color = Tv.muted, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
             }
         }
         }
         LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(groups, key = { it }) { g -> FilterChip(selected = g == group, onClick = { group = g }) { Text((if (g in Repo.lockedGroups && Repo.pin.isNotEmpty()) "🔒 " else "") + prettyGroup(g), fontSize = Tv.caption, maxLines = 1) } }
+            // Slim group tabs (30dp): the open group in blue, the highlight white.
+            items(groups, key = { it }) { g ->
+                Surface(onClick = { group = g }, modifier = Modifier.height(30.dp), shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(15.dp)), scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
+                    colors = ClickableSurfaceDefaults.colors(containerColor = if (g == group) Tv.accent.copy(alpha = .16f) else Tv.surface, focusedContainerColor = Tv.text,
+                        contentColor = if (g == group) Tv.accent else Tv.text2, focusedContentColor = Tv.bg)) {
+                    Box(Modifier.fillMaxHeight().padding(horizontal = 14.dp).clearAndSetSemantics { }, contentAlignment = Alignment.Center) {
+                        Text((if (g in Repo.lockedGroups && Repo.pin.isNotEmpty()) "🔒 " else "") + prettyGroup(g), fontSize = 13.sp, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
+                    }
+                }
+            }
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(6.dp))
         if (locked) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -173,7 +182,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
             val perMin = gridW / SPAN_MIN.toFloat()
             Column(Modifier.fillMaxSize()) {
                 // Time header: four half-hour marks across the window.
-                Box(Modifier.fillMaxWidth().height(26.dp).padding(start = CHAN_W).clipToBounds()) {
+                Box(Modifier.fillMaxWidth().height(22.dp).padding(start = CHAN_W).clipToBounds()) {
                     for (k in 0 until SPAN_MIN / 30) {
                         val t = viewStart + k * HALF_HOUR
                         Text((if (k == 0) dayLabel(t, now) else "") + hhmm(t), Modifier.offset(x = perMin * (k * 30f)).padding(start = 6.dp).align(Alignment.CenterStart), fontSize = Tv.label, color = Tv.text2, fontWeight = FontWeight.Medium)
@@ -223,12 +232,12 @@ private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Lon
     val end = viewStart + span
     val shown = remember(all, viewStart) { all.filter { it.end > viewStart && it.start < end } }
     val sel = if (cursor >= 0) at(all, cursor) else null
-    Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = 4.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 6.dp).background(if (cursor >= 0) Tv.surface3 else if (inPreview) Tv.accent.copy(alpha = .12f) else Tv.surface, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = 2.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 6.dp).background(if (cursor >= 0) Tv.surface3 else if (inPreview) Tv.accent.copy(alpha = .12f) else Tv.surface, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (inPreview) "▶" else if (Repo.showNumbers) "${c.num}" else "", fontSize = 11.sp, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(if (Repo.showNumbers) 30.dp else 16.dp), maxLines = 1)
-            LogoTile(c, Modifier.size(width = 50.dp, height = 30.dp))
+            LogoTile(c, Modifier.size(width = 36.dp, height = 22.dp))
             Spacer(Modifier.width(8.dp))
-            Text(c.name + if (fav) " ★" else "", fontSize = Tv.caption, color = if (inPreview) Tv.accent else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            Text(c.name + if (fav) " ★" else "", fontSize = 13.sp, lineHeight = 15.sp, color = if (inPreview) Tv.accent else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
         }
         Box(Modifier.fillMaxSize().clipToBounds()) {
             if (shown.isEmpty()) Cell("No programme information", null, 0.dp, perMin * SPAN_MIN.toFloat(), on = selected && cursor >= 0, past = false, onAir = false, progress = null, catchup = false)
@@ -245,15 +254,15 @@ private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Lon
 
 @Composable
 private fun Cell(title: String, sub: String?, x: Dp, w: Dp, on: Boolean, past: Boolean, onAir: Boolean, progress: Float?, catchup: Boolean) {
-    val shape = RoundedCornerShape(6.dp)
+    val shape = RoundedCornerShape(4.dp)
     val bg = when { on -> Tv.text; onAir -> Tv.accentDeep.copy(alpha = .5f); past -> Tv.surface.copy(alpha = .55f); else -> Tv.surface2 }
     val fg = when { on -> Tv.bg; past -> Tv.muted; else -> Tv.text }
-    Box(Modifier.offset(x = x).width(w).fillMaxHeight().padding(end = 3.dp).background(bg, shape).let { if (on) it.border(2.dp, Tv.focusRing, shape) else it }) {
-        Column(Modifier.padding(start = 10.dp, end = 6.dp, top = 7.dp)) {
-            Text((if (catchup) "↺ " else "") + title, fontSize = Tv.caption, fontWeight = if (on || onAir) FontWeight.SemiBold else FontWeight.Normal, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (sub != null && w > 90.dp) Text(sub, fontSize = 11.sp, color = if (on) Tv.bg.copy(alpha = .7f) else Tv.muted, maxLines = 1)
+    Box(Modifier.offset(x = x).width(w).fillMaxHeight().padding(end = 2.dp).background(bg, shape)) {   // (white fill = the highlight; no extra border pass)
+        Column(Modifier.fillMaxHeight().padding(start = 8.dp, end = 4.dp), verticalArrangement = Arrangement.Center) {
+            Text((if (catchup) "↺ " else "") + title, fontSize = 13.sp, lineHeight = 15.sp, fontWeight = if (on || onAir) FontWeight.SemiBold else FontWeight.Normal, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (sub != null && w > 70.dp) Text(sub, fontSize = 10.5.sp, lineHeight = 12.sp, color = if (on) Tv.bg.copy(alpha = .7f) else Tv.muted, maxLines = 1)
         }
-        if (progress != null && !on) ProgressLine(progress, Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
+        if (progress != null && !on) ProgressLine(progress, Modifier.align(Alignment.BottomStart).fillMaxWidth(), 2.dp)
     }
 }
 

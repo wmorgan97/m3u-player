@@ -162,6 +162,18 @@ object Repo {
         // Only "couldn't reach it" counts as offline; a reply with an error code still means the server is there.
         return try { httpRaw(url, body, timeout).also { markOnline(true) } } catch (e: java.io.IOException) { markOnline(false); throw e }
     }
+    /** Like http(), but hands the reply to [read] as a stream (big replies, e.g. the guide, never become one string). */
+    private fun <T> httpStream(url: String, body: String?, timeout: Int, read: (java.io.Reader) -> T): T {
+        try {
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.connectTimeout = 15_000; c.readTimeout = timeout
+            c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android TV) M3UPlayer")
+            if (body != null) { c.requestMethod = "POST"; c.doOutput = true; c.setRequestProperty("Content-Type", "application/json"); c.outputStream.use { it.write(body.toByteArray()) } }
+            val code = c.responseCode
+            if (code !in 200..299) { c.errorStream?.close(); throw HttpError(code) }
+            return c.inputStream.bufferedReader().use { r -> read(r) }.also { if (url.startsWith(server)) markOnline(true) }
+        } catch (e: java.io.IOException) { if (url.startsWith(server) && e !is HttpError) markOnline(false); throw e }
+    }
     private fun httpRaw(url: String, body: String?, timeout: Int): String {
         val c = URL(url).openConnection() as HttpURLConnection
         c.connectTimeout = 15_000; c.readTimeout = timeout
@@ -330,6 +342,7 @@ object Repo {
     fun nowNext(c: Channel, t: Long = System.currentTimeMillis()): Pair<Programme?, Programme?> = nowNextIn(guideFor(c), t)
 
     private const val KEEP_PAST = 6 * 3600_000L
+    private const val KEEP_AHEAD = 30 * 3600_000L   // the guide keeps 6 h back to 30 h ahead in memory (the server sends ~100 h)
     private const val SAVED_GUIDE_MAX_AGE = 36 * 3600_000L
     private fun parseProgrammes(arr: JSONArray, cutoff: Long) =
         tidyProgrammes((0 until arr.length()).map { val a = arr.getJSONArray(it); Programme(a.optLong(0), a.optLong(1), a.optString(2), a.optString(3)) }, cutoff)
@@ -341,17 +354,23 @@ object Repo {
     // The guide is saved on the TV (6 hours back to 30 ahead), so it shows at once on the next start and while the server is away.
     private var guideSave: kotlinx.coroutines.Job? = null
     private fun saveGuideSoon() {
-        guideSave?.cancel()
+        if (guideSave?.isActive == true) return   // one save at a time, at most every 30 s (it used to rebuild the whole guide as one string every few seconds)
         guideSave = guideScope.launch {
-            kotlinx.coroutines.delay(3000)
+            kotlinx.coroutines.delay(30_000)
             val now = System.currentTimeMillis()
-            val p = JSONObject()
-            for ((k, l) in programmes) {
-                val keep = l.filter { it.end > now - 6 * 3600_000L && it.start < now + 30 * 3600_000L }
-                if (keep.isNotEmpty()) p.put(k, JSONArray(keep.map { JSONArray().put(it.start).put(it.end).put(it.title).put(it.desc.take(400)) }))
-            }
-            runCatching { File(app.filesDir, "guide.json").writeText(JSONObject().put("savedAt", now).put("programmes", p).put("names", JSONObject(HashMap(guideNames) as Map<*, *>)).toString()) }
-                .onFailure { warn("saving the guide failed", it) }
+            runCatching {
+                val tmp = File(app.filesDir, "guide.json.tmp")
+                android.util.JsonWriter(tmp.bufferedWriter()).use { w ->
+                    w.beginObject(); w.name("savedAt").value(now); w.name("programmes").beginObject()
+                    for ((k, l) in programmes.entries.toList()) {
+                        val keep = l.filter { it.end > now - KEEP_PAST && it.start < now + KEEP_AHEAD }
+                        if (keep.isEmpty()) continue
+                        w.name(k).beginArray(); for (it in keep) { w.beginArray(); w.value(it.start); w.value(it.end); w.value(it.title); w.value(it.desc.take(400)); w.endArray() }; w.endArray()
+                    }
+                    w.endObject(); w.name("names").beginObject(); for ((k, v) in guideNames.entries.toList()) w.name(k).value(v); w.endObject(); w.endObject()
+                }
+                tmp.renameTo(File(app.filesDir, "guide.json"))
+            }.onFailure { warn("saving the guide failed", it) }
         }
     }
     @Volatile private var guideLoaded = false
@@ -361,15 +380,11 @@ object Repo {
         guideScope.launch {
             runCatching {
                 val f = File(app.filesDir, "guide.json"); if (!f.exists()) return@runCatching
-                val d = JSONObject(f.readText())
                 val now = System.currentTimeMillis()
-                val savedAt = d.optLong("savedAt", f.lastModified())
-                if (now - savedAt > SAVED_GUIDE_MAX_AGE) return@runCatching   // too old to trust; wait for the server
+                if (now - f.lastModified() > SAVED_GUIDE_MAX_AGE) return@runCatching   // too old to trust; wait for the server
                 val cutoff = now - KEEP_PAST
                 pruneGuide(cutoff)
-                val p = d.optJSONObject("programmes") ?: JSONObject()
-                for (k in p.keys()) if (k.isNotEmpty() && !programmes.containsKey(k)) parseProgrammes(p.getJSONArray(k), cutoff).takeIf { it.isNotEmpty() }?.let { programmes.putIfAbsent(k, it) }
-                d.optJSONObject("names")?.let { n -> for (k in n.keys()) if (k.isNotEmpty()) guideNames.putIfAbsent(k, n.getString(k)) }
+                android.util.JsonReader(f.bufferedReader()).use { r -> readGuide(r, cutoff, now, keepExisting = true) }
                 guideState.intValue++
             }.onFailure { warn("reading the saved guide failed", it) }
         }
@@ -382,7 +397,44 @@ object Repo {
 
     /** Asks the server for the guide of these channels (the ones on screen), 3-hourly at most per channel. Runs in its
      *  own scope, so moving to another group never cancels a download half-way (which left channels marked as asked). */
-    fun requestGuide(channels: List<Channel>) { guideScope.launch { if (loadGuide(channels)) guideState.intValue++ } }
+    fun requestGuide(channels: List<Channel>) {
+        // One download at a time: requests made meanwhile are merged (newest first, capped), so holding Down through the
+        // groups no longer starts a download per group (that ran the Shield out of memory).
+        synchronized(guidePending) {
+            val merged = LinkedHashMap<String, Channel>(); for (c in channels + guidePending) merged.putIfAbsent(c.url, c)
+            guidePending.clear(); guidePending += merged.values.take(600)
+            if (guideWorker?.isActive == true) return
+            guideWorker = guideScope.launch {
+                while (true) {
+                    val next = synchronized(guidePending) { if (guidePending.isEmpty()) { guideWorker = null; null } else guidePending.toList().also { guidePending.clear() } } ?: break
+                    if (loadGuide(next)) guideState.intValue++
+                }
+            }
+        }
+    }
+    private val guidePending = ArrayList<Channel>()
+    @Volatile private var guideWorker: kotlinx.coroutines.Job? = null
+
+    /** Reads a guide object ({programmes:{key:[[start,end,title,desc]…]}, names:{…}}) as a stream, keeping only the window shown. */
+    private fun readGuide(r: android.util.JsonReader, cutoff: Long, now: Long, keepExisting: Boolean) {
+        r.beginObject()
+        while (r.hasNext()) when (r.nextName()) {
+            "programmes" -> { r.beginObject(); while (r.hasNext()) {
+                val k = r.nextName(); val l = ArrayList<Programme>()
+                r.beginArray(); while (r.hasNext()) {
+                    r.beginArray(); val s = r.nextLong(); val e = r.nextLong(); val t = if (r.peek() == android.util.JsonToken.NULL) { r.nextNull(); "" } else r.nextString()
+                    val d = if (r.hasNext() && r.peek() != android.util.JsonToken.NULL) r.nextString() else { if (r.hasNext()) r.nextNull(); "" }
+                    while (r.hasNext()) r.skipValue(); r.endArray()
+                    if (e > cutoff && s < now + KEEP_AHEAD) l += Programme(s, e, t, if (d.length > 600) d.take(600) else d)
+                }; r.endArray()
+                if (k.isEmpty() || (keepExisting && programmes.containsKey(k))) continue
+                val tidy = tidyProgrammes(l, cutoff); if (tidy.isEmpty()) programmes.remove(k) else programmes[k] = tidy
+            }; r.endObject() }
+            "names" -> { r.beginObject(); while (r.hasNext()) { val k = r.nextName(); val v = r.nextString(); if (k.isNotEmpty()) { if (keepExisting) guideNames.putIfAbsent(k, v) else guideNames[k] = v } }; r.endObject() }
+            else -> r.skipValue()
+        }
+        r.endObject()
+    }
 
     suspend fun loadGuide(channels: List<Channel>): Boolean = withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
         val urls = live?.epgUrls ?: return@withContext false
@@ -392,7 +444,7 @@ object Repo {
         if (want.isEmpty()) return@withContext false
         want.forEach { asked[chanKey(it)] = now }
         var got = false
-        for (batch in want.chunked(600)) {
+        for (batch in want.chunked(200)) {
             val ids = JSONArray(); val names = JSONArray()
             batch.forEach { c ->
                 val id = c.tvgId.trim().lowercase(); if (id.isNotEmpty()) ids.put(id)
@@ -400,15 +452,10 @@ object Repo {
                 if (c.tvgName.isNotEmpty()) normName(c.tvgName).takeIf { it.isNotEmpty() }?.let { names.put(it) }
             }
             try {
-                val d = JSONObject(http(api("guide"), JSONObject().put("urls", JSONArray(urls)).put("ids", ids).put("names", names).toString(), 60_000))
-                val p = d.optJSONObject("programmes") ?: JSONObject()
-                val cutoff = System.currentTimeMillis() - KEEP_PAST
-                for (k in p.keys()) {
-                    if (k.isEmpty()) continue
-                    val l = parseProgrammes(p.getJSONArray(k), cutoff)
-                    if (l.isEmpty()) programmes.remove(k) else programmes[k] = l
+                val now2 = System.currentTimeMillis(); val cutoff = now2 - KEEP_PAST
+                httpStream(api("guide"), JSONObject().put("urls", JSONArray(urls)).put("ids", ids).put("names", names).toString(), 60_000) { rd ->
+                    android.util.JsonReader(rd).use { readGuide(it, cutoff, now2, keepExisting = false) }
                 }
-                d.optJSONObject("names")?.let { n -> for (k in n.keys()) if (k.isNotEmpty()) guideNames[k] = n.getString(k) }
                 pruneGuide(cutoff)
                 got = true
                 saveGuideSoon()

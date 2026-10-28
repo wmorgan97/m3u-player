@@ -58,6 +58,7 @@ class TvActivity : ComponentActivity() {
     private var zap by mutableStateOf("")               // digits typed on the remote
     private var due by mutableStateOf<Reminder?>(null)
     private var backAt = 0L
+    private var lastRepeatAt = 0L
     private var pinGate by mutableStateOf<(() -> Unit)?>(null)   // a locked channel waiting for its PIN
     var resumeTick by mutableIntStateOf(0)                // bumped on coming back (from the player): the preview starts again   // a reminder that just came up (shown over the app)
 
@@ -113,6 +114,14 @@ class TvActivity : ComponentActivity() {
     // Number keys zap to a channel, as on any TV: the digits show for a moment, then it tunes.
     private var zapJob: Job? = null
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
+        // A held arrow repeats ~20 times a second. When a frame runs late those repeats queue up and the list keeps moving
+        // after the key is let go; repeats that are already stale are dropped instead (the highlight stops when you stop).
+        // Held arrows also move at a steady pace (~11 steps a second): quick, but slow enough to stop where you mean to.
+        if (e.action == KeyEvent.ACTION_DOWN && e.keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_RIGHT) {
+            val t = android.os.SystemClock.uptimeMillis()
+            if (e.repeatCount > 0 && (t - e.eventTime > 40 || t - lastRepeatAt < 90)) return true
+            lastRepeatAt = t
+        }
         if (e.action == KeyEvent.ACTION_DOWN && e.keyCode in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 && stack.last() !is Screen.Search && stack.last() !is Screen.Settings) {
             zap = (zap + (e.keyCode - KeyEvent.KEYCODE_0)).takeLast(4)
             zapJob?.cancel()

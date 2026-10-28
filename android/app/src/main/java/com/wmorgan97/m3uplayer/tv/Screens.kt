@@ -232,8 +232,10 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     var minute by remember { mutableIntStateOf(0) }
     val guideTick = Repo.guideVersion + minute * 1000
     val listState = rememberLazyListState()
-    var shownRows by remember { mutableIntStateOf(Int.MAX_VALUE) }
-    LaunchedEffect(list) { shownRows = 3; while (shownRows < list.size && shownRows < 30) { androidx.compose.runtime.withFrameNanos { }; shownRows += 3 }; shownRows = Int.MAX_VALUE }
+    // Keyed on the list itself, so the very first frame of a new group already builds only 2 rows (a LaunchedEffect
+    // alone runs a frame late, and that frame built all nine: an 83 ms hitch).
+    var shownRows by remember(list) { mutableIntStateOf(2) }
+    LaunchedEffect(list) { while (shownRows < list.size && shownRows < 30) { androidx.compose.runtime.withFrameNanos { }; shownRows += 2 }; shownRows = Int.MAX_VALUE }
     var shownGroup by remember { mutableStateOf<String?>(null) }   // back to the top only when the list is a new group's
     LaunchedEffect(list) { if (list.isEmpty()) return@LaunchedEffect; if (shownGroup != group) { shownGroup = group; listState.scrollToItem(0) }; Repo.requestGuide(list.take(300)) }
     LaunchedEffect(Unit) { while (true) { delay(60_000); minute++ } }
