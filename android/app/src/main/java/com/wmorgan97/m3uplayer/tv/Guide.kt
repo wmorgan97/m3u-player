@@ -62,7 +62,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     var group by rememberSaveable { mutableStateOf(startGroup?.takeIf { it in groups } ?: groups.firstOrNull() ?: "") }
     var unlockTick by remember { mutableIntStateOf(0) }
     val locked = remember(group, v, unlockTick) { Repo.isLocked(group) }
-    val chans = remember(group, l, favUrls, hiddenCh) { (if (group == "★ Favourites") l.channels.filter { it.url in favUrls } else byGroup[group] ?: emptyList()).filter { it.url !in hiddenCh }.take(600) }
+    val chans = remember(group, l, favUrls, hiddenCh) { (if (group == "★ Favourites") l.channels.filter { it.url in favUrls } else byGroup[group] ?: emptyList()).filter { it.url !in hiddenCh } }   // every channel of the group (rows are lazy); a 600 cap cut big groups like "24/7 Channels" (2,600+) short
 
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = System.currentTimeMillis() } }

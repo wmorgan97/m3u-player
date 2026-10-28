@@ -85,6 +85,8 @@ class TvActivity : ComponentActivity() {
         lifecycleScope.launch { delay(2500); com.wmorgan97.m3uplayer.PlayerHolder.warm(this@TvActivity) }   // a player ready before play is pressed
         Repo.loadSavedGuide()
         lifecycleScope.launch { while (true) { checkReminders(); delay(15_000) } }
+        // Every 10 min, pick up what the other devices changed (reminders set on the phone, favourites) while the app stays open.
+        lifecycleScope.launch { while (true) { delay(10 * 60_000L); if (Repo.hasKey()) runCatching { Repo.sync() } } }
         // Guide auto-refresh for the channels you use most (favourites, recents, the preview's group): every 30 min it asks
         // again, and each channel actually re-downloads at most every 3 h. The server re-reads the guide source every 6 h.
         lifecycleScope.launch {
@@ -127,6 +129,8 @@ class TvActivity : ComponentActivity() {
     private fun testHook(i: Intent?) {
         i?.getStringExtra("testPreview")?.let { Preview.testUrl = it.ifEmpty { null }; i.removeExtra("testPreview") }
         i?.getStringExtra("testScreen")?.let { sc -> i.removeExtra("testScreen"); when (sc) { "live" -> root(Screen.Live()); "guide" -> root(Screen.Guide()); "home" -> root(Screen.Home) } }
+        i?.getStringExtra("testSeries")?.let { q -> i.removeExtra("testSeries")   // test hook: open the first series found for q
+            lifecycleScope.launch { runCatching { Repo.search(q) }.getOrNull()?.second?.firstOrNull()?.let { root(Screen.Vods("series")); go(Screen.Details(it)) } } }
         val url = i?.getStringExtra("testStream") ?: return
         i.removeExtra("testStream")
         val names = listOf("Sky Sports Main Event", "Sky Sports F1", "BBC One HD", "BBC Two HD", "ITV1 HD", "Channel 4 HD", "Channel 5 HD", "Sky Atlantic")

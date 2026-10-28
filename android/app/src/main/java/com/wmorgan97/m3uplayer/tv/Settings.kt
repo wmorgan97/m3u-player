@@ -193,7 +193,7 @@ private fun sectionRows(
         Sec.Interface -> {
             val hidden = Repo.hiddenGroups.size + Repo.hiddenChannels.size
             listOf(
-                SettingRow.Action(Icons.Default.Visibility, "Show hidden groups and channels", "Hold OK on a group or channel to hide it", if (hidden == 0) "None" else "$hidden hidden") {
+                SettingRow.Action(Icons.Default.Visibility, "Show hidden groups and channels", if (hidden == 0) "Hold OK on a group or channel to hide it" else hiddenNames(), if (hidden == 0) "None" else "$hidden hidden") {
                     if (hidden == 0) say("Nothing is hidden") else { Repo.showAllHidden(); say("$hidden item${if (hidden == 1) "" else "s"} shown again") }
                 },
             )
@@ -213,4 +213,11 @@ private fun sectionRows(
             )
         }
     }
+}
+
+/** What is hidden on this TV, by name ("Group, Channel, …"), so a group hidden by accident can be found again. */
+private fun hiddenNames(): String {
+    val chans = Repo.live?.channels.orEmpty().associateBy { it.url }
+    val names = Repo.hiddenGroups.sorted() + Repo.hiddenChannels.mapNotNull { chans[it]?.name ?: "1 channel no longer in your playlists" }
+    return "Hidden: " + names.take(4).joinToString(", ") + if (names.size > 4) " and ${names.size - 4} more" else ""
 }

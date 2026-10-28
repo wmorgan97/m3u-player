@@ -3,6 +3,8 @@
 //   favourites  whole list, newest edit wins (favAt)
 //   recents     union by url, newest play first; an explicit edit (recReset) replaces the list
 //   progress    per url, newest wins
+//   reminders   per "<channel url>|<start ms>", newest edit (at) wins; a removed one stays as a
+//               { deleted } marker until the programme has passed, so other devices drop it too
 //
 //   POST /sync?key=<PROXY_KEY>   body: the device's state -> the merged state
 
@@ -62,6 +64,12 @@ export function merge(a, b) {
     const s = { ...(a.sources || {}) };
     for (const [k, v] of Object.entries(b.sources)) if (v && typeof v === 'object' && (!s[k] || (v.at || 0) > (s[k].at || 0))) s[k] = v;
     out.sources = s;
+  }
+  if (b.reminders && typeof b.reminders === 'object') {
+    const r = { ...(a.reminders || {}) }, old = Date.now() - 6 * 3600_000;
+    for (const [k, v] of Object.entries(b.reminders)) if (v && typeof v === 'object' && (!r[k] || (v.at || 0) > (r[k].at || 0))) r[k] = v;
+    for (const [k, v] of Object.entries(r)) if (!(v?.start > old)) delete r[k];
+    out.reminders = r;
   }
   return out;
 }

@@ -137,6 +137,14 @@ val QuickBringIntoView = object : androidx.compose.foundation.gestures.BringInto
     override val scrollAnimationSpec: androidx.compose.animation.core.AnimationSpec<Float> = tween(180, easing = androidx.compose.animation.core.FastOutSlowInEasing)
 }
 
+/** Like [QuickBringIntoView], but the focused item settles just above the middle (episode lists: what's next stays in view). */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+val CenteredBringIntoView = object : androidx.compose.foundation.gestures.BringIntoViewSpec {
+    override val scrollAnimationSpec: androidx.compose.animation.core.AnimationSpec<Float> = tween(180, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float =
+        if (size >= containerSize) offset else offset + size / 2 - containerSize * 0.45f
+}
+
 /** Hold OK for options on a list row: the remote's first key repeat (~0.5s) is the hold, and the release after it is
  *  swallowed so the row's normal click never follows. (Cards get this from onLongClick; list rows need it spelled out.) */
 @Composable
@@ -188,7 +196,7 @@ fun PageTitle(text: String, sub: String? = null) {
 /** Small rounded tag: quality, year, genre. */
 @Composable
 fun Tag(text: String, color: Color = Tv.text2, bg: Color = Color(0x26FFFFFF), size: TextUnit = Tv.label) {
-    Text(text, Modifier.background(bg, RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 2.dp), fontSize = size, color = color, fontWeight = FontWeight.SemiBold)
+    Text(text, Modifier.background(bg, RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 2.dp), fontSize = size, color = color, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
 }
 
 /** Nothing here: an icon, a line, and a hint of what to do. */

@@ -473,13 +473,18 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
     val overview = info?.optString("overview")?.ifEmpty { null } ?: v.overview
     val playFocus = remember { FocusRequester() }
     LaunchedEffect(eps) { delay(120); runCatching { playFocus.requestFocus() } }
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    var season by rememberSaveable(v.id) { mutableStateOf<Int?>(null) }   // null: the season you're watching
     Box(Modifier.fillMaxSize()) {
         if (backdrop.isNotEmpty()) Picture(backdrop, Modifier.fillMaxSize())
         Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0xFC0E1014), Color(0xE60E1014), Color(0x800E1014)))))
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF50E1014)), startY = 250f)))
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = Tv.margin, end = Tv.margin, top = 44.dp, bottom = 56.dp)) {
+        CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides CenteredBringIntoView) {
+        LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = Tv.margin, end = Tv.margin, top = 44.dp, bottom = 56.dp)) {
             item {
-                Row {
+                // Back on the buttons: the page returns to the top (the episodes slide the header away, Apple TV style).
+                Row(Modifier.onFocusChanged { if (it.hasFocus && listState.firstVisibleItemIndex > 0) scope.launch { listState.animateScrollToItem(0) } }) {
                     Picture(Repo.img(v.poster, 300), Modifier.width(168.dp).aspectRatio(2f / 3f).clip(Tv.shape)) {
                         Box(Modifier.fillMaxSize().background(Tv.surface2), contentAlignment = Alignment.Center) { Text(v.title, Modifier.padding(10.dp), color = Tv.text2, fontSize = Tv.caption, fontWeight = FontWeight.SemiBold) }
                     }
@@ -496,10 +501,10 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
                             vote?.let { Tag("★ %.1f".format(it), color = Tv.star) }
                             quality(v.name, v.group)?.let { Tag(it) }
                             if (v.copies > 1) Tag("${v.copies} versions")
-                            genres.take(3).forEach { Tag(it, color = Tv.muted, bg = Color(0x14FFFFFF)) }
+                            genres.take(if (v.kind == "series") 2 else 3).forEach { Tag(it, color = Tv.muted, bg = Color(0x14FFFFFF)) }
                         }
                         Spacer(Modifier.height(14.dp))
-                        Text(overview, fontSize = Tv.body, color = Tv.text2, maxLines = 5, overflow = TextOverflow.Ellipsis, lineHeight = 23.sp)
+                        Text(overview, fontSize = Tv.body, color = Tv.text2, maxLines = if (v.kind == "series") 3 else 5, overflow = TextOverflow.Ellipsis, lineHeight = 23.sp)
                         Spacer(Modifier.height(22.dp))
                         if (v.kind == "movie") {
                             val url = Repo.movieUrl(v) ?: ""
@@ -524,9 +529,15 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
             }
             val all = eps
             if (v.kind == "series") {
-                if (all == null) { item { Spacer(Modifier.height(28.dp)); SkeletonRow(4, Tv.wide + 20.dp, 16f / 9f) } }
-                else if (all.isNotEmpty()) item { Seasons(act, v, all) }
+                if (all == null) { item { Spacer(Modifier.height(28.dp)); SkeletonRow(3, EP_W, 16f / 9f) } }
+                else if (all.isNotEmpty()) {
+                    val startSeason = nextEpisode(all)?.first?.season?.takeIf { it in all } ?: all.keys.first()
+                    val list = all[season ?: startSeason] ?: emptyList()
+                    item(key = "seasons") { SeasonHeader(all, season ?: startSeason, list.size) { season = it } }
+                    items(list, key = { "ep:" + it.id }) { e -> EpisodeRow(act, v, all, e, backdrop.ifEmpty { v.poster }) }
+                }
             }
+        }
         }
     }
 }
@@ -548,25 +559,62 @@ private fun playEpisode(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>
     act.play(items, season.indexOf(e).coerceAtLeast(0))
 }
 
+private val EP_W = 208.dp
+
+/** "00:45:12" / "45:12" / "45" (provider formats) -> minutes, or null. */
+private fun epMinutes(d: String): Int? {
+    val p = d.trim().split(':').mapNotNull { it.trim().toIntOrNull() }
+    return when (p.size) { 3 -> p[0] * 60 + p[1] + (if (p[2] >= 30) 1 else 0); 2 -> p[0] + (if (p[1] >= 30) 1 else 0); 1 -> p[0]; else -> null }?.takeIf { it > 0 }
+}
+
+/** The provider's episode pictures are TMDB stills at 185 px wide (blurry on a TV): the same picture at 780 px. */
+private fun sharpStill(url: String): String = url.replace(Regex("""(image\.tmdb\.org/t/p/)w\d+/"""), "$1w780/")
+
+/** "Season 1 · 8 episodes" and, with more than one season, a chip per season (moving onto a chip switches to it). */
 @Composable
-private fun Seasons(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>) {
-    var season by rememberSaveable { mutableIntStateOf(all.keys.first()) }
-    Column(Modifier.padding(top = 26.dp)) {
-        if (all.size > 1) LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+private fun SeasonHeader(all: Map<Int, List<Episode>>, season: Int, count: Int, pick: (Int) -> Unit) {
+    Column(Modifier.padding(top = 30.dp, bottom = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Season $season", fontSize = Tv.rowTitle, fontWeight = FontWeight.SemiBold, color = Tv.text)
+            Spacer(Modifier.width(12.dp))
+            Text("$count episode${if (count == 1) "" else "s"}", fontSize = Tv.label, color = Tv.muted)
+        }
+        if (all.size > 1) LazyRow(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             items(all.keys.toList()) { s ->
-                FilterChip(selected = s == season, onClick = { season = s }, modifier = Modifier.onFocusChanged { if (it.isFocused) season = s }) { Text("Season $s", fontSize = Tv.bodySmall) }
+                FilterChip(selected = s == season, onClick = { pick(s) }, modifier = Modifier.onFocusChanged { if (it.isFocused) pick(s) }) { Text("Season $s", fontSize = Tv.bodySmall) }
             }
         }
-        Spacer(Modifier.height(14.dp))
-        val list = all[season] ?: emptyList()
-        Text("${list.size} episodes", fontSize = Tv.label, color = Tv.muted, modifier = Modifier.padding(bottom = 10.dp))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
-            items(list, key = { it.id }) { e ->
-                val p = remember(act.refresh) { Repo.episodeUrl(e)?.let { Repo.progressFor(it) } }
-                WideCard(e.still.ifEmpty { show.poster }, "${e.num}. ${e.title}", listOfNotNull(e.duration.takeIf { it.isNotBlank() }, if (p?.done == true) "Watched" else null).joinToString(" · "),
-                    p?.takeIf { !it.done && it.d > 0 }?.let { (it.t / it.d).toFloat() }, width = Tv.wide + 20.dp, restoreKey = "ep:" + e.id) {
-                    playEpisode(act, show, all, e, p?.takeIf { !it.done && it.t > 30 }?.t ?: 0.0)
+    }
+}
+
+/** One episode: a small sharp 16:9 picture (the show's backdrop when the provider has none), then
+ *  "Episode N · 55m · Watched / 12m left", the title and two lines of plot. */
+@Composable
+private fun EpisodeRow(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>, e: Episode, art: String) {
+    val p = remember(act.refresh) { Repo.episodeUrl(e)?.let { Repo.progressFor(it) } }
+    val watched = p?.done == true
+    val partial = p?.takeIf { !it.done && it.t > 30 && it.d > 0 }
+    val meta = listOfNotNull("Episode ${e.num}", epMinutes(e.duration)?.let { runtime(it) },
+        if (watched) "Watched" else partial?.let { "${runtime(((it.d - it.t) / 60).toInt().coerceAtLeast(1))} left" }).joinToString("  ·  ")
+    FocusCard(Modifier.padding(top = 10.dp).fillMaxWidth(.82f).height(EP_W * 9 / 16 + 16.dp), scale = 1.02f, restoreKey = "ep:" + e.id, label = "Episode ${e.num}, ${e.title}",
+        onClick = { playEpisode(act, show, all, e, partial?.t ?: 0.0) }) {
+        Row(Modifier.fillMaxSize().background(Color(0x1AFFFFFF)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(EP_W).aspectRatio(16f / 9f).clip(RoundedCornerShape(7.dp))) {
+                Picture(e.still.ifEmpty { art }.let { if (it.startsWith("http")) sharpStill(it) else it }, Modifier.fillMaxSize()) {
+                    Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))))
                 }
+                if (e.still.isEmpty()) Box(Modifier.fillMaxSize().background(Color(0x73000000)), contentAlignment = Alignment.Center) {
+                    Text("E${e.num}", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Color(0xE6FFFFFF))
+                }
+                Box(Modifier.align(Alignment.BottomStart).padding(7.dp).size(28.dp).background(Color(0x99000000), RoundedCornerShape(50)), contentAlignment = Alignment.Center) {
+                    Icon(if (watched) Icons.Default.Check else Icons.Default.PlayArrow, null, Modifier.size(17.dp), tint = Color.White)
+                }
+                if (partial != null) ProgressLine((partial.t / partial.d).toFloat(), Modifier.align(Alignment.BottomStart).fillMaxWidth())
+            }
+            Column(Modifier.padding(start = 18.dp, end = 12.dp).weight(1f)) {
+                Text(meta, fontSize = Tv.label, color = if (watched) Tv.accent else Tv.muted, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(e.title, fontSize = Tv.body, color = Tv.text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+                if (e.plot.isNotBlank()) Text(e.plot, fontSize = Tv.caption, color = Tv.text2, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
             }
         }
     }
@@ -615,6 +663,20 @@ fun SearchScreen(act: TvActivity) {
 
     var chanMenu by remember { mutableStateOf<Channel?>(null) }
     val settled = debounced == query
+    // The keyboard's Search key: search now, close the keyboard and move to the first results once they're there.
+    val focusMgr = androidx.compose.ui.platform.LocalFocusManager.current
+    val kb = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    var submits by remember { mutableIntStateOf(0) }
+    fun submit() { if (query.isNotEmpty()) { debounced = query; submits++ } else kb?.hide() }
+    LaunchedEffect(submits) {
+        if (submits == 0) return@LaunchedEffect
+        kb?.hide()
+        val until = System.currentTimeMillis() + 2_500
+        while (chans.isEmpty() && progs.isEmpty() && (vodBusy || vods == null) && System.currentTimeMillis() < until) delay(80)
+        delay(60)
+        if (chans.isEmpty() && progs.isEmpty() && vods?.let { it.first.isEmpty() && it.second.isEmpty() } != false) delay(400)   // films/series still arriving
+        focusMgr.moveFocus(androidx.compose.ui.focus.FocusDirection.Down)
+    }
     LazyColumn(Modifier.fillMaxSize(), state = rememberPageState(), contentPadding = PaddingValues(top = Tv.topMargin, bottom = 56.dp)) {
         item {
             Row(Modifier.padding(horizontal = Tv.margin).fillMaxWidth(.66f).background(if (fieldFocused) Tv.surface2 else Tv.surface, RoundedCornerShape(14.dp))
@@ -624,8 +686,8 @@ fun SearchScreen(act: TvActivity) {
                 Box(Modifier.weight(1f)) {
                     if (q.isEmpty()) Text("Search channels, TV programmes, movies and series", color = Tv.muted, fontSize = Tv.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     BasicTextField(q, { q = it }, singleLine = true, textStyle = TextStyle(color = Tv.text, fontSize = Tv.body), cursorBrush = SolidColor(Tv.accent),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { debounced = query }),
-                        modifier = Modifier.fillMaxWidth().focusRequester(field).onFocusChanged { fieldFocused = it.isFocused }.searchFieldKeys())
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { submit() }, onDone = { submit() }, onGo = { submit() }),
+                        modifier = Modifier.fillMaxWidth().focusRequester(field).onFocusChanged { fieldFocused = it.isFocused }.searchFieldKeys { submit() })
                 }
             }
         }

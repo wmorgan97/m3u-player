@@ -37,6 +37,7 @@ const PATHS = {
   pip: '<rect x="3" y="5" width="18" height="14" rx="2.5"/><rect class="dot" x="12" y="11" width="7" height="5" rx="1"/>',
   airplay: '<path d="M5 16.5A2.5 2.5 0 013 14V7a2.5 2.5 0 012.5-2.5h13A2.5 2.5 0 0121 7v7a2.5 2.5 0 01-2 2.5"/><path d="M12 14l5 6H7z"/>',
   expand: '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>',
+  download: '<path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/>',
   search2: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
 };
 
@@ -53,6 +54,10 @@ export function sheet(html, { onMount, onClose, keepScroll = false } = {}) {
   onSheetClose = null;
   prev?.();
   const y = keepScroll && !sheetEl.hidden ? sheetEl.scrollTop : 0;
+  if (!keepScroll) settle();
+  // #sheet is reused by every sheet: drop the last one's click handler (a series sheet's would toggle a
+  // film's plot a second time, so tapping it did nothing). Each onMount sets its own again.
+  sheetEl.onclick = null;
   sheetEl.innerHTML = `<div class="sheet-grip"></div>${html}`;
   sheetEl.hidden = backdrop.hidden = false;
   sheetEl.scrollTop = y;
@@ -62,6 +67,7 @@ export function sheet(html, { onMount, onClose, keepScroll = false } = {}) {
 }
 
 export function closeSheet() {
+  settle();
   sheetEl.hidden = backdrop.hidden = true;
   sheetEl.innerHTML = '';
   const fn = onSheetClose;
@@ -70,12 +76,72 @@ export function closeSheet() {
 }
 
 backdrop.addEventListener('click', closeSheet);
+
+// Swipe down to close, like any iPhone sheet: drag it down from the top (anywhere on it while it's scrolled to the top);
+// let go past a third of the way, or with a flick, and it slides away; otherwise it springs back.
+function settle() { sheetEl.style.transition = sheetEl.style.transform = backdrop.style.transition = backdrop.style.opacity = ''; }
+let drag = null;
+// Can the touch's target scroll by itself in this direction (an inner list, a text box)? Then leave it alone.
+function innerScrolls(el, up) {
+  for (; el && el !== sheetEl; el = el.parentElement) {
+    if (el.scrollHeight > el.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(el).overflowY)) {
+      if (up ? el.scrollTop + el.clientHeight < el.scrollHeight - 1 : el.scrollTop > 0) return true;
+    }
+  }
+  return false;
+}
+sheetEl.addEventListener('touchstart', e => {
+  const docked = sheetEl.getBoundingClientRect().bottom >= innerHeight - 2;   // not the centred desktop dialog
+  drag = e.touches.length === 1 && docked ? { x: e.touches[0].clientX, y: e.touches[0].clientY, ly: e.touches[0].clientY, top: sheetEl.scrollTop <= 0, on: false, dy: 0, t: 0, v: 0 } : null;
+}, { passive: true });
+sheetEl.addEventListener('touchmove', e => {
+  if (!drag) return;
+  const t = e.touches[0], dx = t.clientX - drag.x, dy = t.clientY - drag.y;
+  if (!drag.on) {
+    const step = t.clientY - drag.ly; drag.ly = t.clientY;
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+    if (Math.abs(dx) > Math.abs(dy)) { drag = null; return; }   // sideways: a row of cast / chips
+    // Vertical but not a dismiss: scroll the sheet, never the page behind it once the sheet hits an end.
+    if (dy < 0 || !drag.top || sheetEl.scrollTop > 0 || innerScrolls(e.target, false)) {
+      const atEnd = step < 0 ? sheetEl.scrollTop + sheetEl.clientHeight >= sheetEl.scrollHeight - 1 : sheetEl.scrollTop <= 0;
+      if (atEnd && e.cancelable && !innerScrolls(e.target, step < 0)) e.preventDefault();
+      return;
+    }
+    drag.on = true; drag.y = t.clientY; drag.t = e.timeStamp;
+    sheetEl.style.transition = backdrop.style.transition = 'none';
+  }
+  e.preventDefault();   // the sheet moves instead of the page bouncing
+  const d = Math.max(0, t.clientY - drag.y);
+  drag.v = (d - drag.dy) / Math.max(1, e.timeStamp - drag.t); drag.dy = d; drag.t = e.timeStamp;
+  sheetEl.style.transform = `translateY(${d}px)`;
+  backdrop.style.opacity = String(Math.max(0, 1 - d / sheetEl.offsetHeight));
+}, { passive: false });
+// Dragging on the dimmed page behind an open sheet doesn't scroll it.
+backdrop.addEventListener('touchmove', e => { if (e.cancelable) e.preventDefault(); }, { passive: false });
+function release() {
+  const d = drag; drag = null;
+  if (!d?.on) return;
+  const ease = 'cubic-bezier(.2, .8, .2, 1)';
+  if (d.dy > sheetEl.offsetHeight / 3 || (d.v > 0.5 && d.dy > 24)) {
+    sheetEl.style.transition = `transform .22s ${ease}`; backdrop.style.transition = 'opacity .22s';
+    sheetEl.style.transform = 'translateY(100%)'; backdrop.style.opacity = '0';
+    setTimeout(closeSheet, 220);
+  } else {
+    sheetEl.style.transition = `transform .3s ${ease}`; backdrop.style.transition = 'opacity .3s';
+    sheetEl.style.transform = ''; backdrop.style.opacity = '';
+  }
+}
+sheetEl.addEventListener('touchend', release);
+sheetEl.addEventListener('touchcancel', release);
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !sheetEl.hidden) closeSheet(); });
 
 // items: [{ label, fn, danger }], falsy entries are skipped. fn runs inside the tap,
 // so it may call APIs that need a user gesture (share, clipboard).
-export function menu(title, items) {
+// onCancel: runs when the menu is dismissed without a choice (Cancel, swipe down, tapping outside),
+// e.g. to go back to the sheet it was opened from.
+export function menu(title, items, { onCancel } = {}) {
   const list = items.filter(Boolean);
+  let chosen = false;
   sheet(`${title ? `<div class="sheet-title">${esc(title)}</div>` : ''}
     <div class="menu">
       ${list.map((it, i) => `<button class="menu-item ${it.danger ? 'danger' : ''}" data-i="${i}">${esc(it.label)}</button>`).join('')}
@@ -85,10 +151,12 @@ export function menu(title, items) {
       el.querySelector('.menu').onclick = e => {
         const b = e.target.closest('button');
         if (!b) return;
+        chosen = b.dataset.i !== undefined;
         closeSheet();
-        if (b.dataset.i !== undefined) list[+b.dataset.i].fn();
+        if (chosen) list[+b.dataset.i].fn();
       };
     },
+    onClose: () => { if (!chosen) onCancel?.(); },
   });
 }
 

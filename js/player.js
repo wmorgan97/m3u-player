@@ -30,7 +30,7 @@ export function externalPlayers(url) {
     // VLC for Mac answers no web link (only VLC on iPhone/iPad does): hand it a playlist file instead.
     IS_MAC_DESKTOP ? { name: 'VLC', file: true, href: '#' } : { name: 'VLC', href: `vlc-x-callback://x-callback-url/stream?url=${u}` },
     { name: 'Infuse', href: `infuse://x-callback-url/play?url=${u}` },
-    { name: 'IINA', href: `iina://weblink?url=${u}` },
+    ...(IS_MAC_DESKTOP ? [{ name: 'IINA', href: `iina://weblink?url=${u}` }] : []),   // IINA is a Mac app
   ];
 }
 

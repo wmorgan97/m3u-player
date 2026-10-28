@@ -131,10 +131,15 @@ class ProgrammeIndex private constructor(val live: Repo.Live, val guideVersion: 
 
 /** The search box on a remote: Down leaves it for the results (and puts the keyboard away) instead of being swallowed. */
 @Composable
-fun Modifier.searchFieldKeys(): Modifier {
+fun Modifier.searchFieldKeys(onSubmit: () -> Unit = {}): Modifier {
     val focus = LocalFocusManager.current
     val kb = LocalSoftwareKeyboardController.current
     return this.onPreviewKeyEvent { e ->
-        if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionDown) { kb?.hide(); focus.moveFocus(FocusDirection.Down); true } else false
+        when {
+            e.type == KeyEventType.KeyDown && e.key == Key.DirectionDown -> { kb?.hide(); focus.moveFocus(FocusDirection.Down); true }
+            // Enter / Search from a remote or keyboard: the same as the keyboard's Search key (OK still opens the keyboard).
+            e.key == Key.Enter || e.key == Key.NumPadEnter || e.key == Key.Search -> { if (e.type == KeyEventType.KeyUp) onSubmit(); true }
+            else -> false
+        }
     }
 }

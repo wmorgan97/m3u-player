@@ -6,6 +6,7 @@ import { Xtream, parseXtreamLink, liveChannels, movieItems, seriesItems } from '
 import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from './epg.js';
 import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
+import { matchUpcoming } from './follow.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -119,8 +120,8 @@ async function init() {
   else if (location.hash.startsWith('#/guide') && state.current) ensureGuide(guideScope(state.current));
   if (resumeChannel) ensureGuide([resumeChannel]);
   syncNow();
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); } });
-  setTimeout(() => checkNewEpisodes(), 20_000);   // after start-up, quietly
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); checkFollows(); } });
+  setTimeout(() => { checkNewEpisodes(); checkFollows(); }, 20_000);   // after start-up, quietly
   // The saved guides load once the first screen is up and the remote is responsive, not during it.
   await new Promise(r => setTimeout(r, 600));
   await Promise.all(state.playlists.map(p => loadGuide(p.id)));
@@ -155,7 +156,7 @@ async function detectServerProxy() {
 // ---------- sync across devices ----------
 // Favourites, recently watched and progress are also kept on the VPS (server/sync.js), so the
 // phone, iPad and laptop all match. The server merges; the app sends its state and adopts the result.
-const syncMeta = { favAt: 0, recReset: 0, srcDel: {} };
+const syncMeta = { favAt: 0, recReset: 0, srcDel: {}, remDel: {} };
 // A playlist's identity across devices: its Xtream server + username, or its playlist link.
 // The same login is often added twice (one "Live TV only", one "VOD only"), so what it keeps is part of it.
 function sourceBase(p) {
@@ -204,7 +205,7 @@ async function syncNow() {
   syncing = (async () => {
     try {
       const res = await fetch(serverApi('sync'), { method: 'POST', cache: 'no-store', body: JSON.stringify({
-        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources() }) });
+        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders() }) });
       if (!res.ok) return;
       const d = await res.json();
       const urls = list => (list || []).map(c => c.url).join('\n');
@@ -216,6 +217,7 @@ async function syncNow() {
       if (Array.isArray(d.recents) && urls(d.recents) !== urls(state.recents)) { state.recents = d.recents; db.set('recents', d.recents); changed = true; }
       if (d.progress) { state.progress = d.progress; db.set('progress', d.progress).catch(() => {}); }
       if (d.sources) adoptSources(d.sources);
+      if (d.reminders) await adoptReminders(d.reminders);
       Object.assign(syncMeta, { favAt: d.favAt || syncMeta.favAt, recReset: d.recReset || syncMeta.recReset });
       db.set('syncMeta', syncMeta).catch(() => {});
       // Never redraw Home under a playing channel or while you're typing; keep the scroll position.
@@ -228,6 +230,38 @@ async function syncNow() {
   return syncing;
 }
 const syncSoon = debounce(syncNow, 1500);
+// Reminders are shared too (set one on the TV box and the phone alerts you as well): keyed by channel link + start
+// time, the same on every device; a removed one is sent as a { deleted } marker so the others drop it.
+function localReminders() {
+  const out = {};
+  for (const r of state.reminders || []) {
+    const c = r.channel || {};
+    out[r.key] = { url: c.url, start: r.at, title: r.title, at: r.set || 1, channel: { name: c.name, url: c.url, logo: c.logo, group: c.group, tvgId: c.tvgId } };
+  }
+  for (const [k, at] of Object.entries(syncMeta.remDel || {})) if (!out[k]) out[k] = { deleted: true, at, start: +k.slice(k.lastIndexOf('|') + 1) || 0 };
+  return out;
+}
+async function adoptReminders(remote) {
+  const now = Date.now();
+  state.reminders ||= [];
+  let changed = false;
+  for (const [k, v] of Object.entries(remote)) {
+    const mine = state.reminders.find(r => r.key === k);
+    if (v.deleted) {
+      if (mine && (mine.set || 1) < v.at) { state.reminders = state.reminders.filter(r => r !== mine); nativeReminder(k, null); changed = true; }
+      continue;
+    }
+    if (mine || !v.url || !(v.start > now + REMIND_BEFORE) || (syncMeta.remDel?.[k] || 0) >= (v.at || 0)) continue;
+    // Use this device's own copy of the channel when it has one (its logo, group, catch-up details).
+    const c = state.playlists?.flatMap?.(p => p.channels || []).find(x => x.url === v.url) || { ...v.channel, url: v.url };
+    const r = { key: k, at: v.start, title: v.title || '', channel: cloneChannel(c), set: v.at };
+    state.reminders.push(r);
+    nativeReminder(k, r);
+    changed = true;
+  }
+  for (const [k, at] of Object.entries(syncMeta.remDel || {})) if (+k.slice(k.lastIndexOf('|') + 1) < now - 6 * 60 * MINUTE) delete syncMeta.remDel[k];
+  if (changed) { await db.set('reminders', state.reminders); scheduleReminders(); }
+}
 const syncLater = debounce(syncNow, 20000);   // watch progress ticks every few seconds
 function favoritesChanged() { syncMeta.favAt = Date.now(); syncSoon(); }
 
@@ -776,9 +810,16 @@ async function homeSearch(q, box = $('#home-results')) {
       series.push(...oneOfEach(en(toItems(p, 'series', scats, (s.items || []).slice(0, 80)))).slice(0, 8));
     } catch {}
   }));
+  const onTv = q.trim().length >= 3 ? await findOnTv(q).catch(() => []) : [];
   if (seq !== homeSearchSeq) return;
-  shelfItems.set('hs-movie', movies.slice(0, 8)); shelfItems.set('hs-series', series.slice(0, 8));
-  box.innerHTML = (section('Channels', 'hs-chan', chans, chanRow) + section('Movies', 'hs-movie', movies.slice(0, 8), vodRow) + section('Series', 'hs-series', series.slice(0, 8), vodRow)) || '<div class="muted hs-empty">Nothing matches.</div>';
+  shelfItems.set('hs-movie', movies.slice(0, 8)); shelfItems.set('hs-series', series.slice(0, 8)); shelfItems.set('hs-tv', onTv);
+  // "On TV": upcoming programmes mentioning it on your channels, with one-tap reminders for all and Follow.
+  const tvRow = ({ channel: c, prog }, key, k) => `<div class="hs-row" tabindex="-1" data-shelf="${key}" data-k="${k}">${logoHtml(c)}<span class="row-text"><span class="row-name">${esc(prog[2])}</span><span class="muted">${esc(`${fmtDay(prog[0])} ${fmtTime(prog[0])} · ${c.name}`)}</span></span>${hasReminder(c, prog) ? icon('clock') : ''}</div>`;
+  const tvActions = onTv.length ? `<div class="hs-actions"><button class="btn small primary" data-remind-all>${icon('clock')} Remind me on all (${onTv.length})</button><button class="btn small" data-follow>${isFollowing(q) ? 'Following ✓' : `Follow ${esc(q.trim())}`}</button></div>` : '';
+  box.innerHTML = (section('Channels', 'hs-chan', chans, chanRow) + (onTv.length ? `<div class="hs-title">On TV · next 3 days</div>${tvActions}${onTv.slice(0, 12).map((it, k) => tvRow(it, 'hs-tv', k)).join('')}` : '')
+    + section('Movies', 'hs-movie', movies.slice(0, 8), vodRow) + section('Series', 'hs-series', series.slice(0, 8), vodRow)) || '<div class="muted hs-empty">Nothing matches.</div>';
+  box.querySelector('[data-remind-all]')?.addEventListener('click', e => { e.stopPropagation(); remindAll(q.trim(), onTv).then(() => homeSearch(q, box)); });
+  box.querySelector('[data-follow]')?.addEventListener('click', e => { e.stopPropagation(); toggleFollow(q).then(() => homeSearch(q, box)); });
 }
 
 // ---------- Home hub ----------
@@ -934,6 +975,7 @@ function bindTopSearch() {
     const it = shelfItems.get(row.dataset.shelf)?.[+row.dataset.k];
     close(); q.blur();
     if (!it) return;
+    if (row.dataset.shelf === 'hs-tv') return programmeSheet(it.channel, it.prog);
     if (it.kind === 'series') return seriesSheet(it);
     if (it.kind === 'movie') return movieSheet(it);
     playChannel([it], 0);
@@ -1107,6 +1149,7 @@ function showHome() {
     if (sc) {
       const it = shelfItems.get(sc.dataset.shelf)?.[+sc.dataset.k];
       if (!it) return;
+      if (sc.dataset.shelf === 'hs-tv') return programmeSheet(it.channel, it.prog);
       if (it.kind === 'series') return seriesSheet(it);
       if (it.kind === 'movie') return movieSheet(it);
       return playChannel([it], 0);
@@ -1324,6 +1367,7 @@ function showPlaylist(p) {
     state.selecting = false;
     $('#seg').querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b));
     queueMicrotask(updateNav);
+    updateTopbar();
     refreshPlaylistView();
     if (state.tab !== 'live' && p.kind === 'xtream') loadVod(p, state.tab);
   });
@@ -1356,8 +1400,9 @@ function refreshPlaylistView({ keep = false } = {}) {
 function updateTopbar() {
   const p = state.current;
   const live = state.tab === 'live';
+  // The section you're in (Movies, Series, Live TV), not the provider's playlist name ("VoD").
   setTopbar({
-    title: playlistTitle(p),
+    title: p.virtual ? playlistTitle(p) : ({ movies: 'Movies', series: 'Series', live: 'Live TV' })[state.tab] || playlistTitle(p),
     back: '#/',
     actions: [
       live && !p.virtual && { icon: 'guide', label: 'TV guide', fn: () => { location.hash = `#/guide/${p.id}`; } },
@@ -1874,17 +1919,17 @@ async function deleteDownload(meta) {
   delete state.downloads[meta.id];
   await db.set('downloads', state.downloads);
 }
-function downloadMenu(item) {
+function downloadMenu(item, { onCancel } = {}) {
   const disk = !!window.showSaveFilePicker;   // Chrome/Edge on a computer: save straight to a file you choose
   const pick = (q, label) => ({ label, fn: () => (disk ? saveToDisk(item, q) : startDownload(item, q)) });
-  menu(`${disk ? 'Save to disk' : 'Download'}: ${item.name}`, [
+  menu(`${disk ? 'Save to disk' : 'Download'}: ${niceName(item)}`, [
     pick('720', 'Standard (720p, ~1 GB per 2 hours)'),
     pick('1080', 'High (1080p, ~2.5 GB per 2 hours)'),
     pick('orig', disk ? 'Best for playback (H.264 up to 1080p)' : 'Original quality (biggest)'),
     disk && { label: 'Exact original file (4K stays 4K; plays in VLC/TV apps, maybe not in the browser)', fn: () => saveToDisk(item, 'file') },
     disk && { label: 'Keep inside the app instead (browser storage)', fn: () => menu('Quality', [
       { label: 'Standard (720p)', fn: () => startDownload(item, '720') }, { label: 'High (1080p)', fn: () => startDownload(item, '1080') }, { label: 'Original', fn: () => startDownload(item, 'orig') }]) },
-  ]);
+  ], { onCancel });
 }
 // Computer: the MP4 streams from the server straight into a file on the hard drive (no storage cap, plays in
 // anything). The file handle is kept so the Downloads page can play it later without asking again.
@@ -2005,7 +2050,7 @@ async function renderVodPanel(c) {
     shelfItems.set('vp-more', more);
     el.innerHTML = `
       <div class="vp-top">
-        <span class="vp-poster poster-img" data-initials="${initials(c.name)}">${(i.movie_image || c.logo) ? `<img src="${esc(i.movie_image || c.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
+        <span class="vp-poster poster-img" data-initials="${initials(displayTitle(c.name))}">${(i.movie_image || c.logo) ? `<img src="${esc(i.movie_image || c.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
         <div class="vp-text">
           <h2 class="vp-title">${esc(niceName(c))}</h2>
           <div class="vp-meta">${meta.map(m => `<span class="pill">${esc(m)}</span>`).join('')}${c.rating ? `<span class="pill rating">★ ${c.rating.toFixed(1)}</span>` : ''}${qualityLabel() ? `<span class="pill q">${esc(qualityLabel())}</span>` : ''}${vodInfo?.audio?.length > 1 ? `<span class="pill">${vodInfo.audio.length} audio</span>` : ''}${vodInfo?.subs?.some(s => s.text) ? '<span class="pill">Subtitles</span>' : ''}</div>
@@ -2138,7 +2183,7 @@ function posterHtml(it, i) {
   const m = vodMeta(it.name);   // "TOP - Dune (2021) 4K (US)" -> "Dune", 2021
   const name = it.kind === 'episode' ? it.name : displayTitle(it.name), year = it.year ?? m.year;
   return `<li class="poster" data-i="${i}">
-    <span class="poster-img" data-initials="${initials(it.name)}">${it.logo ? `<img src="${esc(thumb(it.logo, 300))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+    <span class="poster-img" data-initials="${initials(displayTitle(it.name))}">${it.logo ? `<img src="${esc(thumb(it.logo, 300))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
       ${it.rating ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
     <span class="poster-name">${esc(name)}</span>
     ${year ? `<span class="muted">${esc(year)}</span>` : ''}
@@ -2553,16 +2598,19 @@ function download(file) {
 }
 
 // ---------- movies & series ----------
+// "01:49:03" / "00:52:10" from the provider reads as a clock: show it as "1h 49m" / "52m".
+const niceRuntime = d => String(d || '').replace(/^(\d+):(\d\d):\d\d$/, (_, h, mm) => (+h ? `${+h}h ` : '') + `${+mm}m`);
 function detailHtml(m, info = {}) {
   const i = withTmdb(info.info || {}, info.tmdb);
   const pr = state.progress[m.url];
   const resumable = pr && !pr.done && pr.t > 30;
-  const meta = [String(i.releasedate || i.release_date || '').slice(0, 4) || m.year, i.duration, i.genre || m.genre].filter(Boolean);
+  const dur = niceRuntime(i.duration);
+  const meta = [String(i.releasedate || i.release_date || '').slice(0, 4) || m.year, dur, i.genre || m.genre].filter(Boolean);
   const art = i.backdrop_path?.[0] || i.movie_image || i.cover_big || m.logo;
   return `<div class="detail film" data-id="${esc(m.id)}">
     <div class="film-hero" style="--hue:${hueOf(m.name)}">${art ? `<img class="film-bg" src="${esc(art)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>
     <div class="detail-top">
-      <span class="detail-poster" data-initials="${initials(m.name)}">${(i.movie_image || i.cover_big || m.logo) ? `<img src="${esc(i.movie_image || i.cover_big || m.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
+      <span class="detail-poster" data-initials="${initials(displayTitle(m.name))}">${(i.movie_image || i.cover_big || m.logo) ? `<img src="${esc(i.movie_image || i.cover_big || m.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
       <div class="detail-head">
         <div class="detail-title">${esc(displayTitle(m.name))}</div>
         ${i.tmdb?.tagline ? `<div class="muted detail-tagline">${esc(i.tmdb.tagline)}</div>` : ''}
@@ -2571,17 +2619,19 @@ function detailHtml(m, info = {}) {
       </div>
     </div>
     ${info.versions?.length > 1 ? (() => { const b = qualityOf(info.versions[0]), cur = qualityOf(m); return `<button class="vbanner${info.versions[0].url !== m.url && b.score > cur.score ? ' up' : ''}" data-versions><span class="vq">${esc(b.res)}</span><span><b>${info.versions.length} versions</b>${info.versions[0].url !== m.url && b.score > cur.score ? ` · ${esc(b.tags.join(' · '))} available` : ` · ${esc(info.versions.map(v => qualityOf(v).res).filter((r, k, a) => a.indexOf(r) === k).join(', '))}`}</span>${icon('next')}</button>`; })() : ''}
-    ${i.plot || i.description || m.plot ? `<p class="detail-plot">${esc(i.plot || i.description || m.plot)}</p>` : ''}
-    ${i.cast || i.actors ? `<p class="muted">Cast: ${esc(i.cast || i.actors)}</p>` : ''}
-    ${i.director ? `<p class="muted">Director: ${esc(i.director)}</p>` : ''}
-    <div class="detail-actions">
+    <div class="detail-actions film-play">
       <button class="btn primary" data-play>${icon('play')} ${resumable ? `Resume ${fmtDur(pr.t)}` : 'Play'}</button>
       ${resumable ? '<button class="btn" data-restart>Start over</button>' : ''}
-      <button class="btn" data-fav>${favUrls.has(m.url) ? '★ Saved' : '☆ Save'}</button>
-      ${canSync() && !m.offline ? '<button class="btn" data-dl>Download</button>' : ''}
-      ${i.youtube_trailer ? '<button class="btn" data-trailer>Trailer</button>' : ''}
-      <button class="btn" data-more>More</button>
     </div>
+    <div class="film-tools">
+      <button data-fav>${icon('star', favUrls.has(m.url) ? 'on' : '')}<span>${favUrls.has(m.url) ? 'Saved' : 'Save'}</span></button>
+      ${canSync() && !m.offline ? `<button data-dl>${icon('download')}<span>Download</span></button>` : ''}
+      ${i.youtube_trailer ? `<button data-trailer>${icon('film')}<span>Trailer</span></button>` : ''}
+      <button data-more>${icon('more')}<span>More</span></button>
+    </div>
+    ${i.plot || i.description || m.plot ? `<p class="detail-plot clamp3" data-plot>${esc(i.plot || i.description || m.plot)}</p>` : ''}
+    ${i.cast || i.actors ? `<p class="muted film-credit clamp" data-plot><b>Cast</b> ${esc(i.cast || i.actors)}</p>` : ''}
+    ${i.director ? `<p class="muted film-credit"><b>Director</b> ${esc(i.director)}</p>` : ''}
   </div>`;
 }
 
@@ -2675,12 +2725,10 @@ async function movieSheet(m) {
       el.querySelector('[data-versions]')?.addEventListener('click', () => { closeSheet(); playBestVersion(m); });
       el.querySelector('[data-restart]')?.addEventListener('click', () => { delete state.progress[m.url]; closeSheet(); playChannel([m], 0); });
       el.querySelector('[data-fav]').onclick = async () => { await toggleFavorite(m, null); open(true); };
-      el.querySelector('[data-dl]')?.addEventListener('click', () => downloadMenu(m));
+      el.querySelector('[data-dl]')?.addEventListener('click', () => downloadMenu(m, { onCancel: () => open() }));
       el.querySelector('[data-trailer]')?.addEventListener('click', () => { const k = withTmdb(info.info || {}, info.tmdb).youtube_trailer; if (k) window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(k)}`, '_blank'); });
-      el.querySelector('[data-more]').onclick = () => menu(m.name, [
-        info.info?.youtube_trailer && { label: 'Watch trailer', fn: () => window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(info.info.youtube_trailer)}`, '_blank') },
-        ...externalItems(m),
-      ]);
+      el.querySelector('[data-more]').onclick = () => menu(niceName(m), externalItems(m), { onCancel: () => open() });
+      el.querySelectorAll('[data-plot]').forEach(p => p.addEventListener('click', () => p.classList.toggle('open')));
     },
   });
   open();
@@ -2737,22 +2785,23 @@ async function seriesSheet(s) {
     sheet(`<div class="detail film series" data-id="${esc(s.id)}">
       <div class="film-hero" style="--hue:${hueOf(s.name)}">${art ? `<img class="film-bg" src="${esc(art)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>
       <div class="detail-top">
-        <span class="detail-poster" data-initials="${initials(s.name)}">${(i.cover || s.logo) ? `<img src="${esc(i.cover || s.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
+        <span class="detail-poster" data-initials="${initials(displayTitle(s.name))}">${(i.cover || s.logo) ? `<img src="${esc(i.cover || s.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
         <div class="detail-head">
           <div class="detail-title">${esc(displayTitle(s.name))}</div>
           <div class="film-meta">${[s.year, i.genre || s.genre, plural(seasons.length, 'season'), plural(allEps.length, 'episode')].filter(Boolean).map(m => `<span class="pill">${esc(m)}</span>`).join('')}${s.rating ? `<span class="pill rating">★ ${s.rating.toFixed(1)}</span>` : ''}</div>
           ${watched ? `<span class="muted">${watched} of ${allEps.length} watched</span>` : ''}
         </div>
       </div>
+      ${continueEp ? `<div class="detail-actions film-play"><button class="btn primary" data-continue>${icon('play')} ${state.progress[continueEp.url]?.t > 30 && !state.progress[continueEp.url]?.done ? 'Continue' : 'Play'} S${esc(continueEp.season ?? seasons.find(se => episodesOf(se).includes(continueEp)))} E${esc(continueEp.num)}</button></div>` : ''}
+      <div class="film-tools"><button data-sfav>${icon('star', favUrls.has(s.url || s.id) ? 'on' : '')}<span>${favUrls.has(s.url || s.id) ? 'Saved' : 'Save'}</span></button>${i.youtube_trailer ? `<button data-trailer>${icon('film')}<span>Trailer</span></button>` : ''}</div>
       ${i.plot || s.plot ? `<p class="detail-plot clamp3" data-plot>${esc(i.plot || s.plot)}</p>` : ''}
-      ${continueEp ? `<div class="detail-actions"><button class="btn primary" data-continue>${icon('play')} ${state.progress[continueEp.url]?.t > 30 && !state.progress[continueEp.url]?.done ? 'Continue' : 'Play'} S${esc(continueEp.season ?? seasons.find(se => episodesOf(se).includes(continueEp)))} E${esc(continueEp.num)}</button><button class="btn" data-sfav>${favUrls.has(s.url || s.id) ? '★ Saved' : '☆ Save'}</button></div>` : ''}
       ${seasons.length > 1 ? `<div class="chips season-chips">${seasons.map(se => `<button class="chip ${se === season ? 'active' : ''}" data-season="${esc(se)}">Season ${esc(se)}</button>`).join('')}</div>` : ''}
       ${list.length ? `<ul class="eps cards-eps">${list.map((e, k) => {
         const pr = state.progress[e.url];
         const still = e.logo && e.logo !== s.logo && e.logo !== i.cover ? e.logo : '';
         return `<li class="epc${pr?.done ? ' done' : ''}" data-e="${k}">
           <span class="ep-still" data-initials="${esc(e.num)}">${still ? `<img src="${esc(still)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${pr && !pr.done && pr.t > 30 ? `<span class="bar"><i style="width:${Math.min(100, (pr.t / pr.d) * 100).toFixed(1)}%"></i></span>` : ''}<span class="ep-play">${pr?.done ? icon('check') : icon('play')}</span></span>
-          <span class="row-text"><span class="muted ep-label">Episode ${esc(e.num)}${e.duration ? ` · ${esc(e.duration)}` : ''}${pr?.done ? ' · Watched' : pr?.t > 30 ? ` · ${fmtDur(pr.d - pr.t)} left` : ''}</span><span class="row-name">${esc(epTitle(e.name) || `Episode ${e.num}`)}</span>${e.plot ? `<span class="muted clamp">${esc(e.plot)}</span>` : ''}</span>
+          <span class="row-text"><span class="muted ep-label">Episode ${esc(e.num)}${e.duration ? ` · ${esc(niceRuntime(e.duration))}` : ''}${pr?.done ? ' · Watched' : pr?.t > 30 ? ` · ${fmtDur(pr.d - pr.t)} left` : ''}</span><span class="row-name">${esc(epTitle(e.name) || `Episode ${e.num}`)}</span>${e.plot ? `<span class="muted clamp">${esc(e.plot)}</span>` : ''}</span>
         </li>`;
       }).join('')}</ul>` : '<p class="muted">No episodes listed.</p>'}
     </div>`, {
@@ -2763,6 +2812,7 @@ async function seriesSheet(s) {
           if (sc) { season = sc.dataset.season; return render(true); }
           if (e.target.closest('[data-plot]')) return e.target.closest('[data-plot]').classList.toggle('open');
           if (e.target.closest('[data-continue]')) { const se = seasons.find(x => episodesOf(x).some(y => y.url === continueEp.url)) || season; const l = episodesOf(se); closeSheet(); return playChannel(l, l.findIndex(y => y.url === continueEp.url)); }
+          if (e.target.closest('[data-trailer]')) return window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(i.youtube_trailer)}`, '_blank');
           if (e.target.closest('[data-sfav]')) { toggleFavorite({ ...s, url: s.url || s.id }, null).then(() => render(true)); return; }
           const ep = e.target.closest('[data-e]');
           if (ep) { closeSheet(); playChannel(list, +ep.dataset.e); }
@@ -3068,7 +3118,7 @@ function announceEpisodes(series, added) {
   }
   if (!document.hidden) toast(`${title} — ${body}`, { action: 'Open', fn: () => seriesSheet(series) });
 }
-globalThis.__bgCheck = () => checkNewEpisodes(true).catch(() => 0);   // iOS background refresh (see AppDelegate)
+globalThis.__bgCheck = () => Promise.all([syncNow().catch(() => 0), checkNewEpisodes(true).catch(() => 0), checkFollows(true).catch(() => 0)]);   // iOS background refresh (see AppDelegate)
 
 // ---------- reminders ----------
 // Fire a few minutes before a programme starts: a phone notification when the installed app has
@@ -3077,22 +3127,87 @@ const REMIND_BEFORE = 3 * MINUTE;
 const reminderKey = (c, prog) => `${c.url}|${prog[0]}`;
 const hasReminder = (c, prog) => (state.reminders || []).some(r => r.key === reminderKey(c, prog));
 let reminderTimer = 0;
+/** Adds a reminder unless there is one already; returns true if it was new. Saved by the caller (saveReminders). */
+async function addReminder(c, prog) {
+  state.reminders ||= [];
+  if (hasReminder(c, prog) || prog[0] <= Date.now() + REMIND_BEFORE) return false;
+  const r = { key: reminderKey(c, prog), at: prog[0], title: prog[2], channel: cloneChannel(c), set: Date.now() };
+  state.reminders.push(r);
+  await nativeReminder(r.key, r);
+  return true;
+}
+async function saveReminders() { await db.set('reminders', state.reminders); scheduleReminders(); syncSoon(); }
+
+// ---------- find a team / show in the TV guide ----------
+// The server searches the whole guide (every channel, next 3 days); this keeps the programmes on your own channels,
+// once each, best copy (not "(Backup)", English group, HD) first. "Follow" re-runs it every few hours and sets reminders
+// for anything new, so every Arsenal match ends up reminded without searching again.
+const onTvCache = new Map();   // query -> { at, list }
+async function findOnTv(q) {
+  const key = q.trim().toLowerCase();
+  const hit = onTvCache.get(key);
+  if (hit && Date.now() - hit.at < 10 * MINUTE) return hit.list;
+  const out = [];
+  for (const p of state.playlists) {
+    if (p.virtual || !epgUrls(p).length || !canSync()) continue;
+    try {
+      const r = await fetch(serverApi('guide'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ urls: epgUrls(p), find: q }) });
+      if (!r.ok) continue;
+      const { matches = [] } = await r.json();
+      const chans = (m3uKinds(p)?.live || p.channels).filter(c => isLiveChannel(c) && visibleGroup(p, c.group || '')).map(c => ({ ...c, src: p.id }));
+      const prefer = c => (/backup|\bsd\b/i.test(c.name) ? 0 : 2) + (isEnglishGroup(c.group || '') ? 2 : 0) + (/\b(hd|fhd|uhd|4k)\b/i.test(c.name) ? 1 : 0);
+      out.push(...matchUpcoming(matches, chans, normName, prefer));
+    } catch {}
+  }
+  out.sort((a, b) => a.prog[0] - b.prog[0]);
+  onTvCache.set(key, { at: Date.now(), list: out });
+  return out;
+}
+async function remindAll(q, list) {
+  let n = 0;
+  for (const { channel, prog } of list) if (await addReminder(channel, prog)) n++;
+  await saveReminders();
+  toast(n ? `${n} reminder${n === 1 ? '' : 's'} set for ${q}` : `Already reminded for every ${q} programme`);
+}
+const isFollowing = q => (state.follows || []).some(f => f.q.toLowerCase() === q.trim().toLowerCase());
+async function toggleFollow(q) {
+  state.follows ||= (await db.get('follows')) || [];
+  if (isFollowing(q)) { state.follows = state.follows.filter(f => f.q.toLowerCase() !== q.trim().toLowerCase()); toast(`Stopped following ${q}`); }
+  else { state.follows.push({ q: q.trim(), at: Date.now() }); toast(`Following ${q}: every upcoming programme gets a reminder`); checkFollows(true); }
+  await db.set('follows', state.follows);
+}
+let followsAt = 0;
+async function checkFollows(force = false) {
+  state.follows ||= (await db.get('follows')) || [];
+  if (!state.follows.length || (!force && Date.now() - followsAt < 3 * 60 * MINUTE)) return;
+  followsAt = Date.now();
+  let n = 0;
+  for (const f of state.follows) {
+    onTvCache.delete(f.q.toLowerCase());
+    for (const { channel, prog } of await findOnTv(f.q)) if (await addReminder(channel, prog)) n++;
+  }
+  if (n) { await saveReminders(); if (!document.hidden) toast(`${n} new reminder${n === 1 ? '' : 's'} from teams and shows you follow`); }
+}
+
 async function toggleReminder(c, prog) {
   state.reminders ||= [];
   const key = reminderKey(c, prog);
   if (hasReminder(c, prog)) {
     state.reminders = state.reminders.filter(r => r.key !== key);
+    (syncMeta.remDel ||= {})[key] = Date.now();
     nativeReminder(key, null);
     toast('Reminder removed');
   } else {
     if ('Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch {} }
-    const r = { key, at: prog[0], title: prog[2], channel: cloneChannel(c) };
+    const r = { key, at: prog[0], title: prog[2], channel: cloneChannel(c), set: Date.now() };
+    delete syncMeta.remDel?.[key];
     state.reminders.push(r);
     const ok = await nativeReminder(key, r);
     toast(ok === false ? 'Reminder set — turn on notifications for M3U Player in iPhone Settings to be alerted when the app is closed' : `Reminder set for ${fmtTime(prog[0])}`);
   }
   await db.set('reminders', state.reminders);
   scheduleReminders();
+  syncSoon();
 }
 // iPhone app: each reminder is also a scheduled iOS notification, so it arrives with the app closed or the phone locked
 // (the in-app timer below can't run then). Same id = replaces, so re-sending on start-up is harmless.
@@ -4200,7 +4315,7 @@ function bindKeys() {
     if (e.key === 'Escape') { if (sheetOpen) closeSheet(); else if (state.playing && !typing) stopPlaying(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && matchMedia('(min-width: 900px)').matches) { e.preventDefault(); $('#tq')?.focus(); $('#tq')?.select(); return; }
     if (typing || sheetOpen || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.key === '/') { e.preventDefault(); ($('#q') || (matchMedia('(min-width: 900px)').matches ? $('#tq') : $('#home-q')) || $('#gq'))?.focus(); return; }
+    if (e.key === '/') { e.preventDefault(); ($('#q') || ($('#tq')?.offsetParent ? $('#tq') : $('#home-q')) || $('#gq'))?.focus(); return; }
     if (/^\d$/.test(e.key) && (state.playing || state.current)) {
       zapBuf += e.key; clearTimeout(zapTimer);
       toast(`Channel ${zapBuf}…`);

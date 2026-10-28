@@ -29,7 +29,7 @@ data class Channel(val name: String, val url: String, val group: String, val log
     val hasCatchup get() = catchupDays > 0
 }
 
-data class Reminder(val url: String, val channel: String, val title: String, val start: Long)
+data class Reminder(val url: String, val channel: String, val title: String, val start: Long, val set: Long = 0)
 
 data class Vod(
     val kind: String,          // movie | series
@@ -112,12 +112,55 @@ object Repo {
     fun arrange(groups: List<String>): List<String> { val hid = hiddenGroups; val pins = pinnedGroups.filter { it in groups && it !in hid }; return pins + groups.filter { it !in pins && it !in hid } }
 
     var reminders: List<Reminder>
-        get() = runCatching { JSONArray(prefs.getString("reminders", "[]")).let { a -> (0 until a.length()).map { val o = a.getJSONObject(it); Reminder(o.optString("url"), o.optString("channel"), o.optString("title"), o.optLong("start")) } } }.getOrDefault(emptyList())
-        set(v) { prefs.edit().putString("reminders", JSONArray(v.map { JSONObject().put("url", it.url).put("channel", it.channel).put("title", it.title).put("start", it.start) }).toString()).apply(); version++ }
+        get() = runCatching { JSONArray(prefs.getString("reminders", "[]")).let { a -> (0 until a.length()).map { val o = a.getJSONObject(it); Reminder(o.optString("url"), o.optString("channel"), o.optString("title"), o.optLong("start"), o.optLong("set")) } } }.getOrDefault(emptyList())
+        set(v) { prefs.edit().putString("reminders", JSONArray(v.map { JSONObject().put("url", it.url).put("channel", it.channel).put("title", it.title).put("start", it.start).put("set", it.set) }).toString()).apply(); version++ }
     fun hasReminder(url: String, start: Long) = reminders.any { it.url == url && it.start == start }
+    // Reminders are shared with the phone and the web app through /sync, keyed "<channel url>|<start ms>": set one here
+    // and the iPhone notifies you too, and the other way round. A removed one goes up as a { deleted } marker.
+    private val remDel: JSONObject get() = runCatching { JSONObject(prefs.getString("remDel", "{}") ?: "{}") }.getOrDefault(JSONObject())
+    private fun remEntry(r: Reminder) = JSONObject().put("url", r.url).put("start", r.start).put("title", r.title).put("at", maxOf(1L, r.set))
+        .put("channel", JSONObject().put("url", r.url).put("name", r.channel).also { o -> channelByUrl(r.url)?.let { o.put("logo", it.logo).put("group", it.group).put("tvgId", it.tvgId) } })
+    private fun localReminders() = JSONObject().also { out ->
+        val del = remDel
+        for (k in del.keys()) out.put(k, JSONObject().put("deleted", true).put("at", del.optLong(k)).put("start", k.substringAfterLast('|').toLongOrNull() ?: 0))
+        for (r in reminders) out.put("${r.url}|${r.start}", remEntry(r))
+    }
     fun toggleReminder(c: Channel, p: Programme) {
-        val l = reminders.filter { it.start > System.currentTimeMillis() - 3600_000L }
-        reminders = if (l.any { it.url == c.url && it.start == p.start }) l.filterNot { it.url == c.url && it.start == p.start } else l + Reminder(c.url, c.name, p.title, p.start)
+        val now = System.currentTimeMillis(); val key = "${c.url}|${p.start}"
+        val l = reminders.filter { it.start > now - 3600_000L }
+        val del = remDel
+        val entry: JSONObject
+        if (l.any { it.url == c.url && it.start == p.start }) {
+            reminders = l.filterNot { it.url == c.url && it.start == p.start }
+            del.put(key, now); entry = JSONObject().put("deleted", true).put("at", now).put("start", p.start)
+        } else {
+            val r = Reminder(c.url, c.name, p.title, p.start, now)
+            reminders = l + r
+            del.remove(key); entry = remEntry(r)
+        }
+        prefs.edit().putString("remDel", del.toString()).apply()
+        guideScope.launch {
+            try { val d = JSONObject(http(api("sync"), JSONObject().put("reminders", JSONObject().put(key, entry)).toString())); syncData = d; adoptReminders(d) }
+            catch (e: Exception) { warn("saving reminder failed", e) }   // sent again with the next sync
+        }
+    }
+    /** Takes in reminders set (or removed) on the other devices. */
+    private fun adoptReminders(d: JSONObject) {
+        val r = d.optJSONObject("reminders") ?: return
+        val now = System.currentTimeMillis(); val del = remDel
+        var l = reminders; var changed = false
+        for (k in r.keys()) {
+            val v = r.optJSONObject(k) ?: continue
+            val start = k.substringAfterLast('|').toLongOrNull() ?: continue
+            val url = k.substringBeforeLast('|')
+            val mine = l.firstOrNull { it.url == url && it.start == start }
+            if (v.optBoolean("deleted")) { if (mine != null && mine.set < v.optLong("at")) { l = l - mine; changed = true }; continue }
+            if (mine != null || start <= now + 60_000 || del.optLong(k) >= v.optLong("at")) continue
+            l = l + Reminder(url, v.optJSONObject("channel")?.optString("name").orEmpty(), v.optString("title"), start, v.optLong("at")); changed = true
+        }
+        val keep = del.keys().asSequence().toList().filter { (it.substringAfterLast('|').toLongOrNull() ?: 0) < now - 6 * 3600_000L }
+        if (keep.isNotEmpty()) { keep.forEach { del.remove(it) }; prefs.edit().putString("remDel", del.toString()).apply() }
+        if (changed) reminders = l
     }
 
     /** False while the server can't be reached: screens show the saved copies and say so. */
@@ -149,7 +192,7 @@ object Repo {
     /** Bumped whenever favourites / cached data change, so screens showing them redraw. */
     private val versionState = androidx.compose.runtime.mutableIntStateOf(0)
     var version: Int get() = versionState.intValue; set(v) { versionState.intValue = v }
-    fun clearCache() { app.filesDir.listFiles()?.forEach { if (it.name.startsWith("vod-") || it.name.startsWith("live-") || it.name.startsWith("group-") || it.name.startsWith("eps-") || it.name.startsWith("tmdb-") || it.name == "guide.json") it.delete() }; overviews.clear(); groupCache.clear(); live = null; version++ }
+    fun clearCache() { app.filesDir.listFiles()?.forEach { if (it.name.startsWith("vod-") || it.name.startsWith("live-") || it.name.startsWith("group-") || it.name.startsWith("eps-") || it.name.startsWith("tmdb-") || it.name == "guide.json") it.delete() }; epsMem.clear(); overviews.clear(); groupCache.clear(); live = null; version++ }
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
     fun api(path: String) = "$server/$path?key=${enc(key)}"
@@ -219,7 +262,7 @@ object Repo {
 
     @Volatile var syncData: JSONObject = JSONObject()
     suspend fun sync(): JSONObject = withContext(Dispatchers.IO) {
-        val d = try { JSONObject(http(api("sync"), timeout = 15_000)) } catch (e: Exception) {
+        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).toString(), timeout = 15_000)) } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             warn("sync failed", e)
             lastSyncErrorState.value = if (e is org.json.JSONException) "Your server's reply couldn't be read." else describe(e, "your server")
@@ -227,6 +270,7 @@ object Repo {
         }
         lastSyncErrorState.value = null
         syncData = d
+        adoptReminders(d)
         version++
         File(app.filesDir, "sync.json").writeText(d.toString())
         d
@@ -600,8 +644,11 @@ object Repo {
 
     suspend fun episodes(v: Vod): Map<Int, List<Episode>> = withContext(Dispatchers.IO) {
         val x = xtream() ?: return@withContext emptyMap()
+        epsMem["${v.id}"]?.let { return@withContext it }
         val file = File(app.filesDir, "eps-${v.id}.json")
-        val text = try { http(playerApi(x, "get_series_info", "&series_id=${v.id}"), timeout = 60_000).also { file.writeText(it) } } catch (e: Exception) { if (file.exists()) file.readText() else throw e }
+        // Kept on the TV for 6 hours (like the other lists), so a series opens at once the second time.
+        val fresh = file.exists() && System.currentTimeMillis() - file.lastModified() < 6 * 3600_000L
+        val text = if (fresh) file.readText() else try { http(playerApi(x, "get_series_info", "&series_id=${v.id}"), timeout = 60_000).also { file.writeText(it) } } catch (e: Exception) { if (file.exists()) file.readText() else throw e }
         val d = JSONObject(text)
         val eps = d.optJSONObject("episodes") ?: return@withContext emptyMap()
         val out = sortedMapOf<Int, List<Episode>>()
@@ -613,8 +660,9 @@ object Repo {
                     e.optString("container_extension").ifEmpty { "mp4" }, info.optString("movie_image"), info.optString("plot"), info.optString("duration"))
             }.sortedBy { it.num }
         }
-        out
+        out.also { if (it.isNotEmpty()) epsMem["${v.id}"] = it }
     }
+    private val epsMem = ConcurrentHashMap<String, Map<Int, List<Episode>>>()
     fun episodeUrl(e: Episode): String? = xtream()?.let { "${it.server}/series/${it.user}/${it.pass}/${e.id}.${e.ext}" }
 
     private val tmdb = ConcurrentHashMap<String, JSONObject>()

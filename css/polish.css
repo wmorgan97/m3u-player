@@ -329,11 +329,14 @@
 
 /* ---------- Film page ---------- */
 .detail.film { position: relative; }
-.film-hero { position: absolute; left: -16px; right: -16px; top: -10px; height: 190px; border-radius: 20px 20px 0 0; overflow: hidden; z-index: 0;
+/* The backdrop reaches the sheet's top edge (under the grip, which stays visible on top of it). */
+.sheet-grip { position: relative; z-index: 2; }
+.sheet:has(.detail.film) .sheet-grip { background: rgba(255, 255, 255, .28); }
+.film-hero { position: absolute; left: -16px; right: -16px; top: -29px; height: 210px; border-radius: 20px 20px 0 0; overflow: hidden; z-index: 0;
   background: linear-gradient(145deg, hsl(var(--hue) 30% 22%), hsl(var(--hue) 26% 10%)); }
 .film-bg { width: 100%; height: 100%; object-fit: cover; filter: blur(18px) brightness(.5) saturate(1.2); transform: scale(1.1); }
 .film-hero::after { content: ''; position: absolute; inset: 0; background: linear-gradient(transparent, var(--surface)); }
-.detail.film .detail-top { position: relative; z-index: 1; padding-top: 70px; align-items: flex-end; }
+.detail.film .detail-top { position: relative; z-index: 1; padding-top: 34px; align-items: flex-end; }
 .detail.film .detail-poster { width: 120px; box-shadow: 0 12px 30px rgba(0,0,0,.5); }
 .detail.film .detail-title { font-size: 22px; }
 .film-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
@@ -342,6 +345,17 @@
 .film-bar { display: block; max-width: 200px; margin: 8px 0 2px; }
 .detail.film .detail-plot { position: relative; z-index: 1; }
 .detail.film .detail-actions .btn.primary { min-height: 48px; font-size: 15px; flex: 2 1 auto; }
+/* Play on its own row; the rest as one calm row of equal icon buttons (Save / Download / Trailer / More). */
+.film-play { margin-top: 16px; }
+.film-tools { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; margin: 10px 0 14px; }
+.film-tools button { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 0 6px; border: 0; border-radius: 12px; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.film-tools button:active { background: var(--surface-2); }
+.film-tools .ico { width: 22px; height: 22px; color: var(--text); }
+.film-tools .ico.on { fill: var(--star); stroke: var(--star); }
+.detail.film .detail-plot { margin: 0 0 10px; cursor: pointer; }
+.detail-plot.clamp3.open, .film-credit.clamp.open { -webkit-line-clamp: unset; display: block; }
+.film-credit { margin: 0 0 6px; font-size: 13.5px; cursor: pointer; }
+.film-credit b { color: var(--text); font-weight: 600; margin-right: 4px; }
 
 /* ---------- VOD screens look like a streaming app, not the channel list ---------- */
 #view.vod .filters { background: none; }
@@ -753,6 +767,18 @@ button.cw-x { border: 0; padding: 0; margin: 0; -webkit-appearance: none; appear
   .home-top .home-search, #home-results { display: none; }   /* the top bar has it */
   .home-top { margin-top: 10px; }
 }
+/* Phones: on Home the bar is just the logo and one search for everything (live TV, movies, series, the guide);
+   sections and sub-pages keep their own title. 16px text so iOS doesn't zoom in on focus. */
+@media (max-width: 899px) {
+  html:not(.tv) #back[hidden] ~ #title { display: none; }
+  html:not(.tv) #back[hidden] ~ .topsearch { display: block; flex: 1 1 auto; min-width: 0; margin: 0 4px 0 10px; }
+  html:not(.tv) .home-top .home-search, html:not(.tv) #home-results { display: none; }
+  .ts-box { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); }
+  .ts-box:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: var(--surface-2); }
+  .ts-ico .ico { width: 17px; height: 17px; color: var(--muted); }
+  .ts-box input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 16px; padding: 0; box-shadow: none; }
+  .ts-results { position: fixed; left: calc(var(--safe-left) + 10px); right: calc(var(--safe-right) + 10px); top: calc(var(--safe-top) + 58px); max-height: 68dvh; overflow-y: auto; margin: 0; z-index: 60; }
+}
 
 /* Versions */
 .vbanner { display: flex; align-items: center; gap: 12px; width: 100%; margin: 10px 0 4px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-2); color: var(--text); text-align: left; cursor: pointer; font-size: 14px; }
@@ -894,3 +920,8 @@ html.tv .btn:focus, html.tv .chip:focus, html.tv .menu-item:focus { background: 
 
 /* ⌘K is a Mac shortcut: only shown on a Mac (app.js adds .mac) */
 html:not(.mac) .ts-box kbd { display: none !important; }
+
+/* Search: "On TV" programmes for a team / show, with Remind-all and Follow */
+.hs-actions { display: flex; gap: 8px; padding: 4px 8px 8px; }
+.hs-actions .btn { flex: 1 1 0; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 13px; }
+.hs-actions .btn .ico { width: 15px; height: 15px; }

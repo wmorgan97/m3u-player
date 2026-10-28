@@ -21,6 +21,8 @@ const URLS_FILE = join(DIR, 'guide-urls.json');
 const indexes = new Map();   // urls key -> { at, chans: Map(id -> JSON string), names, job }
 
 let allowed = () => true;
+// Lower-case, accents off, punctuation to spaces: "Arsenal v Spurs!" -> "arsenal v spurs".
+const fold = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 async function feedUrl(parser, url) {
   let res, next = new URL(url);
   for (let hop = 0; ; hop++) {   // redirects re-checked against the private-address block, like the proxy
@@ -107,6 +109,27 @@ export async function handleGuide(req, res, url, send, allow) {
     }
     out.sort((a, b) => a.name.length - b.name.length);
     return send(res, 200, JSON.stringify({ matches: out }), { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  }
+  // "Find a team / show": every programme in the next 3 days whose title mentions the words, across ALL channels in the
+  // guide (the apps only hold listings for channels they have shown). Whole words, any case/accents; "Arsenal" also
+  // matches "Arsenal v Spurs" but not "Arsenalfan". Same title + start on several channels (HD/SD copies) comes back once
+  // per channel, the app picks which copy to use.
+  if (typeof q.find === 'string') {
+    const words = fold(q.find).split(' ').filter(w => w.length > 1);
+    if (!words.length) return send(res, 400, 'Search for at least two letters');
+    const now = Date.now(), until = now + 72 * HOUR, out = [];
+    const quick = words[0];
+    for (const [id, json] of ix.chans) {
+      if (!fold(json).includes(quick)) continue;   // cheap pre-check before parsing this channel's listings
+      for (const p of JSON.parse(json)) {
+        if (p[1] <= now || p[0] >= until) continue;
+        const t = ` ${fold(p[2])} `;
+        if (words.every(w => t.includes(` ${w} `))) out.push({ id, name: ix.display?.[id] || id, start: p[0], end: p[1], title: p[2], desc: (p[3] || '').slice(0, 300) });
+      }
+      if (out.length > 400) break;
+    }
+    out.sort((a, b) => a.start - b.start);
+    return send(res, 200, JSON.stringify({ at: ix.at, matches: out.slice(0, 200) }), { 'content-type': 'application/json', 'cache-control': 'no-store' });
   }
   const names = {}, ids = new Set();
   for (const id of q.ids || []) if (ix.chans.has(id)) ids.add(id);
