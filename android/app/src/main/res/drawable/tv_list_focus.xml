@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Player dialogs (audio, subtitles, sleep timer): the row the remote is on, unmistakable from the sofa. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true"><shape><solid android:color="#33FFFFFF"/><stroke android:width="2dp" android:color="#FFFFFFFF"/><corners android:radius="8dp"/></shape></item>
+    <item android:state_pressed="true"><shape><solid android:color="#59FFFFFF"/><corners android:radius="8dp"/></shape></item>
+    <item><color android:color="@android:color/transparent"/></item>
+</selector>

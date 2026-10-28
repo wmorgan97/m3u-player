@@ -24,7 +24,7 @@ import androidx.compose.ui.input.key.*
 
 // The TV app's design system. Everything on screen is built from these values, so the whole app shares one
 // rhythm: a 48dp safe margin (Android TV's overscan guide), an 8dp spacing grid, one type scale sized for a
-// sofa (nothing under 12sp), one card shape, one focus treatment.
+// sofa (nothing under 12sp, secondary text 13sp+), one card shape, one focus treatment.
 
 /** A named section in a system trace around a piece of composition. */
 inline fun <T> traced(name: String, block: () -> T): T { android.os.Trace.beginSection(name); try { return block() } finally { android.os.Trace.endSection() } }
@@ -45,14 +45,22 @@ object Tv {
     val wide = 236.dp           // 16:9 cards (continue watching, episodes)
     val channel = 176.dp
 
-    // Type scale
-    val display = 34.sp         // banner / details title
-    val title = 24.sp           // page title
-    val rowTitle = 19.sp
-    val body = 16.sp
-    val bodySmall = 14.sp
-    val caption = 13.sp         // under cards
-    val label = 12.sp           // smallest allowed on TV
+    // Type scale, tuned for a 55" 4K set at 2.5-3 m (the UI renders at 1080p density, 960x540dp): headings a touch
+    // smaller than a phone-style scale so more fits, secondary text never under 13sp, badges never under 12sp.
+    val display = 30.sp         // banner / details title
+    val displayLine = 36.sp
+    val title = 22.sp           // page title
+    val rowTitle = 18.sp        // section heading
+    val body = 15.sp            // plots, menu
+    val bodyLine = 22.sp
+    val bodySmall = 14.sp       // buttons, secondary lines
+    val bodySmallLine = 20.sp
+    val caption = 13.sp         // under cards, episode plots
+    val captionLine = 18.sp
+    val label = 13.sp           // tags, meta lines, counts
+    val micro = 12.sp           // badges on pictures, guide times, channel numbers: the floor
+    val numeral = 22.sp         // channel initials on a tile
+    val rank = 40.sp            // Top 10 number on a poster
 
     // Colours
     val bg = Color(0xFF0E1014)
@@ -196,7 +204,10 @@ fun PageTitle(text: String, sub: String? = null) {
 /** Small rounded tag: quality, year, genre. */
 @Composable
 fun Tag(text: String, color: Color = Tv.text2, bg: Color = Color(0x26FFFFFF), size: TextUnit = Tv.label) {
-    Text(text, Modifier.background(bg, RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 2.dp), fontSize = size, color = color, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+    // A fixed line box (centred, not trimmed), so a tag with a ★ is exactly as tall as one without.
+    Text(text, Modifier.background(bg, RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 2.dp), fontSize = size, color = color, fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false,
+        style = androidx.compose.ui.text.TextStyle(lineHeight = size * 1.4f, lineHeightStyle = androidx.compose.ui.text.style.LineHeightStyle(androidx.compose.ui.text.style.LineHeightStyle.Alignment.Center, androidx.compose.ui.text.style.LineHeightStyle.Trim.None),
+            platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false)))
 }
 
 /** Nothing here: an icon, a line, and a hint of what to do. */

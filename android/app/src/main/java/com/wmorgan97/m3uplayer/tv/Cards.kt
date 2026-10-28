@@ -104,8 +104,10 @@ fun Picture(url: String?, modifier: Modifier = Modifier, scale: ContentScale = C
 
 @Composable
 fun <T> CardRow(items: List<T>, key: ((T) -> Any)? = null, card: @Composable (T, Int) -> Unit) = traced("CardRow") {
+    // Keyed rows show each key once: a duplicate key (the same stream listed twice, one match on two lists) crashes a LazyRow.
+    val list = if (key == null) items else remember(items) { items.distinctBy(key) }
     LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
-        itemsIndexed(items, key = key?.let { k -> { _, it -> k(it) } }) { i, it -> card(it, i) }
+        itemsIndexed(list, key = key?.let { k -> { _, it -> k(it) } }) { i, it -> card(it, i) }
     }
 }
 
@@ -113,8 +115,8 @@ fun <T> CardRow(items: List<T>, key: ((T) -> Any)? = null, card: @Composable (T,
 @Composable
 fun Caption(title: String, sub: String?, width: Dp, label: String = title) = traced("Caption") {
     Column(Modifier.width(width).padding(top = 8.dp).clearAndSetSemantics { }) {
-        Text(title, fontSize = Tv.caption, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
-        Text(sub ?: " ", fontSize = Tv.label, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(title, fontSize = Tv.caption, lineHeight = Tv.captionLine, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+        Text(sub ?: " ", fontSize = Tv.label, lineHeight = Tv.captionLine, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -131,10 +133,10 @@ fun PosterCard(v: Vod, width: Dp = Tv.poster, rank: Int? = null, onLong: (() -> 
                     }
                 }
                 if (v.rating != null) Text("★ %.1f".format(v.rating), Modifier.align(Alignment.TopEnd).padding(6.dp).background(Color(0xB3000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
-                    fontSize = 11.sp, color = Tv.star, fontWeight = FontWeight.Bold)
+                    fontSize = Tv.micro, color = Tv.star, fontWeight = FontWeight.Bold)
                 if (rank != null) {
                     Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(70.dp).background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000)))))
-                    Text("$rank", Modifier.align(Alignment.BottomStart).padding(start = 8.dp), fontSize = 44.sp, fontWeight = FontWeight.Black, color = Tv.text, lineHeight = 44.sp)
+                    Text("$rank", Modifier.align(Alignment.BottomStart).padding(start = 8.dp), fontSize = Tv.rank, fontWeight = FontWeight.Black, color = Tv.text, lineHeight = Tv.rank)
                 }
             }
         }
@@ -154,7 +156,7 @@ fun WideCard(image: String?, title: String, sub: String, progress: Float?, width
                         Text(title, Modifier.padding(12.dp), fontSize = Tv.caption, color = Tv.text2, maxLines = 2, fontWeight = FontWeight.SemiBold)
                     }
                 }
-                if (badge != null) Box(Modifier.align(Alignment.TopStart).padding(6.dp)) { Tag(badge, bg = Color(0xB3000000), color = Tv.text, size = 11.sp) }
+                if (badge != null) Box(Modifier.align(Alignment.TopStart).padding(6.dp)) { Tag(badge, bg = Color(0xB3000000), color = Tv.text, size = Tv.micro) }
                 if (progress != null) ProgressLine(progress, Modifier.align(Alignment.BottomStart).fillMaxWidth())
             }
         }
@@ -164,13 +166,13 @@ fun WideCard(image: String?, title: String, sub: String, progress: Float?, width
 
 /** A channel: its logo on a dark tile, name and what's on. */
 @Composable
-fun ChannelCard(name: String, logo: String?, now: String, progress: Float? = null, onLong: (() -> Unit)? = null, onClick: () -> Unit) {
+fun ChannelCard(name: String, logo: String?, now: String, progress: Float? = null, restoreKey: String? = null, onLong: (() -> Unit)? = null, onClick: () -> Unit) {
     Column(Modifier.width(Tv.channel)) {
-        FocusCard(Modifier.width(Tv.channel).aspectRatio(16f / 9f), label = name, onLongClick = onLong, onClick = onClick) {
+        FocusCard(Modifier.width(Tv.channel).aspectRatio(16f / 9f), restoreKey = restoreKey, label = name, onLongClick = onLong, onClick = onClick) {
             Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
-                if (logo.isNullOrBlank()) Text(initials(name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
+                if (logo.isNullOrBlank()) Text(initials(name), fontSize = Tv.numeral, fontWeight = FontWeight.Bold, color = Tv.muted)
                 else Picture(Repo.logo(logo), Modifier.fillMaxSize().padding(16.dp).background(Color.Transparent), ContentScale.Fit) {
-                    Text(initials(name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
+                    Text(initials(name), fontSize = Tv.numeral, fontWeight = FontWeight.Bold, color = Tv.muted)
                 }
                 if (progress != null) ProgressLine(progress, Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
             }
@@ -216,6 +218,7 @@ fun episodeItem(show: Vod, e: Episode, url: String, start: Double): JSONObject {
     return JSONObject().put("url", url).put("title", "${show.title} · S${e.season} E${e.num}").put("subtitle", e.title).put("info", e.plot).put("live", false).put("start", start)
         .put("art", e.still.ifEmpty { show.poster }).put("listTitle", "${e.num}. ${e.title}").put("listSub", e.duration)
         .put("listTitleOverride", "Episodes")
+        .put("show", show.title).put("epLabel", "S${e.season} E${e.num}").put("epTitle", e.title)   // for the player's next-episode card
         .put("sync", JSONObject().put("id", "e${e.id}").put("kind", "episode").put("name", name).put("url", url).put("logo", e.still.ifEmpty { show.poster })
             .put("group", "${show.title} · Season ${e.season}").put("season", e.season).put("num", e.num).put("series", show.name))
 }

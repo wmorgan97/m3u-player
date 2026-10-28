@@ -89,10 +89,27 @@ public final class PlayerHolder {
         return p;
     }
 
-    /** MPEG-TS streams: read far less of the stream before deciding where it starts (the default reads ~110KB first). */
+    /** MPEG-TS streams: read far less of the stream before deciding where it starts (the default reads ~110KB first),
+     *  and start on the first whole picture (an I-frame), not only on an IDR: some channels send an IDR every few seconds
+     *  but I-frames every half second, so the picture comes up sooner. */
     public static DefaultExtractorsFactory extractors() {
         return new DefaultExtractorsFactory()
             .setTsExtractorTimestampSearchBytes(TsExtractor.TS_PACKET_SIZE * 60)
-            .setTsExtractorFlags(androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_IGNORE_SPLICE_INFO_STREAM);
+            .setTsExtractorFlags(TS_FLAGS);
+    }
+    static final int TS_FLAGS = androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_IGNORE_SPLICE_INFO_STREAM
+        | androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES;
+
+    private static okhttp3.OkHttpClient http;
+    /** One HTTP client for every stream: its connections and DNS answers are reused from channel to channel (HLS
+     *  playlists and segments, logos), so a zap on the same server skips the connection set-up. */
+    public static synchronized okhttp3.OkHttpClient http() {
+        if (http == null) http = new okhttp3.OkHttpClient.Builder()
+            .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS).readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true).followSslRedirects(true)
+            .connectionPool(new okhttp3.ConnectionPool(4, 5, java.util.concurrent.TimeUnit.MINUTES))
+            .retryOnConnectionFailure(true)
+            .build();
+        return http;
     }
 }

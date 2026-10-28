@@ -58,7 +58,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     val favUrls = remember(v) { Repo.favorites().map { it.optString("url") }.toSet() }
     val hiddenCh = remember(v) { Repo.hiddenChannels }
     val byGroup = remember(l) { l.channels.groupBy { it.group } }
-    val groups = remember(l, favUrls, v) { listOfNotNull(if (favUrls.isNotEmpty()) "★ Favourites" else null) + Repo.arrange(l.groups.filter { it.isNotBlank() }) }
+    val groups = remember(l, favUrls, v) { listOfNotNull(if (l.channels.any { it.url in favUrls }) "★ Favourites" else null) + Repo.arrange(l.groups.filter { it.isNotBlank() }) }
     var group by rememberSaveable { mutableStateOf(startGroup?.takeIf { it in groups } ?: groups.firstOrNull() ?: "") }
     var unlockTick by remember { mutableIntStateOf(0) }
     val locked = remember(group, v, unlockTick) { Repo.isLocked(group) }
@@ -155,7 +155,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                 val bits = listOfNotNull(selC.name, selP?.let { "${dayLabel(it.start, now)}${hhmm(it.start)}–${hhmm(it.end)}" }, selP?.let { "${(it.end - it.start) / 60_000} min" },
                     selP?.let { p -> when { p.start <= now && p.end > now -> "On now"; p.end <= now && Repo.catchupUrl(selC, p.start, p.end) != null -> "Catch-up"; Repo.hasReminder(selC.url, p.start) -> "Reminder set"; else -> null } })
                 Text(bits.joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
-                Text(selP?.desc?.ifBlank { null } ?: if (selP == null) "No programme information" else "", fontSize = Tv.caption, color = Tv.muted, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
+                Text(selP?.desc?.ifBlank { null } ?: if (selP == null) "No programme information" else "", fontSize = Tv.caption, color = Tv.muted, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.captionLine, modifier = Modifier.padding(top = 4.dp))
             }
         }
         }
@@ -166,7 +166,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                     colors = ClickableSurfaceDefaults.colors(containerColor = if (g == group) Tv.accent.copy(alpha = .16f) else Tv.surface, focusedContainerColor = Tv.text,
                         contentColor = if (g == group) Tv.accent else Tv.text2, focusedContentColor = Tv.bg)) {
                     Box(Modifier.fillMaxHeight().padding(horizontal = 14.dp).clearAndSetSemantics { }, contentAlignment = Alignment.Center) {
-                        Text((if (g in Repo.lockedGroups && Repo.pin.isNotEmpty()) "🔒 " else "") + prettyGroup(g), fontSize = 13.sp, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
+                        Text((if (g in Repo.lockedGroups && Repo.pin.isNotEmpty()) "🔒 " else "") + prettyGroup(g), fontSize = Tv.caption, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
                     }
                 }
             }
@@ -180,6 +180,8 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                     Button(onClick = { pinFor = group }) { Text("Enter PIN", fontSize = Tv.bodySmall) }
                 }
             }
+        } else if (chans.isEmpty()) {
+            Box(Modifier.fillMaxSize().padding(bottom = 80.dp)) { EmptyState(Icons.Default.CalendarViewWeek, "No channels in this group", "Pick another group above") }
         } else BoxWithConstraints(Modifier.fillMaxSize().padding(start = Tv.margin, end = Tv.margin - 16.dp)) {
             val gridW = maxWidth - CHAN_W
             val perMin = gridW / SPAN_MIN.toFloat()
@@ -237,10 +239,10 @@ private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Lon
     val sel = if (cursor >= 0) at(all, cursor) else null
     Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = 2.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 6.dp).background(if (cursor >= 0) Tv.surface3 else if (inPreview) Tv.accent.copy(alpha = .12f) else Tv.surface, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (inPreview) "▶" else if (Repo.showNumbers) "${c.num}" else "", fontSize = 11.sp, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(if (Repo.showNumbers) 30.dp else 16.dp), maxLines = 1)
+            Text(if (inPreview) "▶" else if (Repo.showNumbers) "${c.num}" else "", fontSize = Tv.micro, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(if (Repo.showNumbers) 30.dp else 16.dp), maxLines = 1)
             LogoTile(c, Modifier.size(width = 36.dp, height = 22.dp))
             Spacer(Modifier.width(8.dp))
-            Text(c.name + if (fav) " ★" else "", fontSize = 13.sp, lineHeight = 15.sp, color = if (inPreview) Tv.accent else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            Text(c.name + if (fav) " ★" else "", fontSize = Tv.caption, lineHeight = 16.sp, color = if (inPreview) Tv.accent else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
         }
         Box(Modifier.fillMaxSize().clipToBounds()) {
             if (shown.isEmpty()) Cell("No programme information", null, 0.dp, perMin * SPAN_MIN.toFloat(), on = selected && cursor >= 0, past = false, onAir = false, progress = null, catchup = false)
@@ -262,8 +264,8 @@ private fun Cell(title: String, sub: String?, x: Dp, w: Dp, on: Boolean, past: B
     val fg = when { on -> Tv.bg; past -> Tv.muted; else -> Tv.text }
     Box(Modifier.offset(x = x).width(w).fillMaxHeight().padding(end = 2.dp).background(bg, shape)) {   // (white fill = the highlight; no extra border pass)
         Column(Modifier.fillMaxHeight().padding(start = 8.dp, end = 4.dp), verticalArrangement = Arrangement.Center) {
-            Text((if (catchup) "↺ " else "") + title, fontSize = 13.sp, lineHeight = 15.sp, fontWeight = if (on || onAir) FontWeight.SemiBold else FontWeight.Normal, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (sub != null && w > 70.dp) Text(sub, fontSize = 10.5.sp, lineHeight = 12.sp, color = if (on) Tv.bg.copy(alpha = .7f) else Tv.muted, maxLines = 1)
+            Text((if (catchup) "↺ " else "") + title, fontSize = Tv.caption, lineHeight = 16.sp, fontWeight = if (on || onAir) FontWeight.SemiBold else FontWeight.Normal, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (sub != null && w > 70.dp) Text(sub, fontSize = Tv.micro, lineHeight = 14.sp, color = if (on) Tv.bg.copy(alpha = .7f) else Tv.muted, maxLines = 1)
         }
         if (progress != null && !on) ProgressLine(progress, Modifier.align(Alignment.BottomStart).fillMaxWidth(), 2.dp)
     }
@@ -280,21 +282,22 @@ fun ProgrammeDialog(act: TvActivity, c: Channel, p: Programme, now: Long, chans:
         if (onAir) add("Watch now" to { onDismiss(); act.playLive(chans, chans.indexOf(c).coerceAtLeast(0)) })
         if (archive != null) add((if (onAir) "Watch from the start" else "Play (catch-up)") to { onDismiss(); act.playCatchup(c, p) })
         if (p.start > now) add((if (reminded) "Cancel reminder" else "Remind me") to { Repo.toggleReminder(c, p); reminded = !reminded })
-        if (!onAir) add("Watch ${c.name}" to { onDismiss(); act.playLive(chans, chans.indexOf(c).coerceAtLeast(0)) })
+        if (!onAir) add("Watch the channel now" to { onDismiss(); act.playLive(chans, chans.indexOf(c).coerceAtLeast(0)) })
         add("Close" to onDismiss)
     }
     Dialog(onDismissRequest = onDismiss) {
         Column(Modifier.freshOkOnly().width(600.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)) {
-            Text(c.name, fontSize = Tv.label, color = Tv.muted, fontWeight = FontWeight.SemiBold)
+            if (!c.name.equals(p.title, true)) Text(c.name, fontSize = Tv.label, color = Tv.muted, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(p.title, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 2, modifier = Modifier.padding(top = 2.dp))
             Text("${dayLabel(p.start, now)}${hhmm(p.start)}–${hhmm(p.end)}  ·  ${(p.end - p.start) / 60_000} min" + (if (onAir) "  ·  On now" else if (p.end <= now) "  ·  Finished" else "") + (if (reminded) "  ·  Reminder set" else ""),
                 fontSize = Tv.bodySmall, color = Tv.text2, modifier = Modifier.padding(top = 6.dp))
-            if (p.desc.isNotBlank()) Text(p.desc, fontSize = Tv.bodySmall, color = Tv.text2, lineHeight = 20.sp, maxLines = 6, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 12.dp))
+            if (p.desc.isNotBlank()) Text(p.desc, fontSize = Tv.bodySmall, color = Tv.text2, lineHeight = Tv.bodySmallLine, maxLines = 6, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 12.dp))
             Spacer(Modifier.height(18.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            // Wraps onto a second line rather than pushing a button out of the dialog.
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 actions.forEachIndexed { i, (label, fn) ->
-                    if (i == 0) Button(onClick = fn, modifier = Modifier.focusRequester(first)) { Text(label, fontSize = Tv.bodySmall) }
-                    else OutlinedButton(onClick = fn) { Text(label, fontSize = Tv.bodySmall) }
+                    if (i == 0) Button(onClick = fn, modifier = Modifier.focusRequester(first)) { Text(label, fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold, maxLines = 1) }
+                    else OutlinedButton(onClick = fn) { Text(label, fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold, maxLines = 1) }
                 }
             }
         }

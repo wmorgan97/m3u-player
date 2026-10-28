@@ -22,9 +22,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.layout.layout
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -42,6 +46,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -70,8 +75,23 @@ fun HomeScreen(act: TvActivity) {
         if (chans.isNotEmpty()) { if (Repo.live == null) runCatching { Repo.liveChannels() }; Repo.requestGuide(chans) }
     }
     var menuFor by remember { mutableStateOf<Progress?>(null) }
-    var chanMenu by remember { mutableStateOf<Channel?>(null) }
+    var chanMenu by remember { mutableStateOf<Pair<Channel, String>?>(null) }   // the channel and the row it's in ("fav" / "rec")
     val scope = rememberCoroutineScope()
+    val favChans = remember(favs) { favs.map { liveFromSync(it) }.distinctBy { it.url } }
+    val recentChans = remember(recent) { recent.map { liveFromSync(it) }.distinctBy { it.url } }
+    // A card removed from a row hands the highlight to its neighbour (the next, else the one before); the row's last
+    // card hands it to the first card of the row below, so the remote never falls back to the menu.
+    fun firstKeyBelow(row: String): String? = when (row) {
+        "cw" -> favChans.firstOrNull()?.let { "fav:" + it.url } ?: recentChans.firstOrNull()?.let { "rec:" + it.url } ?: firstKeyBelow("rec")
+        "fav" -> recentChans.firstOrNull()?.let { "rec:" + it.url } ?: firstKeyBelow("rec")
+        else -> movies?.trending?.firstOrNull()?.let { "${it.kind}:${it.id}:1:${Tv.poster.value}" }
+    }
+    fun <T> handOff(list: List<T>, gone: T, row: String, key: (T) -> String) {
+        val i = list.indexOf(gone)
+        val k = (list.getOrNull(i + 1) ?: list.getOrNull(i - 1).takeIf { i > 0 })?.let(key) ?: firstKeyBelow(row)
+        Nav.restoreKey = k
+        scope.launch { delay(1500); if (Nav.restoreKey == k) Nav.restoreKey = null }   // never left waiting for a card that isn't built
+    }
 
     LazyColumn(Modifier.fillMaxSize(), state = rememberPageState(), contentPadding = PaddingValues(bottom = 56.dp)) {
         // Trending films and series alternate (#1 movie, #1 series, #2 movie, …), each ranked within its own kind.
@@ -89,11 +109,11 @@ fun HomeScreen(act: TvActivity) {
         }
         if (favs.isNotEmpty()) {
             item { RowTitle("Favourite channels", count = favs.size) }
-            item { ChannelRowCards(act, favs.map { liveFromSync(it) }, guideTick) { chanMenu = it } }
+            item { ChannelRowCards(act, favChans, guideTick, keyPrefix = "fav:") { chanMenu = it to "fav" } }
         }
         if (recent.isNotEmpty()) {
             item { RowTitle("Recently watched channels") }
-            item { ChannelRowCards(act, recent.map { liveFromSync(it) }, guideTick) { chanMenu = it } }
+            item { ChannelRowCards(act, recentChans, guideTick, keyPrefix = "rec:") { chanMenu = it to "rec" } }
         }
         val m = movies; val s = series
         if (m == null) { item { SkeletonTitle() }; item { SkeletonRow() } }
@@ -114,32 +134,32 @@ fun HomeScreen(act: TvActivity) {
         Options(progressTitle(p.item), listOf(
             "Resume" to { menuFor = null; resume(act, p) },
             "Start over" to { menuFor = null; resume(act, p, fromStart = true) },
-            "Remove from Continue watching" to { menuFor = null; scope.launch { Repo.saveProgress(p.url, p.t, p.d, p.item, hide = true); act.refresh++ } },
+            "Remove from Continue watching" to { menuFor = null; handOff(cw, p, "cw") { "cw:" + it.url }; scope.launch { Repo.saveProgress(p.url, p.t, p.d, p.item, hide = true); act.refresh++ } },
         )) { menuFor = null }
     }
-    chanMenu?.let { c -> ChannelOptions(act, c) { chanMenu = null } }
+    chanMenu?.let { (c, row) -> ChannelOptions(act, c, onRemove = { what -> if (what == "fav" && row == "fav") handOff(favChans, c, "fav") { "fav:" + it.url } }) { chanMenu = null } }
 }
 
 /** A row of channel cards with what's on now (favourites, recent). */
 @Composable
-fun ChannelRowCards(act: TvActivity, all: List<Channel>, tick: Int, onLong: (Channel) -> Unit) {
+fun ChannelRowCards(act: TvActivity, all: List<Channel>, tick: Int, keyPrefix: String? = null, onLong: (Channel) -> Unit) {
     val chans = remember(all) { all.distinctBy { it.url } }   // a playlist can list one stream twice; row keys must be unique
     CardRow(chans, { it.url }) { c, i ->
         val (now, _) = remember(tick, c) { Repo.nowNext(c) }
         val p = now?.let { ((System.currentTimeMillis() - it.start).toFloat() / (it.end - it.start)) }
-        ChannelCard(c.name, c.logo, now?.title ?: prettyGroup(c.group), p, onLong = { onLong(c) }) { act.playLive(chans, i) }
+        ChannelCard(c.name, c.logo, now?.title ?: prettyGroup(c.group), p, restoreKey = keyPrefix?.let { it + c.url }, onLong = { onLong(c) }) { act.playLive(chans, i) }
     }
 }
 
 @Composable
-fun ChannelOptions(act: TvActivity, c: Channel, onDone: () -> Unit) {
+fun ChannelOptions(act: TvActivity, c: Channel, onRemove: (String) -> Unit = {}, onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
     val fav = Repo.isFavourite(c.url)
     Options(c.name, listOf(
         "Watch" to { onDone(); act.playLive(listOf(c), 0) },
-        (if (fav) "Remove from favourites" else "Add to favourites") to { onDone(); scope.launch { Repo.toggleFavourite(c); act.refresh++ } },
+        (if (fav) "Remove from favourites" else "Add to favourites") to { onDone(); if (fav) onRemove("fav"); scope.launch { Repo.toggleFavourite(c); act.refresh++ } },
         "TV guide" to { onDone(); act.go(Screen.Guide(c.group)) },
-        "Hide this channel" to { onDone(); Repo.toggleHiddenChannel(c.url) },
+        "Hide this channel" to { onDone(); onRemove("hide"); Repo.toggleHiddenChannel(c.url) },
     ), onDone)
 }
 
@@ -203,7 +223,7 @@ fun Hero(act: TvActivity, items: List<Vod>, loading: Boolean = false) {
             Column(Modifier.align(Alignment.CenterStart).padding(start = 40.dp).fillMaxWidth(.56f)) {
                 Text("#${ranks.getOrElse(i) { i + 1 }} TRENDING ${if (v.kind == "series") "SERIES" else "MOVIE"}", fontSize = Tv.label, color = Tv.accent, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
                 Spacer(Modifier.height(8.dp))
-                Text(v.title, fontSize = Tv.display, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 38.sp)
+                Text(v.title, fontSize = Tv.display, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine)
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     v.year?.let { Tag("$it") }
@@ -211,7 +231,7 @@ fun Hero(act: TvActivity, items: List<Vod>, loading: Boolean = false) {
                     quality(v.name, v.group)?.let { Tag(it) }
                 }
                 Spacer(Modifier.height(12.dp))
-                Text(v.overview, fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 3, overflow = TextOverflow.Ellipsis, lineHeight = 20.sp)
+                Text(v.overview, fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 3, overflow = TextOverflow.Ellipsis, lineHeight = Tv.bodySmallLine)
                 Spacer(Modifier.height(18.dp))
                 // One clear action, lit when the banner has focus (OK opens it).
                 Row(Modifier.background(if (focused) Tv.text else Color(0x33FFFFFF), RoundedCornerShape(8.dp)).padding(start = 12.dp, end = 18.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -240,6 +260,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     val favUrls = remember(refresh) { Repo.favorites().map { it.optString("url") }.toSet() }
     val hiddenCh = remember(Repo.version) { Repo.hiddenChannels }
     val byGroup = remember(l) { l.channels.groupBy { it.group } }
+    val favCount = remember(l, favUrls) { l.channels.count { it.url in favUrls } }   // favourites still in a playlist (not stale links)
     val groups = remember(l, favUrls, Repo.version) { listOfNotNull(if (favUrls.isNotEmpty()) "★ Favourites" else null, "All channels") + Repo.arrange(l.groups.filter { it.isNotBlank() }) }
     var group by rememberSaveable { mutableStateOf(startGroup ?: groups.firstOrNull { it != "All channels" && it != "★ Favourites" } ?: groups[0]) }
     // The highlight moves through the groups at once; the channel list only follows once it rests there (TiviMate does
@@ -274,6 +295,11 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
     LaunchedEffect(firstVisible / 100) { if (firstVisible > 200) Repo.requestGuide(list.drop(firstVisible).take(300)) }
     var chanMenu by remember { mutableStateOf<Channel?>(null) }
+    // A channel removed from the list (hidden, or unfavourited in Favourites): the row now in its place takes the highlight.
+    var refocusAt by remember { mutableIntStateOf(-1) }
+    val refocusReq = remember { FocusRequester() }
+    LaunchedEffect(list) { if (refocusAt < 0) return@LaunchedEffect; refocusAt = refocusAt.coerceAtMost(list.size - 1)
+        repeat(15) { delay(60); if (refocusAt < 0) return@LaunchedEffect; runCatching { refocusReq.requestFocus() } }; refocusAt = -1 }
     var groupMenu by remember { mutableStateOf<String?>(null) }
     var focusedChan by remember(group) { mutableStateOf<Channel?>(null) }
     var pinFor by remember { mutableStateOf<Pair<String, (String) -> Unit>?>(null) }   // PIN prompt: title, then what to do with the right PIN
@@ -291,7 +317,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
                     val (n, nx) = remember(fc, guideTick) { Repo.nowNext(fc) }
                     Text(n?.title ?: fc.name, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(listOfNotNull(fc.name, n?.let { "${hhmm(it.start)}–${hhmm(it.end)}" }, nx?.let { "Next  ${hhmm(it.start)}  ${it.title}" }).joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
-                    if (!n?.desc.isNullOrBlank()) Text(n!!.desc, fontSize = Tv.caption, color = Tv.muted, maxLines = 3, overflow = TextOverflow.Ellipsis, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
+                    if (!n?.desc.isNullOrBlank()) Text(n!!.desc, fontSize = Tv.caption, color = Tv.muted, maxLines = 3, overflow = TextOverflow.Ellipsis, lineHeight = Tv.captionLine, modifier = Modifier.padding(top = 4.dp))
                 } else Text("Live TV", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)
             }
         } else Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, top = Tv.topMargin, bottom = 14.dp), verticalAlignment = Alignment.Bottom) {
@@ -312,7 +338,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
                         colors = ClickableSurfaceDefaults.colors(containerColor = if (g == group) Tv.surface2 else Color.Transparent, focusedContainerColor = Tv.text, contentColor = Tv.text, focusedContentColor = Tv.bg)) {
                         Row(Modifier.fillMaxSize().padding(horizontal = 12.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
                             Text((if (Repo.pin.isNotEmpty() && g in Repo.lockedGroups) "🔒 " else if (g in Repo.pinnedGroups) "↑ " else "") + prettyGroup(g), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal, modifier = Modifier.weight(1f))
-                            Text("${when (g) { "All channels" -> l.channels.size; "★ Favourites" -> favUrls.size; else -> byGroup[g]?.size ?: 0 }}", fontSize = Tv.label, color = LocalContentColor.current.copy(alpha = .6f))
+                            Text("${when (g) { "All channels" -> l.channels.size; "★ Favourites" -> favCount; else -> byGroup[g]?.size ?: 0 }}", fontSize = Tv.label, color = LocalContentColor.current.copy(alpha = .6f))
                         }
                     }
                 }
@@ -328,13 +354,14 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
             }
             else LazyColumn(Modifier.weight(1f).fillMaxHeight().padding(start = 12.dp, end = Tv.margin - 16.dp), state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
                 // A new group's rows are built a few per frame (all nine at once took ~150-200 ms on the Shield).
-                itemsIndexed(list.subList(0, minOf(list.size, shownRows)), key = { i, c -> "$i|${c.url}" }) { i, c -> ChannelRow(c, guideTick, c.url in favUrls, onLong = { chanMenu = c }, onFocus = { focusedChan = c }, inPreview = c.url == Preview.channel?.url) {
+                itemsIndexed(list.subList(0, minOf(list.size, shownRows)), key = { i, c -> "$i|${c.url}" }) { i, c -> ChannelRow(c, guideTick, c.url in favUrls, onLong = { chanMenu = c }, onFocus = { focusedChan = c; if (i == refocusAt) refocusAt = -1 }, inPreview = c.url == Preview.channel?.url,
+                    modifier = if (i == refocusAt) Modifier.focusRequester(refocusReq) else Modifier) {
                     if (Repo.preview && Preview.channel?.url != c.url) Preview.select(c, list) else act.playLive(list, i)   // first OK: preview; again: full screen
                 } }
             }
         }
     }
-    chanMenu?.let { c -> ChannelOptions(act, c) { chanMenu = null } }
+    chanMenu?.let { c -> ChannelOptions(act, c, onRemove = { what -> if (what == "hide" || group == "★ Favourites") refocusAt = list.indexOf(c) }) { chanMenu = null } }
     groupMenu?.let { g ->
         val isLocked = g in Repo.lockedGroups && Repo.pin.isNotEmpty()
         Options(prettyGroup(g), listOf(
@@ -371,10 +398,10 @@ private fun LiveSkeleton() {
 }
 
 @Composable
-fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onFocus: () -> Unit = {}, inPreview: Boolean = false, onClick: () -> Unit) {
+fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onFocus: () -> Unit = {}, inPreview: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
     // Slim, TiviMate-dense row (40dp): number, logo, name with what's on under it and a hairline progress bar.
     val (now, _) = remember(tick, c) { Repo.nowNext(c) }
-    Surface(onClick = onClick, onLongClick = onLong, modifier = Modifier.fillMaxWidth().height(40.dp).padding(vertical = 1.dp).holdOk(onLong).onFocusChanged { if (it.isFocused) onFocus() },
+    Surface(onClick = onClick, onLongClick = onLong, modifier = modifier.fillMaxWidth().height(40.dp).padding(vertical = 1.dp).holdOk(onLong).onFocusChanged { if (it.isFocused) onFocus() },
         shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp)), scale = ClickableSurfaceDefaults.scale(focusedScale = 1f),
         // The channel that's playing: a faint blue tint and its name in blue (subtle, TiviMate-like); the highlight stays white.
         colors = ClickableSurfaceDefaults.colors(containerColor = if (inPreview) Tv.accent.copy(alpha = .12f) else Color.Transparent, focusedContainerColor = Tv.text, contentColor = Tv.text, focusedContentColor = Tv.bg)) {
@@ -384,17 +411,17 @@ fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onFocus:
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 14.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold, color = if (inPreview) Tv.accent else Color.Unspecified, modifier = Modifier.weight(1f, fill = false))
+                    Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, lineHeight = 17.sp, fontWeight = FontWeight.SemiBold, color = if (inPreview) Tv.accent else Color.Unspecified, modifier = Modifier.weight(1f, fill = false))
                     if (fav) { Spacer(Modifier.width(6.dp)); Text("★", fontSize = Tv.label, color = Tv.star) }
                     // There's a 4K copy and "Prefer 4K" is on: OK plays that copy (the normal one stays as its backup).
                     if (Repo.fourKFirst && remember(c.url) { Repo.uhdFor(c) != null }) {
                         Spacer(Modifier.width(8.dp))
-                        Text("4K", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = LocalContentColor.current.copy(alpha = .75f),
+                        Text("4K", fontSize = Tv.micro, fontWeight = FontWeight.Bold, color = LocalContentColor.current.copy(alpha = .75f),
                             modifier = Modifier.border(1.dp, LocalContentColor.current.copy(alpha = .45f), RoundedCornerShape(3.dp)).padding(horizontal = 4.dp))
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(now?.title ?: "No programme information", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 11.5.sp, lineHeight = 13.sp, color = LocalContentColor.current.copy(alpha = .7f), modifier = Modifier.weight(1f))
+                    Text(now?.title ?: "No programme information", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.micro, lineHeight = 14.sp, color = LocalContentColor.current.copy(alpha = .7f), modifier = Modifier.weight(1f))
                     // progress bars line up in one column at the row's end
                     Box(Modifier.padding(start = 12.dp).width(64.dp)) { if (now != null) ProgressLine(((System.currentTimeMillis() - now.start).toFloat() / (now.end - now.start)), Modifier.fillMaxWidth(), 2.dp) }
                 }
@@ -466,46 +493,79 @@ fun GridScreen(act: TvActivity, kind: String, id: String, title: String) {
 
 @Composable
 fun DetailsScreen(act: TvActivity, v: Vod) {
-    val info by produceState<JSONObject?>(null) { value = Repo.tmdbInfo(v) }
+    var infoDone by remember { mutableStateOf(false) }
+    val info by produceState<JSONObject?>(null) { value = Repo.tmdbInfo(v); infoDone = true }
+    // "More like this": titles from your catalogue in this one's first matching TMDB genre (else what's popular).
+    val similar by produceState<List<Vod>?>(null, infoDone) {
+        if (!infoDone) return@produceState
+        val kind = if (v.kind == "series") "series" else "movies"
+        val ov = runCatching { Repo.overview(kind) }.getOrNull() ?: run { value = emptyList(); return@produceState }
+        val genres = info?.optJSONArray("genres")?.let { g -> (0 until g.length()).map { g.getString(it) } } ?: emptyList()
+        val gid = genres.firstNotNullOfOrNull { g -> ov.groups.firstOrNull { (_, n) -> n.equals(g, true) || n.contains(g, true) || g.contains(n, true) }?.first }
+        val pool = gid?.let { runCatching { Repo.group(kind, it) }.getOrNull() }?.takeIf { it.size > 3 } ?: (ov.trending + ov.top)
+        value = pool.filter { it.id != v.id && !it.title.equals(v.title, true) }.distinctBy { it.title.lowercase() }.take(20)
+    }
     val eps by produceState<Map<Int, List<Episode>>?>(null) { if (v.kind == "series") value = runCatching { Repo.episodes(v) }.getOrElse { emptyMap() } }
     val refresh = act.refresh
     val backdrop = v.backdrop.ifEmpty { info?.optString("backdrop") ?: "" }
-    val overview = info?.optString("overview")?.ifEmpty { null } ?: v.overview
+    val overview = (info?.optString("overview")?.ifBlank { null } ?: v.overview).trim()
     val playFocus = remember { FocusRequester() }
+    val seasonFocus = remember { FocusRequester() }    // always on the chip of the season shown
+    val firstEpFocus = remember { FocusRequester() }   // the first episode of the season shown
     LaunchedEffect(eps) { delay(120); runCatching { playFocus.requestFocus() } }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     var season by rememberSaveable(v.id) { mutableStateOf<Int?>(null) }   // null: the season you're watching
+    // The season on screen, with TMDB's plots and sharp stills merged in once they arrive (same Episode ids, so play works).
+    // TMDB's details are kept with the season they belong to: a season switch never shows the last season's plots.
+    val shownSeason = eps?.takeIf { it.isNotEmpty() }?.let { all -> season ?: (nextEpisode(all)?.first?.season?.takeIf { it in all } ?: all.keys.first()) }
+    val tmEps by produceState<Pair<Int, Map<Int, JSONObject>>?>(null, v.id, shownSeason) { val s = shownSeason ?: return@produceState; value = s to runCatching { Repo.tmdbEpisodes(v, s) }.getOrElse { emptyMap() } }
+    val merged = remember(eps, tmEps, shownSeason) { eps?.let { all -> val t = tmEps?.takeIf { it.first == shownSeason }?.second
+        if (shownSeason == null || t.isNullOrEmpty()) all else all + (shownSeason to (all[shownSeason] ?: emptyList()).map { Repo.withTmdb(it, t[it.num]) }) } }
+    val multiSeason = (merged?.size ?: 0) > 1
+    val hasEpisodes = merged?.get(shownSeason)?.isNotEmpty() == true
     Box(Modifier.fillMaxSize()) {
         if (backdrop.isNotEmpty()) Picture(backdrop, Modifier.fillMaxSize())
         Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0xFC0E1014), Color(0xE60E1014), Color(0x800E1014)))))
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF50E1014)), startY = 250f)))
         CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides CenteredBringIntoView) {
-        LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = Tv.margin, end = Tv.margin, top = 44.dp, bottom = 56.dp)) {
-            item {
+        // Overscan-safe on all sides: 48dp left/right, 36dp top, 40dp bottom (5% of 960x540dp is 48 x 27).
+        LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = Tv.margin, end = Tv.margin, top = 36.dp, bottom = 40.dp)) {
+            item(key = "head") {
                 // Back on the buttons: the page returns to the top (the episodes slide the header away, Apple TV style).
                 Row(Modifier.onFocusChanged { if (it.hasFocus && listState.firstVisibleItemIndex > 0) scope.launch { listState.animateScrollToItem(0) } }) {
-                    Picture(Repo.img(v.poster, 300), Modifier.width(168.dp).aspectRatio(2f / 3f).clip(Tv.shape)) {
-                        Box(Modifier.fillMaxSize().background(Tv.surface2), contentAlignment = Alignment.Center) { Text(v.title, Modifier.padding(10.dp), color = Tv.text2, fontSize = Tv.caption, fontWeight = FontWeight.SemiBold) }
+                    Picture(Repo.img(v.poster, 300), Modifier.width(150.dp).aspectRatio(2f / 3f).clip(Tv.shape)) {
+                        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
+                            Text(v.title, Modifier.padding(10.dp), color = Tv.text2, fontSize = Tv.caption, fontWeight = FontWeight.SemiBold, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                        }
                     }
-                    Spacer(Modifier.width(30.dp))
-                    Column(Modifier.fillMaxWidth(.72f)) {
-                        Text(v.title, fontSize = Tv.display, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 2, lineHeight = 38.sp)
-                        info?.optString("tagline")?.takeIf { it.isNotBlank() }?.let { Text(it, fontSize = Tv.bodySmall, color = Tv.muted, modifier = Modifier.padding(top = 4.dp)) }
-                        Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.width(28.dp))
+                    Column(Modifier.weight(1f).padding(end = 64.dp)) {
+                        Text(v.title, fontSize = Tv.display, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine)
+                        info?.optString("tagline")?.takeIf { it.isNotBlank() }?.let { Text(it, fontSize = Tv.bodySmall, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp)) }
+                        Spacer(Modifier.height(10.dp))
                         val genres = info?.optJSONArray("genres")?.let { g -> (0 until g.length()).map { g.getString(it) } } ?: emptyList()
                         val vote = info?.optDouble("vote")?.takeIf { !it.isNaN() && it > 0 } ?: v.rating
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        // Wraps onto a second line rather than running off the edge.
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             v.year?.let { Tag("$it") }
                             info?.optInt("runtime")?.takeIf { it > 0 }?.let { Tag(runtime(it)) }
                             vote?.let { Tag("★ %.1f".format(it), color = Tv.star) }
                             quality(v.name, v.group)?.let { Tag(it) }
                             if (v.copies > 1) Tag("${v.copies} versions")
-                            genres.take(if (v.kind == "series") 2 else 3).forEach { Tag(it, color = Tv.muted, bg = Color(0x14FFFFFF)) }
+                            merged?.takeIf { it.size > 1 }?.let { Tag("${it.size} seasons") }
+                            genres.take(3).forEach { Tag(it, color = Tv.muted, bg = Color(0x14FFFFFF)) }
                         }
-                        Spacer(Modifier.height(14.dp))
-                        Text(overview, fontSize = Tv.body, color = Tv.text2, maxLines = if (v.kind == "series") 3 else 5, overflow = TextOverflow.Ellipsis, lineHeight = 23.sp)
-                        Spacer(Modifier.height(22.dp))
+                        Spacer(Modifier.height(12.dp))
+                        when {
+                            overview.isNotEmpty() -> Text(overview, fontSize = Tv.body, color = Tv.text2, maxLines = if (v.kind == "series") 3 else 4, overflow = TextOverflow.Ellipsis, lineHeight = Tv.bodyLine)
+                            info == null -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {   // the plot is on its way
+                                val b = shimmerBrush()
+                                repeat(2) { k -> Box(Modifier.fillMaxWidth(if (k == 0) .9f else .6f).height(14.dp).clip(RoundedCornerShape(4.dp)).background(b)) }
+                            }
+                            // no plot anywhere: nothing, rather than an empty gap or a placeholder sentence
+                        }
+                        Spacer(Modifier.height(18.dp))
                         if (v.kind == "movie") {
                             val url = Repo.movieUrl(v) ?: ""
                             val p = remember(refresh) { Repo.progressFor(url)?.takeIf { !it.done && it.t > 30 } }
@@ -514,12 +574,14 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
                                     Icon(Icons.Default.PlayArrow, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp))
                                     Text(if (p != null) "Resume  ·  ${clock((p.d - p.t).toLong())} left" else "Play", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold)
                                 }
-                                if (p != null) OutlinedButton(onClick = { act.play(listOf(movieItem(v, url, 0.0)), 0) }) { Text("Start over", fontSize = Tv.bodySmall) }
+                                if (p != null) OutlinedButton(onClick = { act.play(listOf(movieItem(v, url, 0.0)), 0) }) { Text("Start over", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold) }
                             }
                         } else {
                             val all = eps
                             val next = remember(all, refresh) { all?.let { nextEpisode(it) } }
-                            Button(onClick = { next?.let { (e, start) -> playEpisode(act, v, all!!, e, start) } }, modifier = Modifier.focusRequester(playFocus), enabled = next != null) {
+                            // Down always lands on the season shown (never whichever chip happens to be nearest).
+                            Button(onClick = { next?.let { (e, start) -> playEpisode(act, v, all!!, e, start) } }, enabled = next != null,
+                                modifier = Modifier.focusRequester(playFocus).focusProperties { down = if (multiSeason) seasonFocus else if (hasEpisodes) firstEpFocus else FocusRequester.Default }) {
                                 Icon(Icons.Default.PlayArrow, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp))
                                 Text(when { all == null -> "Loading episodes…"; next == null -> "No episodes"; next.second > 0 -> "Continue S${next.first.season} E${next.first.num}"; else -> "Play S${next.first.season} E${next.first.num}" }, fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold)
                             }
@@ -527,18 +589,41 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
                     }
                 }
             }
-            val all = eps
+            val all = merged
             if (v.kind == "series") {
-                if (all == null) { item { Spacer(Modifier.height(28.dp)); SkeletonRow(3, EP_W, 16f / 9f) } }
+                if (all == null) item(key = "loading") {
+                    Column(Modifier.padding(top = 26.dp)) {
+                        Box(Modifier.width(120.dp).height(18.dp).clip(RoundedCornerShape(5.dp)).shimmer())
+                        repeat(3) { EpisodeSkeleton() }
+                    }
+                }
                 else if (all.isNotEmpty()) {
-                    val startSeason = nextEpisode(all)?.first?.season?.takeIf { it in all } ?: all.keys.first()
-                    val list = all[season ?: startSeason] ?: emptyList()
-                    item(key = "seasons") { SeasonHeader(all, season ?: startSeason, list.size) { season = it } }
-                    items(list, key = { "ep:" + it.id }) { e -> EpisodeRow(act, v, all, e, backdrop.ifEmpty { v.poster }) }
+                    val shown = shownSeason ?: all.keys.first()
+                    val list = all[shown] ?: emptyList()
+                    item(key = "seasons") { SeasonHeader(all, shown, list.size, seasonFocus, playFocus, firstEpFocus) { season = it } }
+                    itemsIndexed(list, key = { _, e -> "ep:" + e.id }) { i, e ->
+                        EpisodeRow(act, v, all, e, backdrop.ifEmpty { v.poster },
+                            if (i == 0) Modifier.focusRequester(firstEpFocus).focusProperties { up = if (multiSeason) seasonFocus else playFocus } else Modifier)
+                    }
                 }
             }
+            similar?.takeIf { it.isNotEmpty() }?.let { more -> item(key = "more") { MoreLikeThis(act, more) } }
         }
         }
+    }
+}
+
+/** A row of posters under the page. The page's own 48dp margins are the row's padding (it's widened by them), so the
+ *  first poster lines up with the content above and a highlighted poster is never cut at either edge. */
+@Composable
+private fun MoreLikeThis(act: TvActivity, items: List<Vod>) {
+    Column(Modifier.padding(top = 8.dp).layout { m, c ->
+        val extra = (Tv.margin * 2).roundToPx()
+        val p = m.measure(c.copy(minWidth = c.maxWidth + extra, maxWidth = c.maxWidth + extra))
+        layout(c.maxWidth, p.height) { p.place(-extra / 2, 0) }
+    }) {
+        RowTitle("More like this")
+        CardRow(items, { it.id }) { m, _ -> PosterCard(m) { act.go(Screen.Details(m)) } }
     }
 }
 
@@ -555,11 +640,12 @@ private fun nextEpisode(all: Map<Int, List<Episode>>): Pair<Episode, Double>? {
 
 private fun playEpisode(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>, e: Episode, start: Double) {
     val season = all[e.season] ?: listOf(e)
-    val items = season.map { ep -> episodeItem(show, ep, Repo.episodeUrl(ep) ?: "", if (ep == e) start else 0.0) }
-    act.play(items, season.indexOf(e).coerceAtLeast(0))
+    val items = season.map { ep -> episodeItem(show, ep, Repo.episodeUrl(ep) ?: "", if (ep.id == e.id) start else 0.0) }
+    act.play(items, season.indexOfFirst { it.id == e.id }.coerceAtLeast(0))
 }
 
-private val EP_W = 208.dp
+private val EP_W = 176.dp
+private val EP_H = EP_W * 9 / 16 + 12.dp
 
 /** "00:45:12" / "45:12" / "45" (provider formats) -> minutes, or null. */
 private fun epMinutes(d: String): Int? {
@@ -570,19 +656,64 @@ private fun epMinutes(d: String): Int? {
 /** The provider's episode pictures are TMDB stills at 185 px wide (blurry on a TV): the same picture at 780 px. */
 private fun sharpStill(url: String): String = url.replace(Regex("""(image\.tmdb\.org/t/p/)w\d+/"""), "$1w780/")
 
-/** "Season 1 · 8 episodes" and, with more than one season, a chip per season (moving onto a chip switches to it). */
+/** "Season 1 · 8 episodes" and, with more than one season, a chip per season. Entering the chips (Down from Play, Up from
+ *  the first episode) always lands on the season shown, via [selectedFocus]; a season is switched to once focus rests on
+ *  its chip for a moment, so passing over chips doesn't flick the list. */
 @Composable
-private fun SeasonHeader(all: Map<Int, List<Episode>>, season: Int, count: Int, pick: (Int) -> Unit) {
-    Column(Modifier.padding(top = 30.dp, bottom = 6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+private fun SeasonHeader(all: Map<Int, List<Episode>>, season: Int, count: Int, selectedFocus: FocusRequester, playFocus: FocusRequester, firstEpFocus: FocusRequester, pick: (Int) -> Unit) {
+    val episodes = "$count episode${if (count == 1) "" else "s"}"
+    Column(Modifier.padding(top = if (all.size > 1) 20.dp else 24.dp, bottom = 2.dp)) {
+        // One season: a plain heading. Several: the chips are the heading (no "Season 2" said twice), count at the end.
+        if (all.size == 1) Row(verticalAlignment = Alignment.Bottom) {
             Text("Season $season", fontSize = Tv.rowTitle, fontWeight = FontWeight.SemiBold, color = Tv.text)
-            Spacer(Modifier.width(12.dp))
-            Text("$count episode${if (count == 1) "" else "s"}", fontSize = Tv.label, color = Tv.muted)
+            Spacer(Modifier.width(10.dp))
+            Text(episodes, fontSize = Tv.label, color = Tv.muted, modifier = Modifier.padding(bottom = 2.dp))
         }
-        if (all.size > 1) LazyRow(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(all.keys.toList()) { s ->
-                FilterChip(selected = s == season, onClick = { pick(s) }, modifier = Modifier.onFocusChanged { if (it.isFocused) pick(s) }) { Text("Season $s", fontSize = Tv.bodySmall) }
+        if (all.size > 1) {
+            val keys = all.keys.toList()
+            var focused by remember { mutableStateOf<Int?>(null) }
+            LaunchedEffect(focused) { val f = focused ?: return@LaunchedEffect; delay(280); if (f != season) pick(f) }
+            // The chips scroll sideways inside 8dp of padding (pulled back by the same 8dp), so a highlighted chip at
+            // either end is never cut off.
+            Row(Modifier.offset(x = (-8).dp).horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                keys.forEach { s ->
+                    SeasonChip("Season $s", s == season,
+                        Modifier.let { if (s == season) it.focusRequester(selectedFocus) else it }.focusProperties { up = playFocus; down = firstEpFocus },
+                        onFocus = { f -> if (f) focused = s else if (focused == s) focused = null }) { pick(s) }
+                }
+                Text(episodes, fontSize = Tv.label, color = Tv.muted, modifier = Modifier.padding(start = 8.dp))
             }
+        }
+    }
+}
+
+/** A pill: quiet grey; the season shown a lighter grey in white text; the highlight solid white (unmistakable from the sofa). */
+@Composable
+private fun SeasonChip(text: String, selected: Boolean, modifier: Modifier, onFocus: (Boolean) -> Unit, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(50)
+    Box(modifier.onFocusChanged { f = it.isFocused; onFocus(it.isFocused) }
+        .onKeyEvent { e -> if (e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter)) { onClick(); true } else false }
+        .clearAndSetSemantics { contentDescription = text + if (selected) ", selected" else "" }
+        .focusable()
+        .background(when { f -> Tv.text; selected -> Color(0x40FFFFFF); else -> Color(0x1AFFFFFF) }, shape)
+        .padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Text(text, fontSize = Tv.bodySmall, lineHeight = 18.sp, fontWeight = if (f || selected) FontWeight.SemiBold else FontWeight.Medium,
+            color = when { f -> Tv.bg; selected -> Tv.text; else -> Tv.text2 })
+    }
+}
+
+/** An episode row's shape while the list loads. */
+@Composable
+private fun EpisodeSkeleton() {
+    val b = shimmerBrush()
+    Row(Modifier.padding(top = 10.dp).fillMaxWidth(.86f).height(EP_H).clip(Tv.shape).background(Color(0x0FFFFFFF)).padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.width(EP_W).aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp)).background(b))
+        Column(Modifier.padding(start = 16.dp).weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.width(110.dp).height(11.dp).clip(RoundedCornerShape(3.dp)).background(b))
+            Box(Modifier.fillMaxWidth(.5f).height(14.dp).clip(RoundedCornerShape(3.dp)).background(b))
+            Box(Modifier.fillMaxWidth(.85f).height(11.dp).clip(RoundedCornerShape(3.dp)).background(b))
         }
     }
 }
@@ -590,31 +721,34 @@ private fun SeasonHeader(all: Map<Int, List<Episode>>, season: Int, count: Int, 
 /** One episode: a small sharp 16:9 picture (the show's backdrop when the provider has none), then
  *  "Episode N · 55m · Watched / 12m left", the title and two lines of plot. */
 @Composable
-private fun EpisodeRow(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>, e: Episode, art: String) {
+private fun EpisodeRow(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>, e: Episode, art: String, modifier: Modifier = Modifier) {
     val p = remember(act.refresh) { Repo.episodeUrl(e)?.let { Repo.progressFor(it) } }
     val watched = p?.done == true
     val partial = p?.takeIf { !it.done && it.t > 30 && it.d > 0 }
     val meta = listOfNotNull("Episode ${e.num}", epMinutes(e.duration)?.let { runtime(it) },
         if (watched) "Watched" else partial?.let { "${runtime(((it.d - it.t) / 60).toInt().coerceAtLeast(1))} left" }).joinToString("  ·  ")
-    FocusCard(Modifier.padding(top = 10.dp).fillMaxWidth(.82f).height(EP_W * 9 / 16 + 16.dp), scale = 1.02f, restoreKey = "ep:" + e.id, label = "Episode ${e.num}, ${e.title}",
+    FocusCard(modifier.padding(top = 8.dp).fillMaxWidth(.86f).height(EP_H), scale = 1.02f, restoreKey = "ep:" + e.id, label = "Episode ${e.num}, ${e.title}",
         onClick = { playEpisode(act, show, all, e, partial?.t ?: 0.0) }) {
-        Row(Modifier.fillMaxSize().background(Color(0x1AFFFFFF)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(EP_W).aspectRatio(16f / 9f).clip(RoundedCornerShape(7.dp))) {
+        Row(Modifier.fillMaxSize().background(Color(0x14FFFFFF)).padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(EP_W).aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp))) {
                 Picture(e.still.ifEmpty { art }.let { if (it.startsWith("http")) sharpStill(it) else it }, Modifier.fillMaxSize()) {
-                    Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))))
+                    // no picture at all (or it failed): the episode number on a quiet gradient, never an empty box
+                    Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
+                        Text("E${e.num}", fontSize = Tv.numeral, fontWeight = FontWeight.Bold, color = Tv.muted)
+                    }
                 }
                 if (e.still.isEmpty()) Box(Modifier.fillMaxSize().background(Color(0x73000000)), contentAlignment = Alignment.Center) {
-                    Text("E${e.num}", fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Color(0xE6FFFFFF))
+                    Text("E${e.num}", fontSize = Tv.numeral, fontWeight = FontWeight.Bold, color = Color(0xE6FFFFFF))
                 }
-                Box(Modifier.align(Alignment.BottomStart).padding(7.dp).size(28.dp).background(Color(0x99000000), RoundedCornerShape(50)), contentAlignment = Alignment.Center) {
-                    Icon(if (watched) Icons.Default.Check else Icons.Default.PlayArrow, null, Modifier.size(17.dp), tint = Color.White)
+                Box(Modifier.align(Alignment.BottomStart).padding(6.dp).size(24.dp).background(Color(0x99000000), RoundedCornerShape(50)), contentAlignment = Alignment.Center) {
+                    Icon(if (watched) Icons.Default.Check else Icons.Default.PlayArrow, null, Modifier.size(15.dp), tint = Color.White)
                 }
-                if (partial != null) ProgressLine((partial.t / partial.d).toFloat(), Modifier.align(Alignment.BottomStart).fillMaxWidth())
+                if (partial != null) ProgressLine((partial.t / partial.d).toFloat(), Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
             }
-            Column(Modifier.padding(start = 18.dp, end = 12.dp).weight(1f)) {
-                Text(meta, fontSize = Tv.label, color = if (watched) Tv.accent else Tv.muted, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(e.title, fontSize = Tv.body, color = Tv.text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
-                if (e.plot.isNotBlank()) Text(e.plot, fontSize = Tv.caption, color = Tv.text2, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 18.sp, modifier = Modifier.padding(top = 4.dp))
+            Column(Modifier.padding(start = 16.dp, end = 14.dp).weight(1f)) {
+                Text(meta, fontSize = Tv.label, lineHeight = 16.sp, color = if (watched) Tv.accent else Tv.muted, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(e.title.ifBlank { "Episode ${e.num}" }, fontSize = Tv.body, lineHeight = 20.sp, color = Tv.text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+                if (e.plot.isNotBlank()) Text(e.plot, fontSize = Tv.caption, color = Tv.text2, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.captionLine, modifier = Modifier.padding(top = 3.dp))
             }
         }
     }
@@ -723,11 +857,11 @@ private fun SearchProgrammeCard(act: TvActivity, h: ProgrammeHit, onLong: () -> 
     Column(Modifier.width(Tv.channel)) {
         FocusCard(Modifier.width(Tv.channel).aspectRatio(16f / 9f), label = "${p.title}, $sub", onLongClick = onLong, onClick = { if (onAir) act.playLive(listOf(c), 0) }) {
             Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
-                if (c.logo.isBlank()) Text(initials(c.name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
+                if (c.logo.isBlank()) Text(initials(c.name), fontSize = Tv.numeral, fontWeight = FontWeight.Bold, color = Tv.muted)
                 else Picture(Repo.logo(c.logo), Modifier.fillMaxSize().padding(16.dp).background(Color.Transparent), ContentScale.Fit) {
-                    Text(initials(c.name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
+                    Text(initials(c.name), fontSize = Tv.numeral, fontWeight = FontWeight.Bold, color = Tv.muted)
                 }
-                Box(Modifier.align(Alignment.TopStart).padding(6.dp)) { Tag(if (onAir) "LIVE" else "$day${hhmm(p.start)}".trim(), bg = if (onAir) Tv.accentDeep else Color(0xB3000000), color = Tv.text, size = 11.sp) }
+                Box(Modifier.align(Alignment.TopStart).padding(6.dp)) { Tag(if (onAir) "LIVE" else "$day${hhmm(p.start)}".trim(), bg = if (onAir) Tv.accentDeep else Color(0xB3000000), color = Tv.text, size = Tv.micro) }
                 if (onAir) ProgressLine((now - p.start).toFloat() / (p.end - p.start), Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
             }
         }

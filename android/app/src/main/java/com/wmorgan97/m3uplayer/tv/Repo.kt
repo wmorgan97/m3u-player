@@ -422,6 +422,14 @@ object Repo {
     /** A channel's programmes, sorted by start with no duplicates or overlaps (tidied once, when the data arrives). */
     fun guideFor(c: Channel): List<Programme> = guideKeyFor(c, programmes, guideNames)?.let { programmes[it] } ?: emptyList()
     fun nowNext(c: Channel, t: Long = System.currentTimeMillis()): Pair<Programme?, Programme?> = nowNextIn(guideFor(c), t)
+    /** Test hook only (TvActivity testStream): a pretend day of programmes for test channel [k], under guide key [id]. */
+    fun testGuide(id: String, k: Int) {
+        val titles = listOf("Premier League Live", "Formula 1: Qualifying", "BBC News at Six", "Gardeners' World", "Coronation Street", "The Great British Bake Off", "Police Interceptors", "The Last of Us")
+        val slot = 30 * 60_000L; val now = System.currentTimeMillis(); var t = now / slot * slot - (k % 3) * 15 * 60_000L - 2 * slot
+        val l = ArrayList<Programme>()
+        for (n in 0 until 16) { val len = slot * (1 + (n + k) % 3); l += Programme(t, t + len, if (n % 2 == 0) titles[(k + n) % titles.size] else titles[(k + n + 3) % titles.size] + " (repeat)", "A pretend programme for testing."); t += len }
+        programmes[id.lowercase()] = l
+    }
 
     private const val KEEP_PAST = 6 * 3600_000L
     private const val KEEP_AHEAD = 30 * 3600_000L   // the guide keeps 6 h back to 30 h ahead in memory (the server sends ~100 h)
@@ -665,6 +673,28 @@ object Repo {
     private val epsMem = ConcurrentHashMap<String, Map<Int, List<Episode>>>()
     fun episodeUrl(e: Episode): String? = xtream()?.let { "${it.server}/series/${it.user}/${it.pass}/${e.id}.${e.ext}" }
 
+    /** TMDB's plots and full-size stills for one season, by episode number (providers often have neither). A day on the TV. */
+    suspend fun tmdbEpisodes(v: Vod, season: Int): Map<Int, JSONObject> = withContext(Dispatchers.IO) {
+        val k = "${v.title}|${v.year}|$season"
+        tmdbEps[k]?.let { return@withContext it }
+        val file = File(app.filesDir, "tmdbeps-" + sha(k).take(16) + ".json")
+        val text = if (file.exists() && System.currentTimeMillis() - file.lastModified() < 86_400_000L) file.readText()
+            else try { http(api("tmdb/episodes") + "&name=${enc(v.title)}&year=${v.year ?: ""}&season=$season").also { file.writeText(it) } }
+            catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; warn("tmdb episodes failed", e); if (file.exists()) file.readText() else return@withContext emptyMap() }
+        val a = runCatching { JSONObject(text).optJSONArray("episodes") }.getOrNull() ?: JSONArray()
+        (0 until a.length()).mapNotNull { a.optJSONObject(it) }.associateBy { it.optInt("n") }.also { if (it.isNotEmpty()) tmdbEps[k] = it; android.util.Log.i("M3U", "tmdb episodes: ${it.size} for season $season") }
+    }
+    private val tmdbEps = ConcurrentHashMap<String, Map<Int, JSONObject>>()
+    private val smallStill = Regex("image\\.tmdb\\.org/t/p/w(92|154|185|300)/")
+    /** An episode with TMDB's details filling the gaps: plot, a full-size still, runtime. */
+    fun withTmdb(e: Episode, t: JSONObject?): Episode {
+        if (t == null) return e
+        val still = t.optString("still")
+        return e.copy(plot = e.plot.ifBlank { t.optString("plot") },
+            still = if (still.isNotEmpty() && (e.still.isEmpty() || smallStill.containsMatchIn(e.still))) still else e.still,
+            duration = e.duration.ifBlank { t.optInt("runtime").takeIf { it > 0 }?.toString() ?: "" })
+    }
+
     private val tmdb = ConcurrentHashMap<String, JSONObject>()
     suspend fun tmdbInfo(v: Vod): JSONObject? = withContext(Dispatchers.IO) {
         val k = "${v.kind}|${v.title}|${v.year}"
@@ -682,6 +712,42 @@ object Repo {
         }
     }
 
+
+
+    // ---------- settings done on the TV (were the web settings page) ----------
+
+    /** The key every device uses for one playlist (same as the web app's), e.g. "x:host|user|both" or "u:<link>|both". */
+    fun sourceKey(kind: String, server: String, user: String, link: String, content: String = "both"): String =
+        if (kind == "xtream") "x:${runCatching { URL(server).host.lowercase() }.getOrDefault(server.lowercase())}|$user|$content" else "u:$link|$content"
+
+    /** Adds or replaces a playlist for every device ([old]: the key it had before an edit, removed in the same sync). */
+    suspend fun saveSource(key: String, record: JSONObject, old: String? = null) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val out = JSONObject().put(key, record.put("at", now))
+        if (old != null && old != key) out.put(old, JSONObject().put("deleted", true).put("at", now))
+        syncData = JSONObject(http(api("sync"), JSONObject().put("sources", out).toString()))
+        File(app.filesDir, "sync.json").writeText(syncData.toString())
+        clearCache()
+    }
+    suspend fun removeSource(key: String) = withContext(Dispatchers.IO) {
+        syncData = JSONObject(http(api("sync"), JSONObject().put("sources", JSONObject().put(key, JSONObject().put("deleted", true).put("at", System.currentTimeMillis()))).toString()))
+        File(app.filesDir, "sync.json").writeText(syncData.toString())
+        clearCache()
+    }
+
+    /** Is a TMDB key saved on the server (null: couldn't ask)? */
+    suspend fun tmdbConfigured(): Boolean? = withContext(Dispatchers.IO) { runCatching { JSONObject(http(api("tmdb/status"), timeout = 10_000)).optBoolean("configured") }.getOrNull() }
+    /** Saves (or with "" removes) the server's TMDB key. Returns null when it worked, else what went wrong. */
+    suspend fun setTmdbKey(k: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val c = URL(api("tmdb/key")).openConnection() as HttpURLConnection
+            c.connectTimeout = 15_000; c.readTimeout = 30_000; c.requestMethod = "POST"; c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/json"); c.outputStream.use { it.write(JSONObject().put("key", k).toString().toByteArray()) }
+            val code = c.responseCode
+            val text = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
+            if (code in 200..299) { clearCache(); null } else runCatching { JSONObject(text).optString("error") }.getOrNull()?.ifBlank { null } ?: "The server replied $code"
+        } catch (e: Exception) { describe(e, "your server") }
+    }
 
     private fun sha(s: String) = MessageDigest.getInstance("SHA-1").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
 }

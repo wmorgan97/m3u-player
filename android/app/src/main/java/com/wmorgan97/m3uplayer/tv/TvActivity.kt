@@ -45,6 +45,7 @@ sealed class Screen {
     data class Details(val vod: Vod) : Screen()
     data class Grid(val kind: String, val id: String, val title: String) : Screen()
     data class Guide(val group: String? = null) : Screen()
+    data object Sports : Screen()
     data object Settings : Screen()
 }
 
@@ -66,9 +67,10 @@ class TvActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Repo.init(this)
-        if (!Repo.hasKey()) {   // first run: the web app has the server key; it hands it over and comes back here
-            startActivity(Intent(this, MainActivity::class.java).putExtra("setup", true))
-            finish(); return
+        if (!Repo.hasKey()) {   // first run: a native setup (server, then a playlist), then the app starts afresh
+            setContent { MaterialTheme(colorScheme = darkColorScheme(primary = Tv.accent, background = Tv.bg, surface = Tv.surface, onSurface = Tv.text, onBackground = Tv.text, surfaceVariant = Tv.surface2)) {
+                SetupScreen(onDone = { recreate() }, onQuit = { finish() }) } }
+            return
         }
         // Pictures (logos, posters) rarely change: keep them on the device whatever cache headers the original hosts send
         // (many logo hosts say "don't cache", so logos were downloaded again every time a list came up).
@@ -128,13 +130,24 @@ class TvActivity : ComponentActivity() {
      *  player's channel panel, last-channel entry and zapping can be checked without touching the provider. */
     private fun testHook(i: Intent?) {
         i?.getStringExtra("testPreview")?.let { Preview.testUrl = it.ifEmpty { null }; i.removeExtra("testPreview") }
-        i?.getStringExtra("testScreen")?.let { sc -> i.removeExtra("testScreen"); when (sc) { "live" -> root(Screen.Live()); "guide" -> root(Screen.Guide()); "home" -> root(Screen.Home) } }
+        i?.getStringExtra("testSports")?.let { SportsHub.test = it; i.removeExtra("testSports") }
+        i?.getStringExtra("testScreen")?.let { sc -> i.removeExtra("testScreen"); when (sc) { "live" -> root(Screen.Live()); "guide" -> root(Screen.Guide()); "home" -> root(Screen.Home); "sports" -> root(Screen.Sports) } }
         i?.getStringExtra("testSeries")?.let { q -> i.removeExtra("testSeries")   // test hook: open the first series found for q
             lifecycleScope.launch { runCatching { Repo.search(q) }.getOrNull()?.second?.firstOrNull()?.let { root(Screen.Vods("series")); go(Screen.Details(it)) } } }
+        // `--es testEpisodes <url> [--ei testStart secs]`: a pretend 3-episode season on that video, to check next-episode autoplay.
+        i?.getStringExtra("testEpisodes")?.let { u -> i.removeExtra("testEpisodes"); val st = i.getIntExtra("testStart", 0).toDouble()
+            val eps = (1..3).map { n -> JSONObject().put("url", "$u#$n").put("title", "Test show · S1 E$n").put("subtitle", "Episode $n").put("live", false).put("start", if (n == 1) st else 0.0)
+                .put("listTitle", "$n. Episode $n").put("listTitleOverride", "Episodes")
+                .put("show", "Test show").put("epLabel", "S1 E$n").put("epTitle", "Episode $n").put("art", i.getStringExtra("testArt") ?: "https://peach.blender.org/wp-content/uploads/bbb-splash.png") }
+            lifecycleScope.launch { delay(800); play(eps, 0) } }
         val url = i?.getStringExtra("testStream") ?: return
         i.removeExtra("testStream")
-        val names = listOf("Sky Sports Main Event", "Sky Sports F1", "BBC One HD", "BBC Two HD", "ITV1 HD", "Channel 4 HD", "Channel 5 HD", "Sky Atlantic")
-        val chans = names.mapIndexed { k, n -> Channel(n, "$url#$k", "Test", "", "", "", k + 1) }
+        val names = listOf("Sky Sports Main Event UHD", "Sky Sports F1", "BBC One HD", "BBC Two HD", "ITV1 HD", "Channel 4 HD", "Channel 5 HD", "Sky Atlantic")
+        // Pretend guide for each, `--es testLogos <base>` = logos at <base><n>.png, `--es testCatchup <url>` = an archive (Start over plays <url>).
+        val logos = i.getStringExtra("testLogos"); val cu = i.getStringExtra("testCatchup")
+        val chans = names.mapIndexed { k, n -> Channel(n, "$url#$k", "Test", logos?.let { "$it$k.png" } ?: "", "m3utest$k", "", k + 1,
+            catchupDays = if (cu != null) 1 else 0, catchupMode = if (cu != null) "default" else "", catchupSource = cu?.let { "$it?utc={utc}" } ?: "") }
+        chans.forEachIndexed { k, c -> Repo.testGuide(c.tvgId, k) }
         lifecycleScope.launch { delay(800); playLive(chans, i.getIntExtra("testIndex", 2)) }
     }
 
@@ -204,6 +217,7 @@ class TvActivity : ComponentActivity() {
                     item("Home", Icons.Default.Home, section is Screen.Home && screen !is Screen.Search) { root(Screen.Home) }
                     item("Live TV", Icons.Default.LiveTv, section is Screen.Live) { root(Screen.Live()) }
                     item("TV Guide", Icons.Default.CalendarViewWeek, section is Screen.Guide) { root(Screen.Guide()) }
+                    item("Sports", Icons.Default.SportsSoccer, section is Screen.Sports) { root(Screen.Sports) }
                     item("Movies", Icons.Default.Movie, (section as? Screen.Vods)?.kind == "movies") { root(Screen.Vods("movies")) }
                     item("Series", Icons.Default.VideoLibrary, (section as? Screen.Vods)?.kind == "series") { root(Screen.Vods("series")) }
                     Spacer(Modifier.weight(1f))
@@ -233,6 +247,7 @@ class TvActivity : ComponentActivity() {
                         is Screen.Details -> DetailsScreen(this@TvActivity, screen.vod)
                         is Screen.Grid -> GridScreen(this@TvActivity, screen.kind, screen.id, screen.title)
                         is Screen.Guide -> GuideScreen(this@TvActivity, screen.group)
+                        Screen.Sports -> SportsScreen(this@TvActivity)
                         Screen.Settings -> SettingsScreen(this@TvActivity)
                     }
                 } }
@@ -247,7 +262,7 @@ class TvActivity : ComponentActivity() {
                 }
                 if (zap.isNotEmpty()) Box(Modifier.align(Alignment.TopEnd).padding(top = 70.dp, end = Tv.margin).background(Tv.surface, RoundedCornerShape(10.dp)).padding(horizontal = 18.dp, vertical = 8.dp)) {
                     Column(horizontalAlignment = Alignment.End) {
-                        Text(zap, fontSize = 30.sp, fontWeight = FontWeight.Bold, color = Tv.text)
+                        Text(zap, fontSize = Tv.display, fontWeight = FontWeight.Bold, color = Tv.text)
                         Text(Repo.channelByNumber(zap.toIntOrNull() ?: -1)?.name ?: "No channel $zap", fontSize = Tv.label, color = Tv.muted)
                     }
                 }
@@ -314,6 +329,22 @@ class TvActivity : ComponentActivity() {
         playLive(group, group.indexOf(c).coerceAtLeast(0))
     }
 
+    /** Whether the archive has [p] (the programme on now): catchupUrl's own test, without building ~300 links per zap. */
+    private fun canStartOver(c: Channel, p: Programme?, now: Long) = p != null && c.hasCatchup && p.start <= now && p.start >= now - c.catchupDays * 86_400_000L
+
+    /** "Start over" in the player: the programme on now on channel [n] of the playing list, from its start (+[atMs]) out
+     *  of the channel's archive. Back / "Live" in the player returns to the channel (event goLive). */
+    private fun startOver(n: Int, atMs: Long) {
+        val ch = liveLists.firstOrNull { it.first === playList }?.second?.getOrNull(n) ?: return
+        val p = Repo.nowNext(ch).first ?: return
+        val url = Repo.catchupUrl(ch, p.start, p.end) ?: return
+        val item = JSONObject().put("url", url).put("title", p.title).put("subtitle", "${ch.name}  ·  ${hhmm(p.start)}–${hhmm(p.end)}  ·  From the start  ·  Back for live TV")
+            .put("info", p.desc).put("live", false).put("start", atMs / 1000.0).put("art", ch.logo).put("headers", JSONObject(ch.headers))
+            .put("fromLive", true).put("progStart", p.start).put("progEnd", p.end).put("listTitle", p.title)
+        if (n != playIndex) { lastLive = playList to playIndex; playIndex = n }
+        PlayerActivity.current?.load(com.getcapacitor.JSObject(item.toString()))
+    }
+
     /** Plays one of a list (channels of a group, episodes of a season) in the TV player. */
     fun play(items: List<JSONObject>, index: Int) {
         // Going full screen on the channel already in the preview: the window grows to fill the screen first, then the
@@ -349,7 +380,24 @@ class TvActivity : ComponentActivity() {
         val part = playList.subList(from, minOf(playList.size, from + 300))
         val wrap = o.optBoolean("live") && playList.size > 1   // live: up/down go round the list, as on a TV
         o.put("hasPrev", wrap || i > 0).put("hasNext", wrap || i < playList.size - 1)
-        o.put("list", JSONArray(part.map { JSONObject().put("t", it.optString("listTitle", it.optString("title"))).put("s", it.optString("listSub")) }))
+        // Rows for the side panel; episodes also carry their still and "S1 E2" / title for the next-episode card.
+        // Live: each row also carries the channel's logo, number and a fresh now/next (the player's mini guide and the
+        // instant banner on a quick run of zaps draw from these), and whether "Start over" can play the programme on now.
+        val chans = if (o.optBoolean("live")) liveLists.firstOrNull { it.first === playList }?.second else null
+        val now = System.currentTimeMillis()
+        o.put("list", JSONArray(part.mapIndexed { k, r -> JSONObject().put("t", r.optString("listTitle", r.optString("title"))).put("s", r.optString("listSub"))
+            .apply { if (!r.optBoolean("live")) put("a", r.optString("art")).put("e", r.optString("epLabel")).put("n", r.optString("epTitle")) }
+            .apply { chans?.getOrNull(from + k)?.let { c -> val (pn, px) = Repo.nowNext(c, now)
+                put("a", r.optString("art")).put("n", r.optString("num")).put("nt", pn?.title ?: "").put("ps", pn?.start ?: 0).put("pe", pn?.end ?: 0).put("nx", px?.title ?: "")
+                    .put("cu", canStartOver(c, pn, now)) } } }))
+        chans?.getOrNull(i)?.let { c -> val (pn, px) = Repo.nowNext(c, now)
+            o.put("nowTitle", pn?.title ?: "").put("nowStart", pn?.start ?: 0).put("nowEnd", pn?.end ?: 0).put("nextTitle", px?.title ?: "").put("info", pn?.desc ?: o.optString("info"))
+                .put("catchup", canStartOver(c, pn, now)) }
+        o.put("total", playList.size)
+        // Films/episodes: the next item's stream, so the player can buffer it during the end credits (see PlayerActivity.preloadNext).
+        playList.getOrNull(i + 1)?.takeIf { !o.optBoolean("live") && !it.optBoolean("live") }?.let { n ->
+            o.put("nextItem", JSONObject().put("url", n.optString("url")).put("start", n.optDouble("start", 0.0)).put("headers", n.optJSONObject("headers") ?: JSONObject()))
+        }
         o.put("listStart", from).put("current", i)
         o.put("listTitle", o.optString("listTitleOverride", "Up next"))   // the panel's heading: Channels / Episodes
         o.remove("sync"); o.remove("listTitleOverride"); o.remove("listSub")
@@ -366,6 +414,9 @@ class TvActivity : ComponentActivity() {
                 play(playList, n)
             }
             "last" -> lastLive?.let { (l, k) -> val cur = playList to playIndex; lastLive = cur; play(l, k) }
+            "startOver" -> startOver(e.optInt("index", playIndex), e.optLong("at", 0))
+            "goLive" -> if (playList.getOrNull(playIndex)?.optBoolean("live") == true) play(playList, playIndex)
+            "guide" -> if (playList.getOrNull(playIndex)?.optBoolean("live") == true) PlayerActivity.current?.updateGuide(com.getcapacitor.JSObject(playerItem(playIndex).toString()))
             "zap" -> { val c = Repo.channelByNumber(e.optInt("num")); if (c != null) playLive(Repo.live?.channels ?: listOf(c), Repo.live?.channels?.indexOf(c)?.coerceAtLeast(0) ?: 0) }
             "progress", "closed" -> {
                 val cur = playList.getOrNull(playIndex) ?: return

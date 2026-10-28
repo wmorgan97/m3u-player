@@ -166,7 +166,7 @@ fun PreviewBox(channel: Channel?, resumeTick: Int, modifier: Modifier = Modifier
             }.also { view = it }
         }, modifier = Modifier.fillMaxSize(), onRelease = { it.player = null })
         if (!playing) Box(Modifier.fillMaxSize().background(Tv.surface), contentAlignment = Alignment.Center) {
-            Text(if (channel == null) "Press OK on a channel to preview it" else if (failed) "${channel.name}\nNo picture" else channel.name, fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Medium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            Text(if (channel == null) "Press OK on a channel\nto preview it" else if (failed) "${channel.name}\nNo picture" else channel.name, fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Medium, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         }
     }
 }
