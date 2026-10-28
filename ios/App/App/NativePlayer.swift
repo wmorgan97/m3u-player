@@ -1,11 +1,14 @@
 import UIKit
 import AVKit
 import Capacitor
+import UserNotifications
+import WebKit
 import VLCKitSPM
 import MediaPlayer
 
 /// Hosts the web app and registers the app's own native plugin.
 class MainViewController: CAPBridgeViewController {
+    private var testReminderDone = false
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(NativePlayerPlugin())
     }
@@ -15,6 +18,22 @@ class MainViewController: CAPBridgeViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         let args = ProcessInfo.processInfo.arguments
+        #if DEBUG
+        // Test hook: `-testReminder <stream url>` schedules a real reminder 5 s from now for a pretend channel on that stream.
+        // `-testReminderTap <stream url>`: as if the app had just been opened by tapping a reminder for that channel.
+        if let r = args.firstIndex(of: "-testReminderTap"), r + 1 < args.count, !testReminderDone {
+            testReminderDone = true
+            let ch = (try? JSONSerialization.data(withJSONObject: ["name": "Test channel", "url": args[r + 1], "group": "Test", "kind": "live"])).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            ReminderTaps.tapped(ch, webView: nil)
+            return
+        }
+        if let r = args.firstIndex(of: "-testReminder"), r + 1 < args.count, !testReminderDone {
+            testReminderDone = true
+            let ch = (try? JSONSerialization.data(withJSONObject: ["name": "Test channel", "url": args[r + 1], "group": "Test", "kind": "live"])).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            NativePlayerPlugin.schedule(id: "test", at: Date().timeIntervalSince1970 * 1000 + 185_000, title: "Test programme", channelName: "Test channel", channel: ch) { r in NSLog("M3UTEST reminder scheduled %@", "\(r)") }
+            return
+        }
+        #endif
         guard let i = args.firstIndex(of: "-testStream"), i + 1 < args.count, let url = URL(string: args[i + 1]), presentedViewController == nil else { return }
         let live = args.contains("-testLive")
         var item = VLCPlayerController.Item(url: url, title: "Test stream", subtitle: "Player check", info: "", live: live, start: 0, headers: ["X-Test-Mute": "1"], hasPrev: true, hasNext: true)
@@ -47,6 +66,22 @@ class MainViewController: CAPBridgeViewController {
 /// - close: closes that player.
 /// - play: the full-screen system player (AVPlayer), kept for HLS streams that want AirPlay / PiP.
 /// - share: the iOS share sheet for exported playlists and backups.
+/// A reminder notification tapped: its channel, until the web app picks it up (it may still be loading).
+enum ReminderTaps {
+    static var pending: String?
+    static func tapped(_ channel: String, webView: WKWebView?) {
+        pending = channel
+        // Tell the page; on a cold launch it may still be loading, so keep asking until it has taken the channel.
+        func poke(_ tries: Int) {
+            guard pending != nil, tries > 0 else { return }
+            let web = webView ?? (UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.windows.first?.rootViewController as? CAPBridgeViewController }.first)?.webView
+            web?.evaluateJavaScript("typeof window.__reminderTap === 'function' && (window.__reminderTap(), true)", completionHandler: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { poke(tries - 1) }
+        }
+        DispatchQueue.main.async { poke(20) }
+    }
+}
+
 @objc(NativePlayerPlugin)
 public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "NativePlayerPlugin"
@@ -56,7 +91,54 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "vlc", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "close", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "share", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "remind", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "unremind", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "takeReminderTap", returnType: CAPPluginReturnPromise),
     ]
+
+    // MARK: reminders
+    // "Remind me" in the guide becomes a scheduled iOS notification: delivered by iOS 3 minutes before the programme even
+    // if the app is closed or the phone is locked. Tapping it opens the app on that channel (see AppDelegate).
+
+    /// { id, at (ms), title, channelName, channel (JSON string, handed back on tap) }
+    @objc func remind(_ call: CAPPluginCall) {
+        guard let id = call.getString("id"), let at = call.getDouble("at") else { call.reject("Missing reminder"); return }
+        NativePlayerPlugin.schedule(id: id, at: at, title: call.getString("title") ?? "", channelName: call.getString("channelName") ?? "",
+                                    channel: call.getString("channel") ?? "") { result in
+            switch result { case .success(let ok): call.resolve(["scheduled": ok]); case .failure(let e): call.reject(e.localizedDescription) }
+        }
+    }
+
+    static func schedule(id: String, at: Double, title: String, channelName: String, channel: String, done: @escaping (Result<Bool, Error>) -> Void) {
+        let fire = Date(timeIntervalSince1970: at / 1000 - 180)
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { done(.success(false)); return }
+            let content = UNMutableNotificationContent()
+            content.title = title.isEmpty ? "Starting soon" : title
+            let f = DateFormatter(); f.dateFormat = "HH:mm"
+            content.body = "Starts at \(f.string(from: Date(timeIntervalSince1970: at / 1000))) on \(channelName)"
+            content.sound = .default
+            content.userInfo = ["channel": channel]
+            let wait = fire.timeIntervalSinceNow
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, wait), repeats: false)
+            center.add(UNNotificationRequest(identifier: "remind-\(id)", content: content, trigger: trigger)) { error in
+                if let error = error { done(.failure(error)) } else { done(.success(true)) }
+            }
+        }
+    }
+
+    @objc func unremind(_ call: CAPPluginCall) {
+        guard let id = call.getString("id") else { call.reject("Missing id"); return }
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["remind-\(id)"])
+        call.resolve()
+    }
+
+    /// The channel of a reminder notification the app was opened from (once), for the web app to start playing.
+    @objc func takeReminderTap(_ call: CAPPluginCall) {
+        let ch = ReminderTaps.pending; ReminderTaps.pending = nil
+        call.resolve(ch.map { ["channel": $0] } ?? [:])
+    }
 
     @objc func play(_ call: CAPPluginCall) {
         guard let string = call.getString("url"), let url = URL(string: string) else {

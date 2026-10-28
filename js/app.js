@@ -3038,19 +3038,51 @@ async function toggleReminder(c, prog) {
   const key = reminderKey(c, prog);
   if (hasReminder(c, prog)) {
     state.reminders = state.reminders.filter(r => r.key !== key);
+    nativeReminder(key, null);
     toast('Reminder removed');
   } else {
     if ('Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch {} }
-    state.reminders.push({ key, at: prog[0], title: prog[2], channel: cloneChannel(c) });
-    toast(`Reminder set for ${fmtTime(prog[0])}`);
+    const r = { key, at: prog[0], title: prog[2], channel: cloneChannel(c) };
+    state.reminders.push(r);
+    const ok = await nativeReminder(key, r);
+    toast(ok === false ? 'Reminder set — turn on notifications for M3U Player in iPhone Settings to be alerted when the app is closed' : `Reminder set for ${fmtTime(prog[0])}`);
   }
   await db.set('reminders', state.reminders);
   scheduleReminders();
 }
+// iPhone app: each reminder is also a scheduled iOS notification, so it arrives with the app closed or the phone locked
+// (the in-app timer below can't run then). Same id = replaces, so re-sending on start-up is harmless.
+// Returns false when notifications are turned off, undefined in the browser.
+const reminderId = key => { let h = 0; for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) | 0; return `r${(h >>> 0).toString(36)}`; };
+async function nativeReminder(key, r) {
+  if (!isNative) return undefined;
+  try {
+    if (!r) { await globalThis.Capacitor.nativePromise('NativePlayer', 'unremind', { id: reminderId(key) }); return true; }
+    const res = await globalThis.Capacitor.nativePromise('NativePlayer', 'remind', {
+      id: reminderId(key), at: r.at, title: r.title || '', channelName: r.channel?.name || '', channel: JSON.stringify(r.channel || {}),
+    });
+    return res?.scheduled !== false;
+  } catch { return undefined; }
+}
+// A reminder notification was tapped (app opened from it, or already running): play that channel.
+globalThis.__reminderTap = async () => {
+  // Only once the app has finished starting (settings loaded): the native side keeps asking until then, so a tap
+  // that opened the app from closed isn't taken by a half-started page and lost.
+  if (!isNative || !state.settings || !document.body) return;
+  try {
+    const res = await globalThis.Capacitor.nativePromise('NativePlayer', 'takeReminderTap', {});
+    if (res?.channel) playChannel([JSON.parse(res.channel)], 0);
+  } catch {}
+};
+
 function scheduleReminders() {
   clearTimeout(reminderTimer);
   const now = Date.now();
   state.reminders = (state.reminders || []).filter(r => r.at > now - 10 * MINUTE);
+  if (isNative) {   // the iPhone delivers them itself (see nativeReminder): just keep its schedule in step, once per start
+    if (!scheduleReminders.synced) { scheduleReminders.synced = true; for (const r of state.reminders) if (r.at > now) nativeReminder(r.key, r); }
+    return;
+  }
   const next = state.reminders.filter(r => !r.fired).sort((a, b) => a.at - b.at)[0];
   if (!next) return;
   reminderTimer = setTimeout(() => {
