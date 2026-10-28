@@ -1298,3 +1298,7 @@ html:not(.mac) .ts-box kbd { display: none !important; }
   .sp-team { width: 260px; }
   .sp-cta { max-width: 480px; }
 }
+
+/* Sports: which channels are shown, and the switch */
+.sp-scope { margin: 22px 0 8px; text-align: center; font-size: var(--fs-small, 13px); }
+.sp-scope .link { font-size: inherit; padding: 10px 4px; }

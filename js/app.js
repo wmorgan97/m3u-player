@@ -7,7 +7,7 @@ import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from 
 import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
-import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, otherLanguage, buildSports, groupByDay, bySport } from './sports.js';
+import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, otherLanguage, buildSports, groupByDay, bySport } from './sports.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -3332,16 +3332,18 @@ const sportsOpenDays = new Set();   // days expanded past the first rows
 const sportsPrefer = c => (/backup|\bsd\b/i.test(c.name) ? 0 : 2) + (isEnglishGroup(c.group || '') ? 2 : 0) + (/\b(hd|fhd|uhd|4k)\b/i.test(c.name) ? 1 : 0);
 const sportsChanCache = new WeakMap();
 const shortDay = t => { const d = fmtDay(t); return d === 'Today' || d === 'Tomorrow' ? d : new Date(t).toLocaleDateString([], { weekday: 'short' }); };
-// The channels results are matched to: visible live channels, English groups unless you chose every language.
+// The channels results are matched to: visible live channels — UK ones (the default), or with "All countries" on,
+// English groups unless you chose every language.
+const sportsMode = () => (state.settings.sportsAll ? (state.settings.vodLanguage === 'all' ? 'any' : 'en') : 'uk');
 function sportsChannels(p) {
-  const all = m3uKinds(p)?.live || p.channels, en = state.settings.vodLanguage !== 'all';
+  const all = m3uKinds(p)?.live || p.channels, mode = sportsMode();
   const hit = sportsChanCache.get(all);
-  if (hit && hit.en === en && hit.n === all.length) return hit.list;
-  const list = all.filter(c => isLiveChannel(c) && !isSeparator(c) && visibleGroup(p, c.group || '') && (!en || sportsLangOk(c))).map(c => ({ ...c, src: p.id }));
-  sportsChanCache.set(all, { en, n: all.length, list });
+  if (hit && hit.mode === mode && hit.n === all.length) return hit.list;
+  const list = all.filter(c => isLiveChannel(c) && !isSeparator(c) && visibleGroup(p, c.group || '') && sportsLangOk(c)).map(c => ({ ...c, src: p.id }));
+  sportsChanCache.set(all, { mode, n: all.length, list });
   return list;
 }
-const sportsLangOk = c => isEnglishGroup(c.group || '') && !otherLanguage(c);
+const sportsLangOk = c => { const m = sportsMode(); return m === 'uk' ? isUkChannel(c) : m === 'any' || (isEnglishGroup(c.group || '') && !otherLanguage(c)); };
 const sportsSources = () => state.playlists.filter(p => !p.virtual && p.content !== 'vod' && epgUrls(p).length);
 
 async function loadSports(force = false) {
@@ -3377,7 +3379,7 @@ async function loadSports(force = false) {
           while (i < SPORT_QUERIES.length) {
             const q = SPORT_QUERIES[i++];
             const l = await findOnTv(q).catch(() => []);
-            results.push(...l.filter(x => srcOf(x.channel) === p.id && (!en || sportsLangOk(x.channel))));
+            results.push(...l.filter(x => srcOf(x.channel) === p.id && sportsLangOk(x.channel)));
             sportsHub.done++; publish();
           }
         }));
@@ -3395,7 +3397,7 @@ async function loadTeams() {
   await Promise.all(state.follows.map(async f => {
     const l = await findOnTv(f.q).catch(() => []);
     const en = state.settings.vodLanguage !== 'all';
-    sportsHub.teams.set(f.q.toLowerCase(), l.filter(x => x.prog[1] > Date.now() && !isNoise(x.prog, x.channel) && (!en || sportsLangOk(x.channel))));
+    sportsHub.teams.set(f.q.toLowerCase(), l.filter(x => x.prog[1] > Date.now() && !isNoise(x.prog, x.channel) && sportsLangOk(x.channel)));
   }));
   renderSportsSoon();
 }
@@ -3505,6 +3507,7 @@ function renderSports() {
       html += `<p class="muted sp-status">Checking more sports…</p>`;
     }
   }
+  if (html && sportsHub.at) html += `<p class="muted sp-scope">${state.settings.sportsAll ? 'Channels from every country' : 'UK channels only'} · <button type="button" class="link" data-sp-scope>${state.settings.sportsAll ? 'UK only' : 'Show all countries'}</button></p>`;
   body.innerHTML = html;
   for (const [key, left] of keep) { const el = body.querySelector(`[data-keep="${key}"]`); if (el) el.scrollLeft = left; }
   addRowArrows(body);
@@ -3531,6 +3534,14 @@ $('#sheet').addEventListener('click', e => {
 });
 
 function sportsClick(e) {
+  if (e.target.closest('[data-sp-scope]')) {
+    state.settings.sportsAll = !state.settings.sportsAll;
+    db.set('settings', state.settings);
+    Object.assign(sportsHub, { results: [], at: 0 }); sportsHub.teams.clear();
+    if (scrollY > 0) scrollTo({ top: 0 });
+    loadSports(true); loadTeams(); renderSports();
+    return;
+  }
   const chip = e.target.closest('[data-sport]');
   if (chip) {
     sportsFilter = chip.dataset.sport;

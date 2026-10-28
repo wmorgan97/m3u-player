@@ -113,6 +113,19 @@ export function channelLabel(name) {
 const OTHER_LANG = /^\s*(?:fr|de|es|it|nl|pt|pl|tr|ar|ru|gr|ro|bg|hu|cz|sk|se|no|dk|fi|be|ch|at|br|mx|la|in|pk|il|ir|al|rs|hr|si|ba|mk|cn|jp|kr|ph|my|th|vn|af|ex|ku|mt|lat|swe|nor|den|ger|ita|esp|por|pol|tur|ara|rus|bra|mex|hrv)\s*[:|\-]/i;
 export const otherLanguage = c => OTHER_LANG.test(c.name || '') || OTHER_LANG.test(c.group || '');
 
+/** UK channels (the default for Sports): a UK group or name tag ("UK | Sports", "UK: Sky Sports 1", "(UK)", "🇬🇧"),
+ *  or a UK broadcaster's name, as long as nothing marks it as another country ("US:", "AU |", "NZ", foreign language). */
+const UK_TAG = /(?:^|[\s|:·\-–\[(/])(?:uk|gb|united kingdom)(?=$|[\s|:·\-–\])/])|🇬🇧/i;
+const UK_BRAND = /sky sports|\btnt sports?\b|\bbt sport|\bbbc\b|\bitv ?\d?\b|\bstv\b|channel [45]\b|premier sports|eurosport|viaplay|\blfc tv\b|\bmutv\b|racing tv|\bs4c\b|\bfreesports\b|\bboxnation\b/i;
+const NOT_UK = /(?:^|[\s|:·\-–\[(/])(?:us|usa|ca|can|canada|au|aus|australia|nz|new zealand|za|ie|ireland|in|india|my|sg|ph|mena|arab|latino|africa)(?=$|[\s|:·\-–\])/])|🇺🇸|🇨🇦|🇦🇺|🇳🇿|🇮🇪/i;
+export const isUkChannel = c => {
+  const name = c.name || '', group = c.group || '';
+  // Groups are tagged like "CA| TSN+ PPV" / "🇺🇸 TV Guide (USA)"; a name only by a leading tag ("US: ESPN"), so words
+  // inside a programme-like name ("Live in 4K") never count.
+  if (otherLanguage(c) || NOT_UK.test(group) || /^\s*(?:us|usa|ca|au|nz|ie|za|in)\s*[:|]/i.test(name)) return false;
+  return UK_TAG.test(group) || UK_TAG.test(name) || UK_BRAND.test(name);
+};
+
 /** Channels worth a "what's on now": a sports group or a sports channel name. */
 export const isSportsChannel = c => /\bsports?\b|eurosport|\bbein\b|\bdazn\b|\bespn|premier sports|\bviaplay\b|\bbt sport|sky sports|tnt sports|\bnfl\b|\bnba\b|\bnhl\b|\bmlb\b|\bufc\b|\bwwe\b|\bracing\b|\bgolf\b|\bf1\b|\bppv\b/i.test(`${c.group || ''} ${c.name || ''}`);
 
