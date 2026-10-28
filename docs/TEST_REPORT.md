@@ -8,7 +8,7 @@ single connection was never used. Emulator: not used. iPhone / web: not re-teste
 ## Automated
 | Suite | Result |
 |---|---|
-| `./gradlew testReleaseUnitTest` (M3U parsing, catch-up URLs, guide time/overlaps/matching, recents, redaction, titles) | 52 tests, pass |
+| `./gradlew testReleaseUnitTest` (M3U parsing, catch-up URLs, guide time/overlaps/matching, recents, redaction, titles) | 54 tests, 0 failures |
 | `./gradlew assembleRelease` | pass |
 
 ## Performance (Shield, release build, AOT-compiled with the bundled baseline profile)
