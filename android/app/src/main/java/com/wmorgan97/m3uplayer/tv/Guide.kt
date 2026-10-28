@@ -285,10 +285,10 @@ fun ProgrammeDialog(act: TvActivity, c: Channel, p: Programme, now: Long, chans:
         if (archive != null) add((if (onAir) "Watch from the start" else "Play (catch-up)") to { onDismiss(); act.playCatchup(c, p) })
         if (p.start > now) add((if (reminded) "Cancel reminder" else "Remind me") to { Repo.toggleReminder(c, p); reminded = !reminded })
         if (!onAir) add("Watch the channel now" to { onDismiss(); act.playLive(chans, chans.indexOf(c).coerceAtLeast(0)) })
-        // A match ("Arsenal v Spurs"): follow either side, and every one of its matches gets a reminder (on every device).
+        // A match ("Arsenal v Spurs"): follow either side (My teams on the Sports page shows their next match).
         for (t in teams) add((if (following[t] == true) "Following $t ✓" else "Follow $t") to {
             val on = Repo.toggleFollow(t); following[t] = on
-            if (on) { if (p.start > now + 120_000 && !reminded) { Repo.toggleReminder(c, p); reminded = true }; SportsHub.checkFollows(ctx.applicationContext, force = true) }
+            if (on && p.start > now + 120_000 && !reminded) { Repo.toggleReminder(c, p); reminded = true }   // this match only
         })
         add("Close" to onDismiss)
     }

@@ -62,7 +62,9 @@ fun yourChannels(now: Long = System.currentTimeMillis()): List<Channel> {
     favs.forEachIndexed { i, o -> val u = o.optString("url"); entry.putIfAbsent(u, o); score[u] = 2.5 - i * 0.001 }
     for (o in rec) { val u = o.optString("url"); entry.putIfAbsent(u, o); score[u] = (score[u] ?: 0.0) + recency(o.optLong("at")) }
     for ((u, p) in plays) if (u in entry) score[u] = (score[u] ?: 0.0) + 1.5 * ln(1.0 + p.first) / ln(2.0) + 0.5 * recency(p.second)
-    return entry.keys.filter { it !in hidden }.sortedByDescending { score[it] ?: 0.0 }.map { liveFromSync(entry.getValue(it)) }.distinctBy { it.url }
+    // Sports channels stay on the Sports page, not Home (the user's choice).
+    val sporty = Regex("""\bsports?\b|eurosport|\bbein\b|\bdazn\b|\bespn|premier sports|\bviaplay\b|\bbt sport|sky sports|tnt sports|laliga|\bnfl\b|\bnba\b|\bnhl\b|\bmlb\b|\bufc\b|\bwwe\b|\bracing\b|\bgolf\b|\bf1\b|\bppv\b|\b(lfc|mutv|chelsea|club|barca|city) ?tv\b""", RegexOption.IGNORE_CASE)
+    return entry.keys.filter { it !in hidden && !sporty.containsMatchIn(entry.getValue(it).optString("name") + " " + entry.getValue(it).optString("group")) }.sortedByDescending { score[it] ?: 0.0 }.map { liveFromSync(entry.getValue(it)) }.distinctBy { it.url }
 }
 
 // ---------- starting soon ----------

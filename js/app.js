@@ -1093,7 +1093,8 @@ function notePlay(url) {
 function yourChannels(now = Date.now()) {
   const plays = chanPlays(), score = new Map(), byUrl = new Map();
   const recency = at => (at > 0 ? 4 * 0.5 ** ((now - at) / DAY) : 0);   // halves every day
-  const ok = c => c && c.url && isLiveChannel(c) && byId(srcOf(c)) && !/\/(movie|series)\//.test(c.url);
+  // Sports channels stay on the Sports page, not Home (your choice).
+  const ok = c => c && c.url && isLiveChannel(c) && byId(srcOf(c)) && !/\/(movie|series)\//.test(c.url) && !isSportsChannel(c) && !CLUB_TV.test(c.name || '');
   state.favorites.filter(ok).forEach((c, i) => { byUrl.set(c.url, byUrl.get(c.url) || c); score.set(c.url, 2.5 - i * 0.001); });
   for (const c of state.recents.filter(ok)) { if (!byUrl.has(c.url)) byUrl.set(c.url, c); score.set(c.url, (score.get(c.url) || 0) + recency(c.at)); }
   for (const [u, [n, last]] of Object.entries(plays)) if (byUrl.has(u)) score.set(u, (score.get(u) || 0) + 1.5 * Math.log2(1 + n) + 0.5 * recency(last));
@@ -3437,12 +3438,16 @@ async function toggleFollow(q) {
   state.follows ||= (await db.get('follows')) || [];
   const k = q.trim().toLowerCase();
   if (isFollowing(q)) { state.follows = state.follows.filter(f => f.q.toLowerCase() !== k); (syncMeta.followDel ||= {})[k] = Date.now(); toast(`Stopped following ${q}`); }
-  else { if (syncMeta.followDel) delete syncMeta.followDel[k]; state.follows.push({ q: q.trim(), at: Date.now() }); toast(`Following ${q}: every upcoming programme gets a reminder`); checkFollows(true); askAlerts(`Reminders for ${q.trim()} arrive as notifications.`); }
+  else { if (syncMeta.followDel) delete syncMeta.followDel[k]; state.follows.push({ q: q.trim(), at: Date.now() }); toast(`Following ${q}`); }
   await db.set('follows', state.follows);
   db.set('syncMeta', syncMeta).catch(() => {}); syncSoon();
 }
 let followsAt = 0;
+// Following a team no longer sets reminders by itself: matching every guide entry that mentions a name filled the
+// reminders with placeholders, foreign channels, old matches and club channels (439 of them on 2026-10-28).
+// You set reminders yourself; My teams just shows the next match.
 async function checkFollows(force = false) {
+  return; // eslint-disable-line no-unreachable
   state.follows ||= (await db.get('follows')) || [];
   if (!state.follows.length || (!force && Date.now() - followsAt < 3 * 60 * MINUTE)) return;
   followsAt = Date.now();

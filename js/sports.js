@@ -139,7 +139,7 @@ export const isUkChannel = c => {
 };
 
 /** Channels worth a "what's on now": a sports group or a sports channel name. */
-export const isSportsChannel = c => /\bsports?\b|eurosport|\bbein\b|\bdazn\b|\bespn|premier sports|\bviaplay\b|\bbt sport|sky sports|tnt sports|\bnfl\b|\bnba\b|\bnhl\b|\bmlb\b|\bufc\b|\bwwe\b|\bracing\b|\bgolf\b|\bf1\b|\bppv\b/i.test(`${c.group || ''} ${c.name || ''}`);
+export const isSportsChannel = c => /\bsports?\b|laliga|eurosport|\bbein\b|\bdazn\b|\bespn|premier sports|\bviaplay\b|\bbt sport|sky sports|tnt sports|\bnfl\b|\bnba\b|\bnhl\b|\bmlb\b|\bufc\b|\bwwe\b|\bracing\b|\bgolf\b|\bf1\b|\bppv\b/i.test(`${c.group || ''} ${c.name || ''}`);
 
 const dedupeKey = (title, sport) => `${sport || ''}|${fold(title).replace(/vs?/g, 'v')}`;
 
