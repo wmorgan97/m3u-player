@@ -65,7 +65,7 @@ export function classify(title) {
 
 const SUPERSCRIPT = /[ᴬ-ᵪᶜ-ᶿ²³¹⁰-₟ⱽ]+/g;   // provider tags: ᴿᴬᵂ ᵁᴴᴰ ᴸᶦᵛᵉ
 // Not an event: highlights, magazines, studio shows, repeats of old games.
-const NOT_EVENT = /\b(highlights?|hls|magazine|review|preview|reloaded|rewind|classics?|best (?:goals|of)|goals|gold(?! cup)|en 60|compacto|resumo|top 10|power rankings|fantasy|report|re-?airs?|stock exchange|countdown|draw|press conference|documentary|anthology|replay|encore|retro|in 90|recap|wrap|wins the|story of|look ?back|legends|greatest|the debate|news|daily|tonight show|podcast|uncut|central|centre|center)\b/i;
+const NOT_EVENT = /\b(show|stories|years|netbusters|reload|weekly|episode|special|extra|talk|soccer saturday|goals on sunday|highlights?|hls|magazine|review|preview|reloaded|rewind|classics?|best (?:goals|of)|goals|gold(?! cup)|en 60|compacto|resumo|top 10|power rankings|fantasy|report|re-?airs?|stock exchange|countdown|draw|press conference|documentary|anthology|replay|encore|retro|in 90|recap|wrap|wins the|story of|look ?back|legends|greatest|the debate|news|daily|tonight show|podcast|uncut|central|centre|center)\b/i;
 // Event-channel placeholders: "### PREMIER LEAGUE ###", "- NO EVENT STREAMING -", "NEXT | MEXICO: RACE | Sun 01 Nov …".
 const PLACEHOLDER = /^[\s#*=_~-]{2,}|no event|^next\s*\||^\W*$|off ?air|to be announced|^tba$|^tbc$|stream (?:offline|starts)/i;
 
@@ -85,6 +85,15 @@ export function isNoise(prog, channel = {}, now = Date.now()) {
 }
 
 const MATCHUP = /\S\s+(?:v|vs\.?|@)\s+\S/i;
+
+/** Actually live, not just on air: the guide tags live events ("Arsenal v Chelsea ᴸᶦᵛᵉ", "Live: …", "… (Live)"),
+ *  or the description says it's live coverage. Repeats, "Best of", "Gold" and old finals carry no such tag. */
+const LIVE_MARK = /ᴸᶦᵛᵉ|^\s*live\b|[(\[-–|]\s*live\s*[)\]]?\s*$|\blive\s*[:|]/i;
+export function isLiveEvent(prog) {
+  const title = String(prog[2] || ''), desc = String(prog[3] || '').slice(0, 120);
+  if (LIVE_MARK.test(title)) return true;
+  return /^(?:live|live coverage|coverage of)\b|\blive coverage\b|\bcoverage of\b.*\blive\b/i.test(desc) && !/\b(relive|highlights|replay|repeat|classic)\b/i.test(desc);
+}
 const SPORT_PREFIX = /^(?:live\s*[:\-–|]\s*|(?:live\s+)?(?:uefa |english |fia |the )?(?:football|soccer|darts|snooker|golf|tennis|boxing|cricket|rugby(?: union| league)?|formula (?:1|one)|f1|moto ?gp|nfl|nba|nhl|mlb|ufc|wwe|premier league|champions league|europa league|fa cup|efl(?: championship)?|sky bet championship|championship|la ?liga|serie a|bundesliga|scottish premiership|spfl)(?:\s+(?:19|20)\d\d(?:[/-]\d{2,4})?)?\s*[:\-–|]\s+)/i;
 
 /** "Premier League - PL: Liverpool v Brighton" -> "Liverpool v Brighton"; "Chelsea vs Tottenham - English Premier
@@ -118,11 +127,14 @@ export const otherLanguage = c => OTHER_LANG.test(c.name || '') || OTHER_LANG.te
 const UK_TAG = /(?:^|[\s|:·\-–\[(/])(?:uk|gb|united kingdom)(?=$|[\s|:·\-–\])/])|🇬🇧/i;
 const UK_BRAND = /sky sports|\btnt sports?\b|\bbt sport|\bbbc\b|\bitv ?\d?\b|\bstv\b|channel [45]\b|premier sports|eurosport|viaplay|\blfc tv\b|\bmutv\b|racing tv|\bs4c\b|\bfreesports\b|\bboxnation\b/i;
 const NOT_UK = /(?:^|[\s|:·\-–\[(/])(?:us|usa|ca|can|canada|au|aus|australia|nz|new zealand|za|ie|ireland|in|india|my|sg|ph|mena|arab|latino|africa)(?=$|[\s|:·\-–\])/])|🇺🇸|🇨🇦|🇦🇺|🇳🇿|🇮🇪/i;
+// Providers file other countries' channels under "UK| Football" too (Astro, SG Hub Sports, Now Sports HK, beIN, Vidio):
+// their own names give them away, whatever the group says. (Same list as the TV app's Sports.kt.)
+const FOREIGN_BRAND = /\b(?:astro|starhub|hub sports?|now sports|bein|supersport|sportsnet|tsn|espn|fox sports?|kayo|optus|stan sport|spark sport|sky sport(?!s)|vidio|mola|true ?sports?|ziggo|canal\+|movistar|star sports?|sony (?:ten|six|sports)|ten sports?|willow|sportv|tudn|tyc)\b|\bv\+|vision\+/i;
 export const isUkChannel = c => {
   const name = c.name || '', group = c.group || '';
   // Groups are tagged like "CA| TSN+ PPV" / "🇺🇸 TV Guide (USA)"; a name only by a leading tag ("US: ESPN"), so words
   // inside a programme-like name ("Live in 4K") never count.
-  if (otherLanguage(c) || NOT_UK.test(group) || /^\s*(?:us|usa|ca|au|nz|ie|za|in)\s*[:|]/i.test(name)) return false;
+  if (otherLanguage(c) || NOT_UK.test(group) || FOREIGN_BRAND.test(group) || FOREIGN_BRAND.test(name) || /^\s*(?:us|usa|ca|au|nz|ie|za|in|sg|my|hk|id|ph)\s*[:|\-]/i.test(name)) return false;
   return UK_TAG.test(group) || UK_TAG.test(name) || UK_BRAND.test(name);
 };
 
@@ -141,7 +153,7 @@ export function buildSports(results, nowList = [], now = Date.now()) {
   const seen = new Set(), liveCh = new Set(), live = [], upcoming = [];
   const all = [...results].sort((a, b) => a.prog[0] - b.prog[0]);
   for (const { channel, prog } of all) {
-    if (prog[1] <= now || isNoise(prog, channel, now)) continue;
+    if (prog[1] <= now || isNoise(prog, channel, now) || !isLiveEvent(prog)) continue;
     const k = classify(prog[2]);
     if (!k) continue;
     const title = cleanTitle(prog[2]);
@@ -154,7 +166,7 @@ export function buildSports(results, nowList = [], now = Date.now()) {
     if (isLive) { live.push(it); liveCh.add(channel.url); } else upcoming.push(it);
   }
   for (const { channel, prog } of nowList) {
-    if (liveCh.has(channel.url) || !(prog[0] <= now && prog[1] > now) || isNoise(prog, channel, now)) continue;
+    if (liveCh.has(channel.url) || !(prog[0] <= now && prog[1] > now) || isNoise(prog, channel, now) || !isLiveEvent(prog)) continue;
     const k = classify(prog[2]);
     const title = cleanTitle(prog[2]);
     const key = dedupeKey(title, k?.sport);
@@ -201,15 +213,17 @@ export function _selfTest() {
   const H = 3600_000;
   const ch = (name, url) => ({ name, url, group: 'UK Sports' });
   const r = [
-    { channel: ch('Sky Sports PL', 'a'), prog: [now + H, now + 3 * H, 'Premier League - PL: Liverpool v Brighton', ''] },
+    { channel: ch('Sky Sports PL', 'a'), prog: [now + H, now + 3 * H, 'Premier League - PL: Liverpool v Brighton ᴸᶦᵛᵉ', ''] },
     { channel: ch('Sky Sports PL', 'a'), prog: [now + 30 * H, now + 32 * H, 'Premier League: Liverpool vs Brighton', ''] },   // repeat
     { channel: ch('Sky Sports PL', 'a'), prog: [now + 5 * H, now + 6 * H, 'Premier League Highlights', ''] },
     { channel: ch('PPV 1', 'b'), prog: [now - H, now + 20 * H, '### PREMIER LEAGUE ###', ''] },
-    { channel: ch('Sky Sports Mix', 'c'), prog: [now - H, now + H, 'Indian Premier League T20', ''] },
-    { channel: ch('Sky Sports Darts', 'd'), prog: [now + 2 * H, now + 4 * H, 'PDC Premier League Darts: Week 5', ''] },
-    { channel: ch('Sky Sports Golf', 'e'), prog: [now + 2 * H, now + 4 * H, 'Korea Championship, LET Golf', ''] },
-    { channel: ch('beIN 2', 'f'), prog: [now + 2 * H, now + 4 * H, 'EFL Championship - Bradford City vs. Peterborough United', ''] },
+    { channel: ch('Sky Sports Mix', 'c'), prog: [now - H, now + H, 'Indian Premier League T20 ᴸᶦᵛᵉ', ''] },
+    { channel: ch('Sky Sports Darts', 'd'), prog: [now + 2 * H, now + 4 * H, 'PDC Premier League Darts: Week 5 ᴸᶦᵛᵉ', ''] },
+    { channel: ch('Sky Sports Golf', 'e'), prog: [now + 2 * H, now + 4 * H, 'Korea Championship, LET Golf ᴸᶦᵛᵉ', ''] },
+    { channel: ch('beIN 2', 'f'), prog: [now + 2 * H, now + 4 * H, 'EFL Championship - Bradford City vs. Peterborough United ᴸᶦᵛᵉ', ''] },
     { channel: ch('DAZN Ringside', 'g'), prog: [now + 2 * H, now + 3 * H, 'Boxing : 2004: Oscar De La Hoya vs. Bernard Hopkins', ''] },
+    { channel: ch('Sky Sports PL', 'a'), prog: [now + 8 * H, now + 9 * H, 'Premier League Years 2019-2020', ''] },        // on air, not live
+    { channel: ch('Sky Sports Mix', 'c'), prog: [now + 9 * H, now + 10 * H, 'Darts Gold: Taylor v Lewis 2010', ''] },     // a classic match
     { channel: ch('Fightbox', 'h'), prog: [now + 2 * H, now + 3 * H, 'Kick-boxing: WGP Kickboxing Brazil 22', ''] },
   ];
   const s = buildSports(r, [{ channel: ch('Sky Sports News', 'n'), prog: [now - H, now + H, 'Sky Sports News', ''] }], now);
