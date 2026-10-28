@@ -149,7 +149,7 @@ object Repo {
     /** Bumped whenever favourites / cached data change, so screens showing them redraw. */
     private val versionState = androidx.compose.runtime.mutableIntStateOf(0)
     var version: Int get() = versionState.intValue; set(v) { versionState.intValue = v }
-    fun clearCache() { app.filesDir.listFiles()?.forEach { if (it.name.startsWith("vod-") || it.name.startsWith("live-") || it.name.startsWith("group-") || it.name.startsWith("eps-") || it.name == "guide.json") it.delete() }; overviews.clear(); groupCache.clear(); live = null; version++ }
+    fun clearCache() { app.filesDir.listFiles()?.forEach { if (it.name.startsWith("vod-") || it.name.startsWith("live-") || it.name.startsWith("group-") || it.name.startsWith("eps-") || it.name.startsWith("tmdb-") || it.name == "guide.json") it.delete() }; overviews.clear(); groupCache.clear(); live = null; version++ }
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
     fun api(path: String) = "$server/$path?key=${enc(key)}"
@@ -594,11 +594,19 @@ object Repo {
     suspend fun tmdbInfo(v: Vod): JSONObject? = withContext(Dispatchers.IO) {
         val k = "${v.kind}|${v.title}|${v.year}"
         tmdb[k]?.let { return@withContext it }
+        // Film details hardly ever change: kept on the TV for 30 days, so a details page opens at once the second time.
+        val file = File(app.filesDir, "tmdb-" + sha(k).take(16) + ".json")
+        if (file.exists() && System.currentTimeMillis() - file.lastModified() < 30 * 86_400_000L)
+            runCatching { JSONObject(file.readText()) }.getOrNull()?.let { tmdb[k] = it; return@withContext it }
         try {
             val d = JSONObject(http(api("tmdb/info") + "&kind=${if (v.kind == "series") "tv" else "movie"}&name=${enc(v.title)}&year=${v.year ?: ""}"))
-            if (d.has("tid")) d.also { tmdb[k] = it } else null
-        } catch (e: Exception) { warn("film details failed", e); null }
+            if (d.has("tid")) d.also { tmdb[k] = it; runCatching { file.writeText(it.toString()) } } else null
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            if (file.exists()) runCatching { JSONObject(file.readText()) }.getOrNull()?.also { tmdb[k] = it } else null   // offline: an older copy
+        }
     }
+
 
     private fun sha(s: String) = MessageDigest.getInstance("SHA-1").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
 }
