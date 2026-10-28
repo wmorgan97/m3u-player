@@ -294,8 +294,10 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     // Rotate button: forces landscape even with the phone's rotation lock on (like VLC), and back to portrait.
     private var forcedLandscape = false
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { forcedLandscape ? .landscape : .allButUpsideDown }
-    @objc private func rotateTapped() {
-        forcedLandscape.toggle()
+    @objc private func rotateTapped() { setForcedLandscape(!forcedLandscape); showOverlay() }
+    /// Forced landscape on or off (the rotate button; minimising goes back upright and expanding restores it).
+    private func setForcedLandscape(_ on: Bool) {
+        forcedLandscape = on
         if #available(iOS 16.0, *) {
             let mask: UIInterfaceOrientationMask = forcedLandscape ? .landscapeRight : .portrait
             (parent ?? self).setNeedsUpdateOfSupportedInterfaceOrientations()
@@ -308,8 +310,8 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             UIViewController.attemptRotationToDeviceOrientation()
         }
         rotateButton.tintColor = forcedLandscape ? UIColor(red: 0.36, green: 0.58, blue: 1, alpha: 1) : .white
-        showOverlay()
     }
+    private var landscapeBeforeMini = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -355,14 +357,17 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         let portrait = h > w
         if drag == .none {
             guard max(abs(dx), abs(dy)) > 14 else { return }
-            // Portrait: a downward swipe shrinks the player into the mini player (YouTube-style), live or film.
-            if portrait && dy > 0 && abs(dy) > abs(dx) && start.point.y >= 50 && parent != nil { drag = .minimize; hideOverlay() }
+            // Up/down by where the swipe starts: portrait, anywhere = minimise (on a downward swipe). Landscape, the screen
+            // is in thirds: left = brightness, middle = minimise (downward), right = volume. Live or film alike.
+            let third = start.point.x < w / 3 ? 0 : start.point.x > w * 2 / 3 ? 2 : 1
+            let vertical = abs(dy) > abs(dx)
+            if vertical && (start.point.y < 50 || start.point.y > h - 50) { touchStart = nil; return }   // the system's own edge swipes
+            if vertical && dy > 0 && (portrait || third == 1) && parent != nil { drag = .minimize; hideOverlay() }
+            else if vertical && !portrait && third == 0 { drag = .brightness; dragFrom = Double(UIScreen.main.brightness) }
+            else if vertical && !portrait && third == 2 { drag = .volume; dragFrom = Double(AVAudioSession.sharedInstance().outputVolume) }
+            else if vertical { touchStart = nil; return }
             else if item.live { return }   // live: sideways swipes change channel (on release, see touchesEnded)
-            else if abs(dx) > abs(dy) { drag = .scrub; dragFrom = position().0; scrubTarget = dragFrom }
-            else if portrait { touchStart = nil; return }   // films in portrait: up/down is for minimising, not brightness/volume
-            else if start.point.y < 50 || start.point.y > h - 50 { touchStart = nil; return }   // the system's own edge swipes
-            else if start.point.x < w / 2 { drag = .brightness; dragFrom = Double(UIScreen.main.brightness) }
-            else { drag = .volume; dragFrom = Double(AVAudioSession.sharedInstance().outputVolume) }
+            else { drag = .scrub; dragFrom = position().0; scrubTarget = dragFrom }
         }
         switch drag {
         case .scrub:
@@ -993,6 +998,12 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     /// Keeps the mini card in its corner when the screen turns or the app's layout changes.
     func layoutInParent() {
         guard let host = parent, isMini, drag == .none, touchStart == nil else { return }
+        // A scaled view must not be resized while scaled: unscale, take the new screen size, then shrink onto the card again.
+        if view.bounds.size != host.view.bounds.size {
+            view.transform = .identity
+            view.frame = host.view.bounds
+            view.layoutIfNeeded()
+        }
         let (t, k) = miniTransform(in: host.view)
         view.transform = t
         setCrop(1, scale: k)
@@ -1002,8 +1013,12 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     func minimize() {
         guard let host = parent, !isMini, !locked else { springBack(); return }
+        view.autoresizingMask = []   // sized by layoutInParent while it is the card (never by autoresizing while scaled)
         isMini = true
         hideOverlay(); hud.alpha = 0; volumePill.alpha = 0
+        // Watching sideways: the app comes back upright with the card in its corner (the card follows the turn).
+        landscapeBeforeMini = forcedLandscape
+        if forcedLandscape { setForcedLandscape(false) }
         let (t, k) = miniTransform(in: host.view)
         placeMiniClose(scale: k)
         miniClose.alpha = 0; miniClose.isHidden = false
@@ -1023,6 +1038,8 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         guard parent != nil, isMini else { return }
         isMini = false
         root?.touchArea = nil
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        if landscapeBeforeMini { landscapeBeforeMini = false; setForcedLandscape(true) }   // back to how you were watching
         UIView.animate(withDuration: 0.1) { self.miniClose.alpha = 0 } completion: { _ in if !self.isMini { self.miniClose.isHidden = true } }
         UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0.2, options: [.beginFromCurrentState]) {
             self.view.transform = .identity
