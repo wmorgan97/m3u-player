@@ -198,7 +198,7 @@ fun channelItem(c: Channel): JSONObject {
     val (now, next) = Repo.nowNext(c)
     val sub = when { now != null -> "${now.title} · ends ${hhmm(now.end)}"; else -> prettyGroup(c.group) }
     return JSONObject().put("url", c.url).put("title", c.name).put("subtitle", sub).put("info", now?.desc ?: "").put("live", true)
-        .put("num", if (c.num > 0) "${c.num}" else "").put("nowTitle", now?.title ?: "").put("nowStart", now?.start ?: 0).put("nowEnd", now?.end ?: 0).put("nextTitle", next?.title ?: "")
+        .put("num", if (c.num > 0 && Repo.showNumbers) "${c.num}" else "").put("nowTitle", now?.title ?: "").put("nowStart", now?.start ?: 0).put("nowEnd", now?.end ?: 0).put("nextTitle", next?.title ?: "")
         .put("headers", JSONObject(c.headers)).put("art", c.logo).put("listTitle", c.name).put("listSub", now?.title ?: next?.title ?: "")
         .put("sync", JSONObject().put("kind", "live").put("name", c.name).put("url", c.url).put("logo", c.logo).put("group", c.group).put("tvgId", c.tvgId))
         .put("listTitleOverride", "Channels")

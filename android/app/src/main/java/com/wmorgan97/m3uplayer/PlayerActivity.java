@@ -67,6 +67,9 @@ public class PlayerActivity extends AppCompatActivity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private JSObject item = new JSObject();
     private boolean live, finished, stopped, resumePending;
+    // Films sent to the background: where to pick up, and whether it was paused (Home stops the stream; see onStop).
+    private long resumeAtMs = -1;
+    private boolean resumePaused;
     private int ticks;
 
     // Playback state, tracked here rather than read off ExoPlayer: ExoPlayer can't tell "connecting to a new channel"
@@ -91,6 +94,7 @@ public class PlayerActivity extends AppCompatActivity {
 
     private View overlay, nextPanel, infoBar;
     private TextView infoNum, infoName, infoNow, infoTime, infoNext, infoClock;
+    private android.widget.ImageView infoLogo;
     private ProgressBar infoProgress;
     private long loadAt;   // when the current channel was asked for (for the switch-time log)
     private final Runnable infoOff = () -> infoBar.setVisibility(View.GONE);
@@ -117,7 +121,7 @@ public class PlayerActivity extends AppCompatActivity {
     private final Runnable hudOff = () -> hud.setVisibility(View.GONE);
     private String zapDigits = "";
     private final Runnable zapRun = () -> {
-        try { NativePlayerPlugin.emit(new JSONObject().put("type", "zap").put("num", Integer.parseInt(zapDigits))); } catch (Exception ignored) {}
+        if (!zapDigits.isEmpty()) send("zap", "num", Integer.parseInt(zapDigits));   // only digits 0-9 go in, at most 4: always parses
         zapDigits = "";
     };
     private final Runnable countdownRun = new Runnable() { public void run() {
@@ -173,6 +177,8 @@ public class PlayerActivity extends AppCompatActivity {
         attempts = 0;
         playingSince = 0;
         resumePending = false;
+        resumeAtMs = -1;   // a new item starts from its own position, not the one we left
+        resumePaused = false;
         token++;
         // Whatever was pending belongs to the channel we're leaving.
         ui.removeCallbacks(startRun);
@@ -228,9 +234,12 @@ public class PlayerActivity extends AppCompatActivity {
         if (url.toLowerCase(Locale.ROOT).contains(".m3u8")) media.setMimeType(MimeTypes.APPLICATION_M3U8);
         player.setMediaSource(new DefaultMediaSourceFactory(http, PlayerHolder.extractors()).createMediaSource(media.build()));
         double start = next.optDouble("start", 0);
-        if (!live && start > 1) player.seekTo((long) (start * 1000));
+        long at = resumeAtMs >= 0 ? resumeAtMs : start > 1 ? (long) (start * 1000) : 0;
+        if (!live && at > 0) player.seekTo(at);
+        boolean paused = !live && resumePaused;
+        resumeAtMs = -1; resumePaused = false;
         player.prepare();
-        player.play();
+        if (paused) player.pause(); else player.play();
     }
 
     /** UI follows the state: the spinner only once a wait passes 400ms (fast zaps never flash it); the badge only once there's a picture. */
@@ -278,17 +287,25 @@ public class PlayerActivity extends AppCompatActivity {
         ed.apply();
     }
 
-    /** The channel banner (TiviMate-style): number, name, what's on with a progress bar, what's next; shown on every zap. */
+    /** The channel banner (TiviMate-style): number, logo, name; what's on with times and progress; what's next; the clock. */
     private void showBanner() {
-        infoNum.setText(item.optString("num", ""));
+        String num = item.optString("num", "");
+        infoNum.setText(num);
+        infoNum.setVisibility(num.isEmpty() ? View.GONE : View.VISIBLE);
         infoName.setText(item.optString("title", ""));
+        Logos.show(infoLogo, item.optString("art", ""), dp(120), dp(68));
         long s = item.optLong("nowStart", 0), e = item.optLong("nowEnd", 0), now = System.currentTimeMillis();
         String nowTitle = item.optString("nowTitle", "");
         infoNow.setText(nowTitle.isEmpty() ? item.optString("subtitle", "") : nowTitle);
-        infoTime.setText(s > 0 && e > 0 ? clockHm(s) + "–" + clockHm(e) : "");
-        if (s > 0 && e > s) { infoProgress.setVisibility(View.VISIBLE); infoProgress.setProgress((int) (100 * Math.max(0, Math.min(1, (now - s) / (double) (e - s))))); } else infoProgress.setVisibility(View.GONE);
+        boolean timed = !nowTitle.isEmpty() && s > 0 && e > s;
+        infoTime.setText(timed ? clockHm(s) + " – " + clockHm(e) : "");
+        infoTime.setVisibility(timed ? View.VISIBLE : View.GONE);
+        if (timed) { infoProgress.setVisibility(View.VISIBLE); infoProgress.setProgress((int) (1000 * Math.max(0, Math.min(1, (now - s) / (double) (e - s))))); }
+        else infoProgress.setVisibility(View.GONE);
         String next = item.optString("nextTitle", "");
-        infoNext.setText(next.isEmpty() ? "" : "Next  " + next);
+        // The next programme starts when this one ends, so its time is nowEnd.
+        infoNext.setText(next.isEmpty() ? "" : "Next" + (e > 0 ? "  " + clockHm(e) : "") + "   " + next);
+        infoNext.setVisibility(next.isEmpty() ? View.GONE : View.VISIBLE);
         infoClock.setText(clockHm(now));
         infoBar.setVisibility(View.VISIBLE);
         ui.removeCallbacks(infoOff); ui.postDelayed(infoOff, 4500);
@@ -338,7 +355,7 @@ public class PlayerActivity extends AppCompatActivity {
         lastBtn.setVisibility(live && !last.isEmpty() ? View.VISIBLE : View.GONE);
         errorPanel.setVisibility(View.VISIBLE);
         retryBtn.requestFocus();
-        try { NativePlayerPlugin.emit(new JSONObject().put("type", "error").put("message", message + (code != null ? " (" + code + ")" : ""))); } catch (Exception ignored) {}
+        send("error", "message", message + (code != null ? " (" + code + ")" : ""));
     }
 
     private void tryAgain() {
@@ -364,7 +381,7 @@ public class PlayerActivity extends AppCompatActivity {
     private void onEnded() {
         double d = player.getDuration() > 0 ? player.getDuration() / 1000.0 : 0;
         event("progress", d, d);
-        try { NativePlayerPlugin.emit(new JSONObject().put("type", "ended")); } catch (Exception ignored) {}
+        send("ended");
         if (!live && item.optBoolean("hasNext") && "Episodes".equals(item.optString("listTitle"))) startCountdown();
         else showOverlay(true);
     }
@@ -387,12 +404,23 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     private void event(String type, double t, double d) {
-        try { NativePlayerPlugin.emit(new JSONObject().put("type", type).put("t", t).put("d", d)); } catch (Exception ignored) {}
+        send(type, "t", Double.isNaN(t) ? 0 : t, "d", Double.isNaN(d) ? 0 : d);   // JSON refuses NaN
+    }
+
+    /** Every event to TvActivity goes through here, so a failure is logged (type only) rather than lost. */
+    private static void send(String type, Object... kv) {
+        try {
+            JSONObject o = new JSONObject().put("type", type);
+            for (int i = 0; i + 1 < kv.length; i += 2) o.put((String) kv[i], kv[i + 1]);
+            NativePlayerPlugin.emit(o);
+        } catch (Exception e) {
+            android.util.Log.w("M3U", "player event '" + type + "' not sent: " + e.getClass().getSimpleName());
+        }
     }
 
     private void step(int dir) {
         if ((dir > 0 && !item.optBoolean("hasNext")) || (dir < 0 && !item.optBoolean("hasPrev"))) return;
-        try { NativePlayerPlugin.emit(new JSONObject().put("type", "step").put("dir", dir)); } catch (Exception ignored) {}
+        send("step", "dir", dir);
     }
 
     private void updateBadge(int w, int h) {
@@ -404,22 +432,25 @@ public class PlayerActivity extends AppCompatActivity {
 
     // ---------- remote ----------
 
+    /** OK on any remote: the D-pad centre, a keyboard Enter, or a numpad Enter. Every OK check goes through here. */
+    private static boolean isOk(int k) { return k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER; }
+
     private boolean okHeld = false;
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
         int k = e.getKeyCode();
-        if (noticeAction != null && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
+        if (noticeAction != null && isOk(k)) {
             if (e.getAction() == KeyEvent.ACTION_UP) { Runnable r = noticeAction; noticeOff.run(); ui.removeCallbacks(noticeOff); r.run(); }
             return true;
         }
         if (noticeAction != null && k == KeyEvent.KEYCODE_BACK && e.getAction() == KeyEvent.ACTION_DOWN) { noticeOff.run(); ui.removeCallbacks(noticeOff); return true; }
-        if (e.getAction() == KeyEvent.ACTION_UP && live && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER)
+        if (e.getAction() == KeyEvent.ACTION_UP && live && isOk(k)
             && errorPanel.getVisibility() != View.VISIBLE && overlay.getVisibility() != View.VISIBLE && channelList.getVisibility() != View.VISIBLE && nextPanel.getVisibility() != View.VISIBLE) {
             if (okHeld) { okHeld = false; return true; }
             if (list().length() > 1) openChannels(); else showOverlay();
             return true;
         }
-        if (e.getAction() == KeyEvent.ACTION_UP && okHeld && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER)) { okHeld = false; return true; }
+        if (e.getAction() == KeyEvent.ACTION_UP && okHeld && isOk(k)) { okHeld = false; return true; }
         if (e.getAction() != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(e);
         boolean shown = overlay.getVisibility() == View.VISIBLE;
         if (shown) bumpHide();
@@ -457,8 +488,8 @@ public class PlayerActivity extends AppCompatActivity {
             if (e.getRepeatCount() == 0 || e.getRepeatCount() % 3 == 0) step(k == KeyEvent.KEYCODE_DPAD_UP ? -1 : 1);   // held: one channel per ~3 repeats
             return true;
         }
-        if (live && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER) && e.getRepeatCount() == 1) { showOverlay(); okHeld = true; return true; }
-        if (live && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER) && e.getRepeatCount() > 1) return true;
+        if (live && isOk(k) && e.getRepeatCount() == 1) { showOverlay(); okHeld = true; return true; }
+        if (live && isOk(k) && e.getRepeatCount() > 1) return true;
         if (!shown) {
             switch (k) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER: case KeyEvent.KEYCODE_NUMPAD_ENTER:
@@ -477,8 +508,8 @@ public class PlayerActivity extends AppCompatActivity {
         }
         if (k == KeyEvent.KEYCODE_BACK) { hideOverlay(); return true; }
         boolean onButton = getCurrentFocus() != null && getCurrentFocus() != playerView && overlay.findFocus() != null && !justShown;
-        if (live && !onButton && (k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER) && list().length() > 1) { openChannels(); return true; }
-        if (justShown && k != KeyEvent.KEYCODE_DPAD_CENTER && k != KeyEvent.KEYCODE_ENTER) justShown = false;   // the first arrow moves onto the buttons
+        if (live && !onButton && isOk(k) && list().length() > 1) { openChannels(); return true; }
+        if (justShown && !isOk(k)) justShown = false;   // the first arrow moves onto the buttons
         if (seek.hasFocus() && (k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT)) {
             seekBy((k == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1) * (e.getRepeatCount() > 3 ? 30_000 : 10_000));
             return true;
@@ -517,6 +548,7 @@ public class PlayerActivity extends AppCompatActivity {
     private void showOverlay(boolean keep) {
         boolean was = overlay.getVisibility() == View.VISIBLE;
         overlay.setVisibility(View.VISIBLE);
+        infoBar.setVisibility(View.GONE); ui.removeCallbacks(infoOff);   // the controls take the bottom of the screen
         if (playerView.getSubtitleView() != null) playerView.getSubtitleView().setBottomPaddingFraction(0.22f);   // subtitles sit above the controls
         if (!was) playBtn.requestFocus();
         ui.removeCallbacks(hideRun);
@@ -537,7 +569,8 @@ public class PlayerActivity extends AppCompatActivity {
         int i = item.optInt("current") - item.optInt("listStart") + 1;
         JSArray l = list();
         String name = "Next episode";
-        try { if (i >= 0 && i < l.length()) name = l.getJSONObject(i).optString("t", name); } catch (Exception ignored) {}
+        JSONObject row = i >= 0 && i < l.length() ? l.optJSONObject(i) : null;   // a missing row just keeps the generic name
+        if (row != null) name = row.optString("t", name);
         nextName.setText(name);
         countdown = 10;
         nextCount.setText("Next episode in 10");
@@ -637,6 +670,7 @@ public class PlayerActivity extends AppCompatActivity {
             }
         });
         hideOverlay();
+        infoBar.setVisibility(View.GONE); ui.removeCallbacks(infoOff);
         channelList.setVisibility(View.VISIBLE);
         channelList.setSelection(Math.max(0, cur - 3));
         channelList.post(() -> { channelList.requestFocus(); channelList.setSelection(cur); });
@@ -653,7 +687,7 @@ public class PlayerActivity extends AppCompatActivity {
         }
         int cur = item.optInt("current") - item.optInt("listStart");
         dialog(item.optString("listTitle", "Episodes"), rows, cur, w -> {
-            try { NativePlayerPlugin.emit(new JSONObject().put("type", "jump").put("index", item.optInt("listStart") + w)); } catch (Exception ignored) {}
+            send("jump", "index", item.optInt("listStart") + w);
         });
     }
 
@@ -753,7 +787,14 @@ public class PlayerActivity extends AppCompatActivity {
     protected void onStart() {
         super.onStart();
         stopped = false;
-        if (resumePending) { resumePending = false; begin(token); }   // a start or reconnect that was due while we were away
+        if (resumePending) {
+            // Exactly one prepare: a coalesced start or a reconnect still queued would otherwise open a second connection.
+            resumePending = false;
+            ui.removeCallbacks(startRun);
+            ui.removeCallbacksAndMessages(RETRY);
+            setState(S_PREPARING);
+            begin(token);   // live: a fresh connection at the live edge; films: at resumeAtMs (set in onStop)
+        }
     }
 
     @Override
@@ -761,7 +802,18 @@ public class PlayerActivity extends AppCompatActivity {
         super.onStop();
         stopped = true;   // pending starts/reconnects wait for onStart instead of reopening the stream in the background
         ui.removeCallbacksAndMessages(STALL);
-        if (!isFinishing() && player != null) player.pause();   // Home button: don't keep a stream (and the provider's one connection) open
+        if (isFinishing() || player == null) return;
+        // Home button: stop, not pause. A paused stream keeps its HTTP connection, and the provider allows only one.
+        // Nothing to bring back after a failure (the error panel stays) or a film that ended.
+        if (state == S_FAILED || player.getPlaybackState() == Player.STATE_ENDED) return;
+        if (!live && frameShown) {   // a film that got as far as a picture (not one still connecting) has a place to come back to
+            resumeAtMs = Math.max(0, player.getCurrentPosition());
+            resumePaused = !player.getPlayWhenReady();
+            double d = player.getDuration() > 0 ? player.getDuration() / 1000.0 : 0;
+            event("progress", resumeAtMs / 1000.0, d);   // save it now: the app may be killed while in the background
+        }
+        player.stop();
+        resumePending = true;
     }
 
     @Override
@@ -814,7 +866,7 @@ public class PlayerActivity extends AppCompatActivity {
         b.setImageResource(res);
         b.setContentDescription(label);
         b.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
-        b.setPadding(dp(10), dp(10), dp(10), dp(10));
+        b.setPadding(dp(12), dp(12), dp(12), dp(12));
         StateListDrawable bg = new StateListDrawable();
         GradientDrawable on = new GradientDrawable(); on.setShape(GradientDrawable.OVAL); on.setColor(Color.WHITE);
         bg.addState(new int[]{android.R.attr.state_focused}, on);
@@ -825,7 +877,7 @@ public class PlayerActivity extends AppCompatActivity {
         b.setFocusable(true);
         b.setOnClickListener(click);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(48), dp(48));
-        lp.setMargins(dp(6), 0, dp(6), 0);
+        lp.setMargins(dp(4), 0, dp(4), 0);   // 48dp discs, 8dp apart: 11 buttons fit 960dp (1080p and 4K alike)
         b.setLayoutParams(lp);
         return b;
     }
@@ -840,6 +892,7 @@ public class PlayerActivity extends AppCompatActivity {
         root.addView(playerView, new FrameLayout.LayoutParams(-1, -1));
 
         spinner = new ProgressBar(this);
+        spinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(0xFF5B93FF));   // the app's blue
         FrameLayout.LayoutParams sp = new FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER);
         root.addView(spinner, sp);
 
@@ -855,39 +908,40 @@ public class PlayerActivity extends AppCompatActivity {
 
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.VERTICAL);
-        top.setPadding(dp(48), dp(32), dp(48), 0);
+        top.setPadding(dp(48), dp(32), dp(48), 0);   // 48dp sides (overscan-safe), as everywhere in the app
         LinearLayout titleRow = new LinearLayout(this);
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
         badge = text(12, Color.WHITE, true);
         GradientDrawable outline = new GradientDrawable(); outline.setStroke(dp(1), 0xCCFFFFFF); outline.setCornerRadius(dp(3));
         badge.setBackground(outline);
-        badge.setPadding(dp(5), dp(1), dp(5), dp(1));
-        LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(-2, -2); bl.setMargins(0, 0, dp(10), 0);
+        badge.setPadding(dp(6), dp(2), dp(6), dp(2));
+        LinearLayout.LayoutParams bl = new LinearLayout.LayoutParams(-2, -2); bl.setMargins(0, 0, dp(8), 0);
         titleRow.addView(badge, bl);
         liveTag = text(13, Color.WHITE, true);
-        liveTag.setText("●  LIVE");
         android.text.SpannableString ls = new android.text.SpannableString("●  LIVE");
         ls.setSpan(new android.text.style.ForegroundColorSpan(0xFFFF4550), 0, 1, 0);
         liveTag.setText(ls);
-        LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(-2, -2); ll.setMargins(0, 0, dp(12), 0);
+        LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(-2, -2); ll.setMargins(0, 0, dp(16), 0);
         titleRow.addView(liveTag, ll);
         title = text(26, Color.WHITE, true);
         titleRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        clockLabel = text(16, 0xCCFFFFFF, false);
-        clockLabel.setPadding(dp(16), 0, 0, 0);
+        clockLabel = text(18, 0xFFD5DAE3, false);
+        clockLabel.setPadding(dp(24), 0, 0, 0);
         titleRow.addView(clockLabel);
         top.addView(titleRow);
-        subtitle = text(16, 0xCCFFFFFF, false);
+        subtitle = text(16, 0xFF9AA3B5, false);
+        subtitle.setPadding(0, dp(4), 0, 0);
         top.addView(subtitle);
         ov.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
 
         LinearLayout bottom = new LinearLayout(this);
         bottom.setOrientation(LinearLayout.VERTICAL);
-        bottom.setPadding(dp(48), 0, dp(48), dp(28));
+        bottom.setPadding(dp(48), 0, dp(48), dp(32));
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
         elapsed = text(15, Color.WHITE, false);
-        total = text(15, 0xB3FFFFFF, false);
+        total = text(15, 0xFF9AA3B5, false);
+        elapsed.setMinWidth(dp(56)); total.setMinWidth(dp(56)); total.setGravity(Gravity.END);   // fixed width: the bar doesn't jump as the digits change
         seek = new SeekBar(this);
         seek.setFocusable(true);
         seek.getProgressDrawable().setTint(0xFF5B93FF);   // the app's blue
@@ -904,7 +958,7 @@ public class PlayerActivity extends AppCompatActivity {
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setGravity(Gravity.CENTER_VERTICAL);
-        buttons.setPadding(0, dp(10), 0, 0);
+        buttons.setPadding(0, dp(8), 0, 0);
         int R_PLAY = androidx.media3.ui.R.drawable.exo_icon_pause;
         prevBtn = icon(androidx.media3.ui.R.drawable.exo_icon_previous, "Previous", v -> step(-1));
         backBtn = icon(androidx.media3.ui.R.drawable.exo_icon_rewind, "Back 30 seconds", v -> seekBy(-30_000));
@@ -952,7 +1006,7 @@ public class PlayerActivity extends AppCompatActivity {
         lastBtn.setAllCaps(false);
         lastBtn.setOnClickListener(v -> {
             errorPanel.setVisibility(View.GONE);
-            try { NativePlayerPlugin.emit(new JSONObject().put("type", "last")); } catch (Exception ignored) {}
+            send("last");
         });
         eb.addView(retryBtn);
         eb.addView(lastBtn);
@@ -1023,41 +1077,132 @@ public class PlayerActivity extends AppCompatActivity {
         channelList.setOnItemClickListener((parent, v, pos, id) -> {
             closeChannels();
             int off = item.optString("last", "").isEmpty() ? 0 : 1;
-            try {
-                if (pos < off) { NativePlayerPlugin.emit(new JSONObject().put("type", "last")); return; }
-                if (pos - off == item.optInt("current") - item.optInt("listStart")) return;
-                NativePlayerPlugin.emit(new JSONObject().put("type", "jump").put("index", item.optInt("listStart") + pos - off));
-            } catch (Exception ignored) {}
+            if (pos < off) { send("last"); return; }
+            if (pos - off == item.optInt("current") - item.optInt("listStart")) return;
+            send("jump", "index", item.optInt("listStart") + pos - off);
         });
         root.addView(channelList, new FrameLayout.LayoutParams(dp(420), -1, Gravity.START));
 
-        // Channel banner (live TV): bottom-left card with number, name, programme + progress, next.
+        // Channel banner (live TV): a translucent panel across the bottom, inside the 48dp page margins.
+        //   [ 101 ] [ logo ]  Channel name                                         21:04
+        //                     Programme title                  20:00 – 21:00
+        //                     ───────────progress──────────────────────────
+        //                     Next  21:00   Following programme
         LinearLayout ib = new LinearLayout(this);
         infoBar = ib;
-        ib.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable ibBg = new GradientDrawable(); ibBg.setColor(0xF0101319); ibBg.setCornerRadius(dp(14));
+        ib.setGravity(Gravity.CENTER_VERTICAL);
+        GradientDrawable ibBg = new GradientDrawable(); ibBg.setColor(0xE6181B22); ibBg.setCornerRadius(dp(12)); ibBg.setStroke(dp(1), 0x1FFFFFFF);
         ib.setBackground(ibBg);
-        ib.setPadding(dp(22), dp(16), dp(22), dp(16));
-        LinearLayout l1 = new LinearLayout(this); l1.setGravity(Gravity.CENTER_VERTICAL);
-        infoNum = text(22, 0xFF9AA3B5, true); infoNum.setPadding(0, 0, dp(14), 0);
+        ib.setPadding(dp(24), dp(16), dp(24), dp(16));
+        infoNum = text(34, Color.WHITE, true);
+        infoNum.setMinWidth(dp(64));
+        infoNum.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams nump = new LinearLayout.LayoutParams(-2, -2); nump.setMargins(0, 0, dp(16), 0);
+        ib.addView(infoNum, nump);
+        infoLogo = new android.widget.ImageView(this);
+        infoLogo.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+        GradientDrawable logoBg = new GradientDrawable(); logoBg.setColor(0xFF232733); logoBg.setCornerRadius(dp(10));
+        infoLogo.setBackground(logoBg);
+        infoLogo.setClipToOutline(true);
+        infoLogo.setPadding(dp(8), dp(4), dp(8), dp(4));
+        LinearLayout.LayoutParams lgp = new LinearLayout.LayoutParams(dp(120), dp(68)); lgp.setMargins(0, 0, dp(24), 0);
+        ib.addView(infoLogo, lgp);
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
         infoName = text(24, Color.WHITE, true);
-        infoClock = text(15, 0xB3FFFFFF, false); infoClock.setPadding(dp(18), 0, 0, 0);
-        l1.addView(infoNum); l1.addView(infoName, new LinearLayout.LayoutParams(0, -2, 1)); l1.addView(infoClock);
-        LinearLayout l2 = new LinearLayout(this); l2.setGravity(Gravity.CENTER_VERTICAL); l2.setPadding(0, dp(8), 0, 0);
-        infoNow = text(17, Color.WHITE, false);
-        infoTime = text(14, 0xB3FFFFFF, false); infoTime.setPadding(dp(14), 0, 0, 0);
+        col.addView(infoName);
+        LinearLayout l2 = new LinearLayout(this); l2.setGravity(Gravity.CENTER_VERTICAL); l2.setPadding(0, dp(4), 0, 0);
+        infoNow = text(18, 0xFFD5DAE3, false);
+        infoTime = text(15, 0xFF9AA3B5, false); infoTime.setPadding(dp(16), 0, 0, 0);
         l2.addView(infoNow, new LinearLayout.LayoutParams(0, -2, 1)); l2.addView(infoTime);
+        col.addView(l2);
         infoProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        infoProgress.setMax(100);
-        infoProgress.setProgressDrawable(new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{ new ColorDrawable(0x40FFFFFF), new android.graphics.drawable.ClipDrawable(new ColorDrawable(0xFF5B93FF), Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL) }));
+        infoProgress.setMax(1000);
+        GradientDrawable track = new GradientDrawable(); track.setColor(0x33FFFFFF); track.setCornerRadius(dp(2));
+        GradientDrawable fill = new GradientDrawable(); fill.setColor(0xFF5B93FF); fill.setCornerRadius(dp(2));
+        infoProgress.setProgressDrawable(new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{ track, new android.graphics.drawable.ClipDrawable(fill, Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL) }));
         LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-1, dp(3)); pp.setMargins(0, dp(8), 0, 0);
-        infoNext = text(14, 0xB3FFFFFF, false); infoNext.setPadding(0, dp(8), 0, 0);
-        ib.addView(l1); ib.addView(l2); ib.addView(infoProgress, pp); ib.addView(infoNext);
+        col.addView(infoProgress, pp);
+        infoNext = text(14, 0xFF9AA3B5, false); infoNext.setPadding(0, dp(8), 0, 0);
+        col.addView(infoNext);
+        ib.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+
+        infoClock = text(22, 0xFFD5DAE3, false);
+        infoClock.setPadding(dp(24), 0, 0, 0);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2); clp.gravity = Gravity.TOP;
+        ib.addView(infoClock, clp);
         ib.setVisibility(View.GONE);
-        FrameLayout.LayoutParams ibl = new FrameLayout.LayoutParams(dp(560), -2, Gravity.BOTTOM | Gravity.START);
-        ibl.setMargins(dp(48), 0, 0, dp(40));
+        FrameLayout.LayoutParams ibl = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
+        ibl.setMargins(dp(48), 0, dp(48), dp(32));
         root.addView(ib, ibl);
 
         setContentView(root);
+    }
+
+    // ---------- channel logos ----------
+
+    /**
+     * Channel logos for the banner, without an image library: fetched on one background thread, decoded at about the
+     * size shown (120x68dp), kept in a small in-memory LRU keyed by URL. The UI thread only ever sets a ready bitmap.
+     * Each ImageView is tagged with the URL it wants, so a slow logo can't land on the banner of a later channel.
+     */
+    static final class Logos {
+        private static final android.util.LruCache<String, android.graphics.Bitmap> cache = new android.util.LruCache<String, android.graphics.Bitmap>(6 * 1024 * 1024) {
+            @Override protected int sizeOf(String k, android.graphics.Bitmap b) { return b.getByteCount(); }
+        };
+        private static final java.util.Set<String> failed = java.util.Collections.synchronizedSet(new java.util.HashSet<>());   // don't refetch a dead logo on every zap
+        private static final java.util.concurrent.ExecutorService io = java.util.concurrent.Executors.newSingleThreadExecutor();
+        private static final Handler main = new Handler(Looper.getMainLooper());
+        private static final int MAX_BYTES = 2 * 1024 * 1024;
+
+        static void show(android.widget.ImageView v, String url, int w, int h) {
+            v.setTag(url);
+            v.setImageDrawable(null);
+            boolean usable = url != null && (url.startsWith("http://") || url.startsWith("https://")) && !failed.contains(url);
+            v.setVisibility(usable ? View.VISIBLE : View.GONE);   // no logo: the name moves up next to the number, no empty box
+            if (!usable) return;
+            android.graphics.Bitmap hit = cache.get(url);
+            if (hit != null) { v.setImageBitmap(hit); return; }
+            io.execute(() -> {
+                android.graphics.Bitmap b = fetch(url, w, h);
+                if (b != null) cache.put(url, b); else failed.add(url);
+                main.post(() -> {
+                    if (!url.equals(v.getTag())) return;   // the banner has moved on to another channel
+                    if (b != null) v.setImageBitmap(b); else v.setVisibility(View.GONE);
+                });
+            });
+        }
+
+        private static android.graphics.Bitmap fetch(String url, int w, int h) {
+            java.net.HttpURLConnection c = null;
+            try {
+                c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+                c.setConnectTimeout(5_000); c.setReadTimeout(8_000);
+                c.setInstanceFollowRedirects(true);
+                if (c.getResponseCode() / 100 != 2) { android.util.Log.w("M3U", "channel logo: HTTP " + c.getResponseCode()); return null; }
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                try (java.io.InputStream in = c.getInputStream()) {
+                    byte[] buf = new byte[16 * 1024];
+                    for (int n; (n = in.read(buf)) > 0; ) { out.write(buf, 0, n); if (out.size() > MAX_BYTES) { android.util.Log.w("M3U", "channel logo: over 2MB, skipped"); return null; } }
+                }
+                byte[] data = out.toByteArray();
+                // Decode at the smallest power-of-two scale that still covers the box: big source logos stay cheap.
+                android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length, o);
+                if (o.outWidth <= 0 || o.outHeight <= 0) { android.util.Log.w("M3U", "channel logo: not an image"); return null; }
+                int sample = 1;
+                while (o.outWidth / (sample * 2) >= w && o.outHeight / (sample * 2) >= h) sample *= 2;
+                o = new android.graphics.BitmapFactory.Options();
+                o.inSampleSize = sample;
+                return android.graphics.BitmapFactory.decodeByteArray(data, 0, data.length, o);
+            } catch (Exception | OutOfMemoryError e) {
+                android.util.Log.w("M3U", "channel logo failed: " + e.getClass().getSimpleName());   // never the URL: it can carry a login
+                return null;
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        }
     }
 }

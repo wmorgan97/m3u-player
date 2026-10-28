@@ -27,7 +27,13 @@ public final class PlayerHolder {
 
     static synchronized void giveBack(ExoPlayer p) {
         if (p == null || p == spare) return;   // handed back twice: it's already the spare (or gone), don't release it again
-        try { p.stop(); p.clearMediaItems(); } catch (Exception ignored) {}
+        try { p.stop(); p.clearMediaItems(); }
+        catch (Exception e) {
+            // A player in a bad state is no use as the spare: log it and release it rather than hand it to the next screen.
+            android.util.Log.w("M3U", "player hand-back failed: " + e.getClass().getSimpleName());
+            try { p.release(); } catch (Exception ignored) { /* already broken; nothing more to free */ }
+            return;
+        }
         if (spare == null) spare = p; else p.release();
     }
 

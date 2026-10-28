@@ -38,6 +38,7 @@ repositories {
 }
 
 dependencies {
+    implementation "androidx.profileinstaller:profileinstaller:1.4.1"   // installs baseline-prof.txt so the app's code is compiled ahead of time (smoother first frames on the Shield)
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"

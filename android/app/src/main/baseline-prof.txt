@@ -1,0 +1,12 @@
+# Compile the whole app and Compose/TV/Media3 ahead of time: on the Shield's Tegra X1 interpreted/JIT code made the first
+# frames of each screen and list rebuilds stutter (forcing full compilation cut the worst frames from ~150 ms to ~80 ms).
+HSPLcom/wmorgan97/m3uplayer/**->**(**)**
+Lcom/wmorgan97/m3uplayer/**;
+HSPLandroidx/compose/**->**(**)**
+Landroidx/compose/**;
+HSPLandroidx/tv/**->**(**)**
+Landroidx/tv/**;
+HSPLcoil/**->**(**)**
+Lcoil/**;
+HSPLandroidx/media3/**->**(**)**
+Landroidx/media3/**;

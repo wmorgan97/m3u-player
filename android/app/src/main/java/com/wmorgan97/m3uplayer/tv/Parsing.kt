@@ -122,3 +122,91 @@ fun programmeAt(l: List<Programme>, t: Long): Programme? {
     for (p in l) if (p.start <= t && p.end > t && (best == null || p.start >= best.start)) best = p
     return best
 }
+
+/** A channel's guide data as stored once on arrival: zero/negative-length and finished-before-[dropEndingBefore]
+ *  programmes dropped, sorted by start, one entry per start time (the longest, which also covers same start+title
+ *  duplicates), and each overlapping programme's end trimmed to the next one's start. */
+fun tidyProgrammes(l: List<Programme>, dropEndingBefore: Long = Long.MIN_VALUE): List<Programme> {
+    val sorted = l.filter { it.end > it.start && it.end > dropEndingBefore }.map { if (needsPlain(it.title)) it.copy(title = plainTitle(it.title)) else it }
+        .sortedWith(compareBy<Programme> { it.start }.thenByDescending { it.end })
+    val out = ArrayList<Programme>(sorted.size)
+    for (p in sorted) {
+        val prev = out.lastOrNull()
+        if (prev != null) {
+            if (p.start == prev.start) continue
+            if (prev.end > p.start) out[out.size - 1] = prev.copy(end = p.start)
+        }
+        out += p
+    }
+    return out
+}
+
+/** Programmes ending at or before [cutoff] left out of an already-tidied (sorted, non-overlapping) list. */
+fun dropFinished(l: List<Programme>, cutoff: Long): List<Programme> {
+    val i = l.indexOfFirst { it.end > cutoff }
+    return when (i) { -1 -> emptyList(); 0 -> l; else -> l.subList(i, l.size).toList() }
+}
+
+/** The programme on at [t] and the one after it, from a tidied (sorted, non-overlapping) list. */
+fun nowNextIn(l: List<Programme>, t: Long): Pair<Programme?, Programme?> {
+    val now = programmeAt(l, t)
+    return now to l.firstOrNull { it.start > t }
+}
+
+/** The guide key holding [c]'s programmes: its tvg-id when the guide has it, else the id the server matched to its
+ *  normalised tvg-name or name. An empty tvg-id or a name that normalises to nothing never matches anything. */
+fun guideKeyFor(c: Channel, programmes: Map<String, *>, guideNames: Map<String, String>): String? {
+    val id = c.tvgId.trim().lowercase()
+    if (id.isNotEmpty() && programmes.containsKey(id)) return id
+    for (n in listOf(c.tvgName, c.name)) {
+        val k = normName(n); if (k.isEmpty()) continue
+        val g = guideNames[k]?.takeIf { it.isNotEmpty() && programmes.containsKey(it) }
+        if (g != null) return g
+    }
+    return null
+}
+
+// ---------- recents ----------
+
+/** Recently watched, newest first: one entry per url, entries whose channel is gone left out once the channel list
+ *  is known ([exists] null = not loaded yet, keep everything), at most [cap]. */
+fun <T> tidyRecents(items: List<T>, url: (T) -> String, at: (T) -> Long, exists: ((String) -> Boolean)?, cap: Int = 20): List<T> =
+    items.filter { url(it).isNotEmpty() }.sortedByDescending(at).distinctBy(url)
+        .filter { exists == null || exists(url(it)) }.take(cap)
+
+// ---------- logging ----------
+
+private val CRED_PATH_RE = Regex("""^/(live|movie|series|timeshift)/[^/]+/[^/]+(/|$)""", RegexOption.IGNORE_CASE)
+private val BARE_XC_RE = Regex("""^/[^/]+/[^/]+/(\d+(?:\.\w+)?)$""")
+
+/** A link safe to write to the log: no user:pass@, query or fragment, and Xtream user/password path segments as ***. */
+fun redactUrl(url: String): String {
+    val noFrag = url.substringBefore('#').substringBefore('?')
+    val schemeEnd = noFrag.indexOf("://")
+    if (schemeEnd < 0) return noFrag.substringBefore('/').substringAfterLast('@').ifEmpty { "(link)" }
+    val scheme = noFrag.substring(0, schemeEnd + 3)
+    val rest = noFrag.substring(schemeEnd + 3)
+    val auth = rest.substringBefore('/'); val path = rest.substring(auth.length)
+    val host = auth.substringAfterLast('@')
+    val p = when {
+        CRED_PATH_RE.containsMatchIn(path) -> CRED_PATH_RE.replace(path) { "/${it.groupValues[1]}/***/***${it.groupValues[2]}" }
+        BARE_XC_RE.matches(path) -> BARE_XC_RE.replace(path) { "/***/***/${it.groupValues[1]}" }
+        else -> path
+    }
+    return scheme + host + p
+}
+
+// Guides mark titles with Unicode superscript/small-capital letters ("ᴸᶦᵛᵉ", "ᴺᵉʷ"). They render through a slow font
+// fallback on every row (and look odd), so they become plain words: "Live", "New".
+private const val SUPER_FROM = "ᴬᴮᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂᵃᵇᶜᵈᵉᶠᵍʰⁱʲᵏˡᵐⁿᵒᵖʳˢᵗᵘᵛʷˣʸᶻᶦᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢ"
+private const val SUPER_TO   = "ABDEGHIJKLMNOPRTUVWabcdefghijklmnoprstuvwxyziABCDEFGHIJKLMNOPRSTUVWYZ"
+internal fun needsPlain(t: String) = t.any { SUPER_FROM.indexOf(it) >= 0 }
+internal fun plainTitle(t: String): String {
+    val sb = StringBuilder(t.length); var prevSuper = false
+    for (ch in t) {
+        val i = SUPER_FROM.indexOf(ch)
+        if (i >= 0) { if (!prevSuper && sb.isNotEmpty() && sb.last() != ' ') sb.append(' '); sb.append(SUPER_TO[i]); prevSuper = true }
+        else { prevSuper = false; sb.append(ch) }
+    }
+    return sb.toString().replace(Regex("\\s+"), " ").trim()
+}

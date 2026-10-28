@@ -277,3 +277,21 @@ At 60 Hz the frame budget is 16.7 ms. Home (18 ms), Movies (17 ms) and the Guide
 | D14 | P3 | **No TODO/FIXME markers** were found in `server/`, `js/`, the Android sources or `ios/App/App`. The deferred work is instead recorded in comments, for example "(catch-up has no sync entry)". | `tv/TvActivity.kt:263` |
 | D15 | P2 | **Reminders only fire while `TvActivity` is alive**, because they run in a coroutine loop. | `tv/TvActivity.kt:74` |
 | D16 | P3 | **`PlayerActivity.onStop` pauses but does not stop the player**, so the provider connection may stay open after Home is pressed. Suspected; not measured. | `PlayerActivity.java:581` |
+
+
+## Status update (2026-10-28, after the second round)
+| Defect | Status |
+|---|---|
+| D1 parental lock bypass | Implemented: one PIN gate in `TvActivity.playLive` covers favourites, home rows, search, number zap, guide; PIN hashed. Not verified on device. |
+| D2 Back loop / instant exit | Back from Guide/Live = full screen is intended (TiviMate). Exit now needs a second Back within 2 s. Verified. |
+| D3 swallowed exceptions | Repo and player failures now logged (redacted); `Repo.liveError` shown as an empty state. Implemented, not verified. |
+| D4 preview never gives up | Fixed: 15 s / error -> "No picture", stream closed. Implemented. |
+| D5 guide rows 301+ | Fixed: guide requested around the selected row. Implemented. |
+| D6 wrong PIN feedback | Settings: retries + 5-try lockout. Live/Guide dialogs still close silently. Partly done. |
+| D7 PIN storage / locked groups after removal | Fixed (hash; removal clears locks). |
+| D8 misleading empty state | Fixed with `Repo.liveError`. |
+| D9 zapping stops at ends | Fixed: wraps. Verified. |
+| D11 dead Settings rows | Fixed in the new Settings. Verified visually. |
+| D13 OK keys | Fixed (`isOk`). |
+| D16 Home keeps stream open | Fixed: onStop stops, onStart re-prepares. Not verified on device. |
+| D10, D12, D14, D15 | Open (cosmetic / reminders only while the app runs). |

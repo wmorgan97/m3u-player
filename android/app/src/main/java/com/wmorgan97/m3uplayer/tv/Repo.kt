@@ -1,6 +1,7 @@
 package com.wmorgan97.m3uplayer.tv
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -74,6 +75,8 @@ object Repo {
 
     // Settings kept on the TV (the rest live in the web app's Settings)
     var englishOnly: Boolean get() = prefs.getBoolean("englishOnly", true); set(v) { prefs.edit().putBoolean("englishOnly", v).apply(); overviews.clear(); groupCache.clear() }
+    /** Channel numbers in lists, the guide and the player banner (off by default: provider numbers like 2710 mean little). */
+    var showNumbers: Boolean get() = prefs.getBoolean("showNumbers", false); set(v) { prefs.edit().putBoolean("showNumbers", v).apply(); version++ }
     var preview: Boolean get() = prefs.getBoolean("preview", true); set(v) { prefs.edit().putBoolean("preview", v).apply(); version++ }
     var fourKFirst: Boolean get() = prefs.getBoolean("fourK", true); set(v) = prefs.edit().putBoolean("fourK", v).apply()
     var lastChannelUrl: String? get() = prefs.getString("lastChannel", null); set(v) = prefs.edit().putString("lastChannel", v).apply()
@@ -82,7 +85,13 @@ object Repo {
     private fun strSet(k: String): Set<String> = prefs.getStringSet(k, emptySet())?.toSet() ?: emptySet()
     private fun putSet(k: String, v: Set<String>) { prefs.edit().putStringSet(k, v).apply(); version++ }
     /** The parental PIN, kept only as a salted hash ("" = no PIN). Set it with the plain digits. */
-    var pin: String get() = prefs.getString("pinHash", "") ?: ""; set(v) { prefs.edit().putString("pinHash", if (v.isEmpty()) "" else sha("m3u-pin|$v")).remove("pin").apply(); version++ }
+    var pin: String get() = prefs.getString("pinHash", "") ?: ""
+        set(v) {
+            // Removing the PIN also forgets which groups were locked, so a later PIN doesn't silently re-lock them.
+            val e = prefs.edit().putString("pinHash", if (v.isEmpty()) "" else sha("m3u-pin|$v")).remove("pin")
+            if (v.isEmpty()) { e.remove("lockedGroups"); unlocked.clear() }
+            e.apply(); version++
+        }
     fun checkPin(p: String) = pin.isNotEmpty() && sha("m3u-pin|$p") == pin
     /** A channel whose group is locked (and not unlocked this session): playing it asks for the PIN. */
     fun isChannelLocked(c: Channel) = isLocked(c.group)
@@ -115,6 +124,28 @@ object Repo {
     private val onlineState = androidx.compose.runtime.mutableStateOf(true)
     val online: Boolean get() = onlineState.value
     private fun markOnline(ok: Boolean) { if (onlineState.value != ok) onlineState.value = ok }
+    /** Set when no playlist could be loaded (every source failed and none has a saved copy): a short, human-readable
+     *  reason without links or logins. Null once a load succeeds. */
+    private val liveErrorState = androidx.compose.runtime.mutableStateOf<String?>(null)
+    val liveError: String? get() = liveErrorState.value
+    /** Set when the last sync with the server failed (human-readable, no links); null after a successful sync. */
+    private val lastSyncErrorState = androidx.compose.runtime.mutableStateOf<String?>(null)
+    val lastSyncError: String? get() = lastSyncErrorState.value
+
+    private const val TAG = "M3U"
+    /** Logs a failure without its message (which can quote links or server replies), only the redacted link. */
+    private fun warn(what: String, e: Throwable, url: String? = null) =
+        Log.w(TAG, what + (url?.let { " (" + redactUrl(it) + ")" } ?: "") + ": " + e.javaClass.simpleName)
+    private class HttpError(val code: Int) : Exception("HTTP $code")
+    /** What went wrong, in words for the screen. */
+    private fun describe(e: Throwable, who: String): String = when (e) {
+        is java.net.UnknownHostException, is java.net.ConnectException, is java.net.NoRouteToHostException -> "Couldn't reach $who."
+        is java.net.SocketTimeoutException -> "$who took too long to answer.".replaceFirstChar { it.uppercase() }
+        is HttpError -> when (e.code) { 401, 403 -> "$who refused the login.".replaceFirstChar { it.uppercase() }; 404 -> "$who doesn't have that list any more.".replaceFirstChar { it.uppercase() }; else -> "$who replied with an error (${e.code}).".replaceFirstChar { it.uppercase() } }
+        is java.io.IOException -> "The connection to $who failed."
+        else -> "The list from $who couldn't be read."
+    }
+
     /** Bumped whenever favourites / cached data change, so screens showing them redraw. */
     private val versionState = androidx.compose.runtime.mutableIntStateOf(0)
     var version: Int get() = versionState.intValue; set(v) { versionState.intValue = v }
@@ -138,7 +169,7 @@ object Repo {
         if (body != null) { c.requestMethod = "POST"; c.doOutput = true; c.setRequestProperty("Content-Type", "application/json"); c.outputStream.use { it.write(body.toByteArray()) } }
         val code = c.responseCode
         val text = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
-        if (code !in 200..299) throw Exception(text.ifBlank { "The server replied $code" })
+        if (code !in 200..299) throw HttpError(code)
         return text
     }
 
@@ -146,7 +177,13 @@ object Repo {
 
     @Volatile var syncData: JSONObject = JSONObject()
     suspend fun sync(): JSONObject = withContext(Dispatchers.IO) {
-        val d = JSONObject(http(api("sync"), timeout = 15_000))
+        val d = try { JSONObject(http(api("sync"), timeout = 15_000)) } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            warn("sync failed", e)
+            lastSyncErrorState.value = if (e is org.json.JSONException) "Your server's reply couldn't be read." else describe(e, "your server")
+            throw e
+        }
+        lastSyncErrorState.value = null
         syncData = d
         version++
         File(app.filesDir, "sync.json").writeText(d.toString())
@@ -180,7 +217,9 @@ object Repo {
 
     fun recentChannels(): List<JSONObject> {
         val r = syncData.optJSONArray("recents") ?: return emptyList()
-        return (0 until r.length()).mapNotNull { r.optJSONObject(it) }.filter { val u = it.optString("url"); !u.contains("/movie/") && !u.contains("/series/") }.take(20)
+        val items = (0 until r.length()).mapNotNull { r.optJSONObject(it) }.filter { val u = it.optString("url"); !u.contains("/movie/") && !u.contains("/series/") }
+        val known = live?.urls
+        return tidyRecents(items, { it.optString("url") }, { it.optLong("at") }, known?.let { k -> { u: String -> u in k } }, 20)
     }
     fun favorites(): List<JSONObject> {
         val f = syncData.optJSONArray("favorites") ?: return emptyList()
@@ -193,7 +232,7 @@ object Repo {
         if (!isFavourite(c.url)) list += JSONObject().put("kind", "live").put("name", c.name).put("url", c.url).put("logo", c.logo).put("group", c.group).put("tvgId", c.tvgId)
         val body = JSONObject().put("favorites", JSONArray(list)).put("favAt", System.currentTimeMillis())
         syncData.put("favorites", JSONArray(list)).put("favAt", System.currentTimeMillis())
-        try { syncData = JSONObject(http(api("sync"), body.toString())) } catch (_: Exception) {}
+        try { syncData = JSONObject(http(api("sync"), body.toString())) } catch (e: Exception) { warn("saving favourites failed", e) }
         version++
     }
     fun channelByUrl(url: String): Channel? = live?.channels?.firstOrNull { it.url == url }
@@ -205,15 +244,17 @@ object Repo {
         val done = t >= d * 0.95 || d - t < 90
         val entry = JSONObject().put("t", t).put("d", d).put("v", 3).put("at", System.currentTimeMillis()).put("done", done).put("item", if (hide) JSONObject(item.toString()).put("hidden", true) else item)
         syncData.optJSONObject("progress")?.put(url, entry)
-        try { syncData = JSONObject(http(api("sync"), JSONObject().put("progress", JSONObject().put(url, entry)).toString())) } catch (_: Exception) {}
+        try { syncData = JSONObject(http(api("sync"), JSONObject().put("progress", JSONObject().put(url, entry)).toString())) } catch (e: Exception) { warn("saving progress failed", e) }
     }
     suspend fun saveRecent(item: JSONObject) = withContext(Dispatchers.IO) {
-        try { syncData = JSONObject(http(api("sync"), JSONObject().put("recents", JSONArray().put(JSONObject(item.toString()).put("at", System.currentTimeMillis()))).toString())) } catch (_: Exception) {}
+        try { syncData = JSONObject(http(api("sync"), JSONObject().put("recents", JSONArray().put(JSONObject(item.toString()).put("at", System.currentTimeMillis()))).toString())) } catch (e: Exception) { warn("saving recent failed", e) }
     }
 
     // ---------- live channels ----------
 
-    data class Live(val channels: List<Channel>, val groups: List<String>, val epgUrls: List<String>)
+    data class Live(val channels: List<Channel>, val groups: List<String>, val epgUrls: List<String>) {
+        val urls: Set<String> by lazy { channels.mapTo(HashSet()) { it.url } }
+    }
     @Volatile var live: Live? = null
 
     /** The live channels of every playlist: the saved copy at once, a fresh download when it's over 12 hours old. */
@@ -221,16 +262,23 @@ object Repo {
         live?.takeIf { !refresh }?.let { return@withContext it }
         val sources = syncData.optJSONObject("sources") ?: JSONObject()
         val all = ArrayList<Channel>(); val epg = ArrayList<String>()
+        var tried = 0; var loaded = 0; var firstError: String? = null
+        fun failed(what: String, e: Exception, url: String?, who: String) { warn(what, e, url); if (firstError == null) firstError = describe(e, who) }
         for (k in sources.keys()) {
             val v = sources.optJSONObject(k) ?: continue
             if (v.optBoolean("deleted") || v.optString("content") == "vod") continue
             when (v.optString("kind")) {
                 "url" -> {
                     val src = v.optString("sourceUrl"); if (src.isEmpty()) continue
+                    tried++
                     val file = File(app.filesDir, "live-" + sha(src).take(16) + ".m3u")
                     val stale = !file.exists() || System.currentTimeMillis() - file.lastModified() > 12 * 3600_000L
-                    if (stale) try { val text = http(src, timeout = 120_000); if (text.contains("#EXTINF")) file.writeText(text) } catch (_: Exception) {}
-                    if (file.exists()) { val (chs, hdr) = parseM3U(file.readText(), all.size); all += chs; epg += hdr }
+                    if (stale) try {
+                        val text = http(src, timeout = 120_000)
+                        if (text.contains("#EXTINF")) file.writeText(text) else throw IllegalStateException("not a playlist")
+                    } catch (e: Exception) { failed("playlist download failed", e, src, "the playlist provider") }
+                    if (file.exists()) try { val (chs, hdr) = parseM3U(file.readText(), all.size); all += chs; epg += hdr; loaded++ }
+                        catch (e: Exception) { failed("playlist parse failed", e, src, "the playlist provider") }
                 }
                 "xtream" -> {
                     val x = v.optJSONObject("xtream") ?: continue
@@ -239,11 +287,12 @@ object Repo {
                     // and still works when the provider's API is slow or down.
                     val base = "live-x-" + sha(xs.server + "|" + xs.user).take(12)
                     val fc = File(app.filesDir, "$base-cats.json"); val fs = File(app.filesDir, "$base-streams.json")
+                    tried++
                     if (!fs.exists() || System.currentTimeMillis() - fs.lastModified() > 12 * 3600_000L) try {
                         val c = http(playerApi(xs, "get_live_categories")); val l = http(playerApi(xs, "get_live_streams"), timeout = 120_000)
-                        if (l.trimStart().startsWith("[")) { fc.writeText(c); fs.writeText(l) }
-                    } catch (_: Exception) {}
-                    try {
+                        if (l.trimStart().startsWith("[")) { fc.writeText(c); fs.writeText(l) } else throw IllegalStateException("not a channel list")
+                    } catch (e: Exception) { failed("Xtream download failed", e, xs.server, "the Xtream provider") }
+                    if (fs.exists()) try {
                         val cats = JSONArray(fc.readText())
                         val names = (0 until cats.length()).associate { cats.getJSONObject(it).optString("category_id") to cats.getJSONObject(it).optString("category_name") }
                         val list = JSONArray(fs.readText())
@@ -254,10 +303,12 @@ object Repo {
                                 s.optString("stream_icon"), s.optString("epg_channel_id"), s.optString("name"), all.size + 1, catchupDays = days, catchupMode = if (days > 0) "xc" else "")
                         }
                         epg += "${xs.server}/xmltv.php?username=${enc(xs.user)}&password=${enc(xs.pass)}"
-                    } catch (_: Exception) {}
+                        loaded++
+                    } catch (e: Exception) { failed("Xtream channel list unreadable", e, xs.server, "the Xtream provider") }
                 }
             }
         }
+        liveErrorState.value = if (tried > 0 && loaded == 0) (firstError ?: "Your playlists couldn't be loaded.") else null
         val groups = LinkedHashSet<String>(); all.forEach { groups += it.group }
         Live(all, groups.toList(), epg.distinct()).also { live = it }
     }
@@ -273,15 +324,18 @@ object Repo {
     private val programmes = ConcurrentHashMap<String, List<Programme>>()
     private val guideNames = ConcurrentHashMap<String, String>()
     private val asked = ConcurrentHashMap<String, Long>()
-    private fun chanKey(c: Channel) = c.tvgId.lowercase().ifEmpty { normName(c.tvgName.ifEmpty { c.name }) }
-    fun guideFor(c: Channel): List<Programme> {
-        val id = c.tvgId.lowercase()
-        val key = if (id.isNotEmpty() && programmes.containsKey(id)) id else guideNames[normName(c.tvgName)] ?: guideNames[normName(c.name)]
-        return key?.let { programmes[it] } ?: emptyList()
-    }
-    fun nowNext(c: Channel, t: Long = System.currentTimeMillis()): Pair<Programme?, Programme?> {
-        val l = guideFor(c); val i = l.indexOfLast { it.start <= t }
-        return (if (i >= 0 && l[i].end > t) l[i] else null) to l.getOrNull(i + 1)
+    private fun chanKey(c: Channel) = c.tvgId.trim().lowercase().ifEmpty { normName(c.tvgName.ifEmpty { c.name }) }
+    /** A channel's programmes, sorted by start with no duplicates or overlaps (tidied once, when the data arrives). */
+    fun guideFor(c: Channel): List<Programme> = guideKeyFor(c, programmes, guideNames)?.let { programmes[it] } ?: emptyList()
+    fun nowNext(c: Channel, t: Long = System.currentTimeMillis()): Pair<Programme?, Programme?> = nowNextIn(guideFor(c), t)
+
+    private const val KEEP_PAST = 6 * 3600_000L
+    private const val SAVED_GUIDE_MAX_AGE = 36 * 3600_000L
+    private fun parseProgrammes(arr: JSONArray, cutoff: Long) =
+        tidyProgrammes((0 until arr.length()).map { val a = arr.getJSONArray(it); Programme(a.optLong(0), a.optLong(1), a.optString(2), a.optString(3)) }, cutoff)
+    /** Drops programmes that ended over 6 hours ago from memory (channels left with none are forgotten). */
+    private fun pruneGuide(cutoff: Long) {
+        for ((k, l) in programmes) { val kept = dropFinished(l, cutoff); if (kept.isEmpty()) programmes.remove(k, l) else if (kept.size != l.size) programmes.replace(k, l, kept) }
     }
 
     // The guide is saved on the TV (6 hours back to 30 ahead), so it shows at once on the next start and while the server is away.
@@ -296,7 +350,8 @@ object Repo {
                 val keep = l.filter { it.end > now - 6 * 3600_000L && it.start < now + 30 * 3600_000L }
                 if (keep.isNotEmpty()) p.put(k, JSONArray(keep.map { JSONArray().put(it.start).put(it.end).put(it.title).put(it.desc.take(400)) }))
             }
-            runCatching { File(app.filesDir, "guide.json").writeText(JSONObject().put("programmes", p).put("names", JSONObject(HashMap(guideNames) as Map<*, *>)).toString()) }
+            runCatching { File(app.filesDir, "guide.json").writeText(JSONObject().put("savedAt", now).put("programmes", p).put("names", JSONObject(HashMap(guideNames) as Map<*, *>)).toString()) }
+                .onFailure { warn("saving the guide failed", it) }
         }
     }
     @Volatile private var guideLoaded = false
@@ -305,12 +360,18 @@ object Repo {
         if (guideLoaded) return; guideLoaded = true
         guideScope.launch {
             runCatching {
-                val d = JSONObject(File(app.filesDir, "guide.json").readText())
+                val f = File(app.filesDir, "guide.json"); if (!f.exists()) return@runCatching
+                val d = JSONObject(f.readText())
+                val now = System.currentTimeMillis()
+                val savedAt = d.optLong("savedAt", f.lastModified())
+                if (now - savedAt > SAVED_GUIDE_MAX_AGE) return@runCatching   // too old to trust; wait for the server
+                val cutoff = now - KEEP_PAST
+                pruneGuide(cutoff)
                 val p = d.optJSONObject("programmes") ?: JSONObject()
-                for (k in p.keys()) if (!programmes.containsKey(k)) { val arr = p.getJSONArray(k); programmes[k] = (0 until arr.length()).map { val a = arr.getJSONArray(it); Programme(a.optLong(0), a.optLong(1), a.optString(2), a.optString(3)) } }
-                d.optJSONObject("names")?.let { n -> for (k in n.keys()) guideNames.putIfAbsent(k, n.getString(k)) }
+                for (k in p.keys()) if (k.isNotEmpty() && !programmes.containsKey(k)) parseProgrammes(p.getJSONArray(k), cutoff).takeIf { it.isNotEmpty() }?.let { programmes.putIfAbsent(k, it) }
+                d.optJSONObject("names")?.let { n -> for (k in n.keys()) if (k.isNotEmpty()) guideNames.putIfAbsent(k, n.getString(k)) }
                 guideState.intValue++
-            }
+            }.onFailure { warn("reading the saved guide failed", it) }
         }
     }
 
@@ -333,18 +394,25 @@ object Repo {
         var got = false
         for (batch in want.chunked(600)) {
             val ids = JSONArray(); val names = JSONArray()
-            batch.forEach { c -> if (c.tvgId.isNotEmpty()) ids.put(c.tvgId.lowercase()); names.put(normName(c.name)); if (c.tvgName.isNotEmpty()) names.put(normName(c.tvgName)) }
+            batch.forEach { c ->
+                val id = c.tvgId.trim().lowercase(); if (id.isNotEmpty()) ids.put(id)
+                normName(c.name).takeIf { it.isNotEmpty() }?.let { names.put(it) }
+                if (c.tvgName.isNotEmpty()) normName(c.tvgName).takeIf { it.isNotEmpty() }?.let { names.put(it) }
+            }
             try {
                 val d = JSONObject(http(api("guide"), JSONObject().put("urls", JSONArray(urls)).put("ids", ids).put("names", names).toString(), 60_000))
                 val p = d.optJSONObject("programmes") ?: JSONObject()
+                val cutoff = System.currentTimeMillis() - KEEP_PAST
                 for (k in p.keys()) {
-                    val arr = p.getJSONArray(k)
-                    programmes[k] = (0 until arr.length()).map { val a = arr.getJSONArray(it); Programme(a.optLong(0), a.optLong(1), a.optString(2), a.optString(3)) }
+                    if (k.isEmpty()) continue
+                    val l = parseProgrammes(p.getJSONArray(k), cutoff)
+                    if (l.isEmpty()) programmes.remove(k) else programmes[k] = l
                 }
-                d.optJSONObject("names")?.let { n -> for (k in n.keys()) guideNames[k] = n.getString(k) }
+                d.optJSONObject("names")?.let { n -> for (k in n.keys()) if (k.isNotEmpty()) guideNames[k] = n.getString(k) }
+                pruneGuide(cutoff)
                 got = true
                 saveGuideSoon()
-            } catch (_: Exception) { batch.forEach { asked.remove(chanKey(it)) } }
+            } catch (e: Exception) { warn("guide batch failed", e); batch.forEach { asked.remove(chanKey(it)) } }
         }
         got
     }
@@ -387,7 +455,7 @@ object Repo {
         val fresh = file.exists() && System.currentTimeMillis() - file.lastModified() < 3 * 3600_000L
         val text = if (file.exists()) {
             if (!fresh && refreshing.putIfAbsent(kind, true) == null) kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
-                try { file.writeText(http(api("vod"), vodBody(x, kind).toString(), 120_000)); overviews.remove(kind); groupCache.clear(); version++ } catch (_: Exception) {} finally { refreshing.remove(kind) }
+                try { file.writeText(http(api("vod"), vodBody(x, kind).toString(), 120_000)); overviews.remove(kind); groupCache.clear(); version++ } catch (e: Exception) { warn("VOD refresh failed", e) } finally { refreshing.remove(kind) }
             }
             file.readText()
         } else http(api("vod"), vodBody(x, kind).toString(), 120_000).also { file.writeText(it) }
@@ -433,7 +501,7 @@ object Repo {
                 try {
                     val cats = overview(kind)?.catNames ?: emptyMap()
                     tidy(arr(JSONObject(http(api("vod"), vodBody(x, kind).put("q", q).toString())), "items", kind, cats)).take(40)
-                } catch (_: Exception) { emptyList() }
+                } catch (e: Exception) { warn("search failed", e); emptyList() }
             }
         }.awaitAll()
         r[0] to r[1]
@@ -467,7 +535,7 @@ object Repo {
         try {
             val d = JSONObject(http(api("tmdb/info") + "&kind=${if (v.kind == "series") "tv" else "movie"}&name=${enc(v.title)}&year=${v.year ?: ""}"))
             if (d.has("tid")) d.also { tmdb[k] = it } else null
-        } catch (_: Exception) { null }
+        } catch (e: Exception) { warn("film details failed", e); null }
     }
 
     private fun sha(s: String) = MessageDigest.getInstance("SHA-1").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }

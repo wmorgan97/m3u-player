@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarViewWeek
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -49,7 +50,7 @@ private fun at(l: List<Programme>, t: Long): Programme? { val i = l.indexOfLast 
 fun GuideScreen(act: TvActivity, startGroup: String?) {
     val live by produceState<Repo.Live?>(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: Repo.Live(emptyList(), emptyList(), emptyList()) }
     val l = live ?: run { Box(Modifier.fillMaxSize()) { PageTitle("TV Guide", "Loading channels…") }; return }
-    if (l.channels.isEmpty()) { EmptyState(Icons.Default.CalendarViewWeek, "No live channels", "Add a playlist with live TV in Settings"); return }
+    if (l.channels.isEmpty()) { Repo.liveError?.let { EmptyState(Icons.Default.CloudOff, "Couldn't load your channels", "$it Check the playlist in Settings, or try again later.") } ?: EmptyState(Icons.Default.CalendarViewWeek, "No live channels", "Add a playlist with live TV in Settings"); return }
     LaunchedEffect(Unit) { Repo.loadSavedGuide() }
     val v = Repo.version
     val favUrls = remember(v) { Repo.favorites().map { it.optString("url") }.toSet() }
@@ -224,7 +225,7 @@ private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Lon
     val sel = if (cursor >= 0) at(all, cursor) else null
     Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = 4.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 6.dp).background(if (cursor >= 0) Tv.surface3 else if (inPreview) Tv.accent.copy(alpha = .12f) else Tv.surface, RoundedCornerShape(6.dp)).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (inPreview) "▶" else "${c.num}", fontSize = 11.sp, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(30.dp), maxLines = 1)
+            Text(if (inPreview) "▶" else if (Repo.showNumbers) "${c.num}" else "", fontSize = 11.sp, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(if (Repo.showNumbers) 30.dp else 16.dp), maxLines = 1)
             LogoTile(c, Modifier.size(width = 50.dp, height = 30.dp))
             Spacer(Modifier.width(8.dp))
             Text(c.name + if (fav) " ★" else "", fontSize = Tv.caption, color = if (inPreview) Tv.accent else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))

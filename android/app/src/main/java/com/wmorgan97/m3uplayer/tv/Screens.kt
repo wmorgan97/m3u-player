@@ -208,7 +208,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     val live by produceState<Repo.Live?>(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: Repo.Live(emptyList(), emptyList(), emptyList()) }
     val l = live
     if (l == null) { LiveSkeleton(); return }
-    if (l.channels.isEmpty()) { EmptyState(Icons.Default.LiveTv, "No live channels", "Add a playlist with live TV in Settings"); return }
+    if (l.channels.isEmpty()) { Repo.liveError?.let { EmptyState(Icons.Default.CloudOff, "Couldn't load your channels", "$it Check the playlist in Settings, or try again later.") } ?: EmptyState(Icons.Default.LiveTv, "No live channels", "Add a playlist with live TV in Settings"); return }
     val refresh = act.refresh + Repo.version
     val favUrls = remember(refresh) { Repo.favorites().map { it.optString("url") }.toSet() }
     val hiddenCh = remember(Repo.version) { Repo.hiddenChannels }
@@ -232,6 +232,8 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     var minute by remember { mutableIntStateOf(0) }
     val guideTick = Repo.guideVersion + minute * 1000
     val listState = rememberLazyListState()
+    var shownRows by remember { mutableIntStateOf(Int.MAX_VALUE) }
+    LaunchedEffect(list) { shownRows = 3; while (shownRows < list.size && shownRows < 30) { androidx.compose.runtime.withFrameNanos { }; shownRows += 3 }; shownRows = Int.MAX_VALUE }
     var shownGroup by remember { mutableStateOf<String?>(null) }   // back to the top only when the list is a new group's
     LaunchedEffect(list) { if (list.isEmpty()) return@LaunchedEffect; if (shownGroup != group) { shownGroup = group; listState.scrollToItem(0) }; Repo.requestGuide(list.take(300)) }
     LaunchedEffect(Unit) { while (true) { delay(60_000); minute++ } }
@@ -291,7 +293,8 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
                 }
             }
             else LazyColumn(Modifier.weight(1f).fillMaxHeight().padding(start = 12.dp, end = Tv.margin - 16.dp), state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
-                itemsIndexed(list, key = { i, c -> "$i|${c.url}" }) { i, c -> ChannelRow(c, guideTick, c.url in favUrls, onLong = { chanMenu = c }, onFocus = { focusedChan = c }, inPreview = c.url == Preview.channel?.url) {
+                // A new group's rows are built a few per frame (all nine at once took ~150-200 ms on the Shield).
+                itemsIndexed(list.subList(0, minOf(list.size, shownRows)), key = { i, c -> "$i|${c.url}" }) { i, c -> ChannelRow(c, guideTick, c.url in favUrls, onLong = { chanMenu = c }, onFocus = { focusedChan = c }, inPreview = c.url == Preview.channel?.url) {
                     if (Repo.preview && Preview.channel?.url != c.url) Preview.select(c, list) else act.playLive(list, i)   // first OK: preview; again: full screen
                 } }
             }
@@ -342,7 +345,7 @@ fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onFocus:
         // The channel that's playing: a faint blue tint and its name in blue (subtle, TiviMate-like); the highlight stays white.
         colors = ClickableSurfaceDefaults.colors(containerColor = if (inPreview) Tv.accent.copy(alpha = .12f) else Color.Transparent, focusedContainerColor = Tv.text, contentColor = Tv.text, focusedContentColor = Tv.bg)) {
         Row(Modifier.fillMaxSize().padding(horizontal = 10.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
-            Text(if (inPreview) "▶" else "${c.num}", fontSize = Tv.label, color = if (inPreview) Tv.accent else LocalContentColor.current.copy(alpha = .6f), modifier = Modifier.width(40.dp), maxLines = 1)
+            Text(if (inPreview) "▶" else if (Repo.showNumbers) "${c.num}" else "", fontSize = Tv.label, color = if (inPreview) Tv.accent else LocalContentColor.current.copy(alpha = .6f), modifier = Modifier.width(if (Repo.showNumbers) 40.dp else 20.dp), maxLines = 1)
             LogoTile(c, Modifier.size(width = 40.dp, height = 24.dp))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {

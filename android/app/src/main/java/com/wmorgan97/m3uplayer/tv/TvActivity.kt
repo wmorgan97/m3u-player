@@ -57,6 +57,7 @@ class TvActivity : ComponentActivity() {
     private var focusTick by mutableIntStateOf(0)       // bumped to pull the highlight back into the page
     private var zap by mutableStateOf("")               // digits typed on the remote
     private var due by mutableStateOf<Reminder?>(null)
+    private var backAt = 0L
     private var pinGate by mutableStateOf<(() -> Unit)?>(null)   // a locked channel waiting for its PIN
     var resumeTick by mutableIntStateOf(0)                // bumped on coming back (from the player): the preview starts again   // a reminder that just came up (shown over the app)
 
@@ -131,7 +132,10 @@ class TvActivity : ComponentActivity() {
         val screen = stack.last()
         val drawer = rememberDrawerState(DrawerValue.Closed)
         BackHandler(enabled = true) {
-            if (drawer.currentValue == DrawerValue.Open) { finish(); return@BackHandler }
+            if (drawer.currentValue == DrawerValue.Open) {   // a second Back within 2 s leaves the app (no accidental exits)
+                if (System.currentTimeMillis() - backAt < 2000) finish() else { backAt = System.currentTimeMillis(); android.widget.Toast.makeText(this@TvActivity, "Press Back again to exit", android.widget.Toast.LENGTH_SHORT).show() }
+                return@BackHandler
+            }
             if (back()) { drawer.setValue(DrawerValue.Closed); focusTick++ } else drawer.setValue(DrawerValue.Open)
         }
         val section = stack.firstOrNull() ?: Screen.Home
@@ -277,7 +281,8 @@ class TvActivity : ComponentActivity() {
         val o = JSONObject(playList[i].toString())
         val from = maxOf(0, minOf(i - 150, playList.size - 300))
         val part = playList.subList(from, minOf(playList.size, from + 300))
-        o.put("hasPrev", i > 0).put("hasNext", i < playList.size - 1)
+        val wrap = o.optBoolean("live") && playList.size > 1   // live: up/down go round the list, as on a TV
+        o.put("hasPrev", wrap || i > 0).put("hasNext", wrap || i < playList.size - 1)
         o.put("list", JSONArray(part.map { JSONObject().put("t", it.optString("listTitle", it.optString("title"))).put("s", it.optString("listSub")) }))
         o.put("listStart", from).put("current", i)
         o.put("listTitle", o.optString("listTitleOverride", "Up next"))   // the panel's heading: Channels / Episodes
@@ -288,7 +293,8 @@ class TvActivity : ComponentActivity() {
     private fun onPlayerEvent(e: JSONObject) {
         when (e.optString("type")) {
             "step", "jump" -> {
-                val n = if (e.optString("type") == "step") playIndex + e.optInt("dir") else e.optInt("index")
+                var n = if (e.optString("type") == "step") playIndex + e.optInt("dir") else e.optInt("index")
+                if (playList.getOrNull(playIndex)?.optBoolean("live") == true && playList.isNotEmpty()) n = Math.floorMod(n, playList.size)
                 if (n !in playList.indices || n == playIndex) return
                 if (playList[n].optBoolean("live")) { lastLive = playList to playIndex; playList[n].put("last", playList[playIndex].optString("title")); Repo.lastChannelUrl = playList[n].optString("url") }
                 play(playList, n)
