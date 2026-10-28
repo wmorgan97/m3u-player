@@ -1,0 +1,21 @@
+import { chromium } from 'playwright-core';
+import { readFileSync } from 'node:fs';
+const base = 'http://127.0.0.1:8090';
+const key = readFileSync('C:/m3u-player/proxy-key.txt', 'utf8').trim();
+const pl = JSON.parse(readFileSync('C:/m3u-player/data/shotfix.json', 'utf8'));
+const browser = await chromium.launch({ channel: 'chrome', headless: true });
+const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+await ctx.route(/\/(live|movie|series|timeshift)\/|\/hls[?/]|\/hls$|\.ts(\?|$)|\.m3u8|\/sync/, r => r.abort());
+const page = await ctx.newPage();
+page.on('pageerror', e => console.log('pageerror', e.message));
+await page.goto(`${base}/index.html`); await page.waitForTimeout(1500);
+await page.evaluate(async ({ pl, key }) => { const { db } = await import('/js/db.js'); await db.putPlaylist(pl); const s = (await db.get('settings')) || {}; await db.set('settings', { ...s, serverKey: key }); }, { pl, key });
+await page.reload(); await page.waitForTimeout(12000);   // first visit: catalogues load and get saved
+await page.reload();
+const t0 = Date.now();
+await page.waitForFunction(() => document.querySelector('.home-shelf .scard'), null, { timeout: 15000 }).catch(() => {});
+console.log('second open: movies shown after', Date.now() - t0, 'ms');
+await page.evaluate(() => { window.__marks = [...document.querySelectorAll('#view > *')]; let n = 0; new MutationObserver(m => { n += m.filter(x => x.target.id === 'view').length; window.__viewMut = n; }).observe(document.querySelector('#view'), { childList: true }); });
+await page.waitForTimeout(10000);
+console.log(await page.evaluate(() => `sections kept: ${window.__marks.filter(el => el.isConnected).length}/${window.__marks.length}, top-level changes in 10s: ${window.__viewMut || 0}`));
+await browser.close();

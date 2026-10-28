@@ -7,6 +7,7 @@ import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from 
 import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
+import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, otherLanguage, buildSports, groupByDay, bySport } from './sports.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -64,6 +65,8 @@ function fmtDay(t) {
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = isNative || matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 if (isNative) document.documentElement.classList.add('native');
+// Small iPhones (375pt): the bar's search is too narrow for the full placeholder.
+if (matchMedia('(max-width: 389px)').matches) document.getElementById('tq')?.setAttribute('placeholder', 'Search');
 if (/Mac/.test(navigator.platform) && matchMedia('(pointer: fine)').matches) document.documentElement.classList.add('mac');
 const isLiveChannel = c => !c.kind || c.kind === 'live';
 
@@ -120,6 +123,7 @@ async function init() {
   else if (location.hash.startsWith('#/guide') && state.current) ensureGuide(guideScope(state.current));
   if (resumeChannel) ensureGuide([resumeChannel]);
   syncNow();
+  if (state.playlists.length) setTimeout(() => { if (!state.playing && $('#sheet').hidden) askAlerts(); }, 6000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); checkFollows(); } });
   setTimeout(() => { checkNewEpisodes(); checkFollows(); }, 20_000);   // after start-up, quietly
   // The saved guides load once the first screen is up and the remote is responsive, not during it.
@@ -395,21 +399,81 @@ function warmNextEpisode() {
   const tc = transcodeUrl(next.url);
   if (tc) fetch(tc.replace('/hls?', '/hls/warm?'), { keepalive: true }).catch(() => {});
 }
-// ---- Next episode countdown ----
-let nextUpTimer = 0;
-function showNextUp(next) {
-  const el = $('#next-up');
-  if (!el) return step(1);
-  let left = 10;
-  const draw = () => { el.innerHTML = `<div class="nu-card">${logoHtml(next)}<div class="nu-text"><span class="muted small-caps">Next episode</span><b>${esc(next.name)}</b><span class="muted">Starting in ${left}s</span></div>
-    <div class="nu-actions"><button class="btn primary" data-nu="play">${icon('play')} Play now</button><button class="btn" data-nu="cancel">Cancel</button></div></div>`; };
-  draw();
-  el.hidden = false;
-  el.onclick = e => { const b = e.target.closest('[data-nu]'); if (!b) return; hideNextUp(); if (b.dataset.nu === 'play') step(1); };
-  clearInterval(nextUpTimer);
-  nextUpTimer = setInterval(() => { left--; if (left <= 0) { hideNextUp(); step(1); } else draw(); }, 1000);
+// ---- Next episode card ----
+// "S1 E2 · Title" for an episode, and its series' name ("Still watching …?").
+function epCardLine(x) {
+  const m = vodMeta(x.name), n = m.episode ?? x.num, se = m.season ?? x.season, ep = epTitle(x.name);
+  const code = n != null ? `${se != null ? `S${se} ` : ''}E${n}` : '';
+  return [code, ep].filter(Boolean).join(' · ') || niceName(x);
 }
-function hideNextUp() { clearInterval(nextUpTimer); const el = $('#next-up'); if (el) { el.hidden = true; el.innerHTML = ''; } }
+const showNameOf = c => displayTitle(String(c?.group || '').replace(/\s*·\s*Season.*$/i, '')) || displayTitle(vodMeta(c?.name).title || '');
+// ---- Next episode card (web player) ----
+// Shows in the end credits (last 30 s; short videos at the end), counts down 10 s inside its Play next button, then
+// plays the next episode. "Watch credits" dismisses it; if the episode then ends, a short 5 s card takes you on.
+// After 3 episodes started by the countdown with nobody touching anything, it asks "Still watching …?" instead.
+const nu = { mode: '', left: 0, total: 10, timer: 0, dismissed: false, ended: false, chain: 0 };
+const STILL_AFTER = 3;
+function nextEpisodeOf() {
+  const pl = state.playing, c = nowChannel();
+  return pl && c?.kind === 'episode' && pl.index < pl.list.length - 1 ? pl.list[pl.index + 1] : null;
+}
+function checkCredits() {
+  if (nu.ended || video.seeking) return;
+  const next = nextEpisodeOf(), d = vodTotal(), t = vodPos();
+  if (!next || !d || !(t > 0)) return;
+  const inCredits = d >= 180 && d - t <= 30;
+  if (inCredits) { if (!nu.mode && !nu.dismissed) showNextUp(10); }
+  else { nu.dismissed = false; if (nu.mode) hideNextUp(); }
+}
+function showNextUp(seconds = 10) {
+  const el = $('#next-up'), next = nextEpisodeOf();
+  if (!next) return;
+  if (!el) return advanceEpisode(true);
+  const still = nu.chain >= STILL_AFTER;
+  nu.mode = still ? 'still' : 'next';
+  nu.total = nu.left = seconds;
+  const show = showNameOf(next);
+  const art = next.logo ? `<img src="${esc(next.logo)}" alt="" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : '';
+  el.innerHTML = `<div class="nu-card" role="dialog" aria-label="${still ? 'Still watching?' : 'Next episode'}">
+    <div class="nu-top"><div class="nu-thumb">${icon('play')}${art}</div>
+      <div class="nu-text"><span class="nu-kicker">${still ? `Up next: ${esc(epCardLine(next))}` : 'Next episode'}</span>
+      <b class="nu-title">${still ? `Still watching${show ? ` ${esc(show)}` : ''}?` : esc(epCardLine(next))}</b></div></div>
+    <div class="nu-actions"><button class="nu-btn primary" data-nu="play">${still ? '' : '<i class="nu-fill"></i>'}<span>${icon('play')} ${still ? 'Continue' : 'Play next'}</span></button>
+      <button class="nu-btn" data-nu="${still ? 'stop' : 'credits'}"><span>${still ? 'Stop' : nu.ended ? 'Close' : 'Watch credits'}</span></button></div></div>`;
+  el.hidden = false;
+  requestAnimationFrame(() => el.classList.add('in'));
+  el.onclick = e => {
+    const b = e.target.closest('[data-nu]'); if (!b) return;
+    const what = b.dataset.nu;
+    if (what === 'play') { nu.chain = 0; advanceEpisode(false); }
+    else if (what === 'stop') { hideNextUp(); stopPlaying(); }
+    else { hideNextUp(); nu.dismissed = true; }
+  };
+  clearInterval(nu.timer);
+  if (still) return;
+  const fill = el.querySelector('.nu-fill');
+  nu.timer = setInterval(() => {
+    if (!nu.ended && video.paused) return;   // paused: the countdown waits too
+    nu.left -= 0.1;
+    fill?.style.setProperty('--p', Math.min(1, 1 - nu.left / nu.total).toFixed(3));
+    if (nu.left <= 0) advanceEpisode(true);
+  }, 100);
+}
+function hideNextUp() {
+  clearInterval(nu.timer);
+  nu.mode = '';
+  const el = $('#next-up'); if (!el || el.hidden) return;
+  el.classList.remove('in');
+  setTimeout(() => { if (!nu.mode) { el.hidden = true; el.innerHTML = ''; } }, 250);
+}
+// On to the next episode, the finished one saved as watched.
+function advanceEpisode(auto) {
+  hideNextUp();
+  const c = nowChannel(), d = vodTotal();
+  if (c && Number.isFinite(d) && d >= 60) writeProgress(c, d, d);
+  nu.chain = auto ? nu.chain + 1 : 0;
+  step(1);
+}
 
 // ---- Skip intro, learned from you ----
 // Providers don't mark intros. The first time you jump forward past one on an episode (20s–4min, within the
@@ -692,6 +756,7 @@ function route() {
   if (kind === 'live' || kind === 'movies' || kind === 'series' || kind === 'tvguide') return openSection(kind);
   if (kind === 'multi') return showMulti();
   if (kind === 'downloads') return showDownloads();
+  if (kind === 'sports') return showSports();
   showHome();
   const y = viewMemo.get(memoKey)?.y;
   if (y) requestAnimationFrame(() => scrollTo(0, y));
@@ -702,6 +767,7 @@ function rerender() {
   if (kind === 'guide') return state.current && showGuide(state.current);
   if (kind === 'multi') return;
   if (kind === 'downloads') return showDownloads();
+  if (kind === 'sports') return renderSports();
   if (state.current) refreshPlaylistView({ keep: true });   // an edit: stay on the same row
   else { const y = scrollY; showHome(); scrollTo(0, y); }
 }
@@ -714,7 +780,7 @@ function setTopbar({ title, back = false, actions = [] }) {
   const b = $('#back');
   b.hidden = !back;
   b.innerHTML = icon('back');
-  b.onclick = () => { location.hash = back || '#/'; };
+  b.onclick = () => { if (typeof back === 'function') back(); else location.hash = back || '#/'; };
   const box = $('#actions');
   box.innerHTML = actions.map((a, i) =>
     `<button class="icon-btn ${a.active ? 'active' : ''}" data-i="${i}" aria-label="${esc(a.label)}" title="${esc(a.label)}">${icon(a.icon)}</button>`).join('');
@@ -1023,7 +1089,7 @@ function heroHtml(items) {
         <div class="hero-text">
           <span class="hero-kicker">${icon(it.kind === 'series' ? 'grid' : 'film')} ${esc(it.heroLabel || `Popular ${it.kind === 'series' ? 'series' : 'movie'}`)}</span>
           <div class="hero-title">${esc(displayTitle(it.name))}</div>
-          <div class="hero-meta">${[it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : '', ...(it.tm?.genres?.length ? it.tm.genres.slice(0, 2) : [it.genre, prettyGroup(it.group)])].filter(Boolean).map(x => `<span>${esc(x)}</span>`).join('')}</div>
+          <div class="hero-meta">${[it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : '', ...(it.tm?.genres?.length ? it.tm.genres.slice(0, 2) : [it.genre || groupLabel(it.group)])].filter(Boolean).map(x => `<span>${esc(x)}</span>`).join('')}</div>
           ${it.tm?.overview || it.plot ? `<p class="hero-plot">${esc(it.tm?.overview || it.plot)}</p>` : ''}
           <div class="hero-actions"><button class="btn primary" data-hero-play="${k}">${icon('play')} ${it.kind === 'series' ? 'Episodes' : 'Play'}</button><button class="btn">More info</button></div>
         </div>
@@ -1103,6 +1169,7 @@ function showHome() {
       <label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search channels, movies and series" autocomplete="off" autocorrect="off" spellcheck="false"></label>
       <ul class="lib-row quick">
         <li class="lib" data-go="#/fav">${icon('star')}<span>Favorites</span><b>${state.favorites.length}</b></li>
+        ${pl.some(p => p.content !== 'vod') ? `<li class="lib" data-go="#/sports">${icon('trophy')}<span>Sports</span></li>` : ''}
         <li class="lib" data-go="#/recent">${icon('clock')}<span>History</span></li>
         <li class="lib" data-go="#/multi">${icon('grid')}<span>Multi-view</span></li>
         ${Object.keys(state.downloads || {}).length ? `<li class="lib" data-go="#/downloads">${icon('film')}<span>Downloads</span><b>${Object.keys(state.downloads).length}</b>${dlActive ? '<i class="lib-dot"></i>' : ''}</li>` : ''}
@@ -1117,6 +1184,8 @@ function showHome() {
       <ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul></section>` : ''}
     ${hub.shelves.movies.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Movies</h2><span class="hub-links"><a class="link" href="#/movies">Browse all</a></span></div>${hub.shelves.movies.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading movies…</p>'}${servicesHtml(hub.services)}</section>` : ''}
     ${hub.shelves.series.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Series</h2><span class="hub-links"><a class="link" href="#/series">Browse all</a></span></div>${hub.shelves.series.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading series…</p>'}</section>` : ''}
+    ${pl.length && !hub.hero.length && !cw.length && !resumeChannel && !hub.onNow.length && !hub.shelves.movies.length && !hub.shelves.series.length && !hub.loading && !watchlist.length ? `<section class="hub-sec home-browse"><div class="hub-head"><h2>Browse</h2></div>
+      <ul class="cards">${card('#/live', 'list', 'Live TV', 'Channels and what’s on')}${card('#/movies', 'film', 'Movies', 'Films from your playlists')}${card('#/series', 'grid', 'Series', 'Shows and episodes')}${card('#/tvguide', 'guide', 'TV guide', 'What’s on now and next')}</ul></section>` : ''}
     ${watchlist.length ? `<section class="hub-sec"><div class="hub-head"><h2>Watchlist</h2></div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul></section>` : ''}
     ${pl.length ? '' : `<div class="empty">${icon('tv', 'big')}<p><b>No playlists yet</b></p>
           <p class="muted">Add an Xtream login, an M3U / M3U8 link, or a playlist file.</p>
@@ -1223,7 +1292,10 @@ function noVodSheet(kind) {
 }
 function updateNav() {
   const hash = location.hash || '#/';
-  const on = hash === '#/' ? 'home' : hash.startsWith('#/guide') ? 'guide' : state.current ? (state.tab === 'live' ? 'live' : state.tab) : '';
+  // Favorites / History are reached from Home, so Home stays lit (not Live TV).
+  // Sports has its own tab in the computer's top bar; on a phone it's reached from Home, so Home stays lit.
+  const sports = hash === '#/sports' && matchMedia('(min-width: 900px)').matches && !isTV;
+  const on = sports ? 'sports' : hash === '#/' || state.current?.virtual || hash === '#/multi' || hash === '#/downloads' || hash === '#/sports' ? 'home' : hash.startsWith('#/guide') ? 'guide' : state.current ? (state.tab === 'live' ? 'live' : state.tab) : '';
   document.querySelectorAll('#mainnav [data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === on));
 }
 
@@ -1334,9 +1406,11 @@ function showPlaylist(p) {
   const liveEmpty = p.content === 'vod' || (k && !k.live.length);
   const firstTab = pendingTab || memo?.tab || (liveEmpty ? (!k || k.movies.length ? 'movies' : 'series') : 'live');
   pendingTab = null;   // Xtream has no M3U split (k is null)
+  // The main navigation already reaches this playlist's Live TV, Movies and Series: no second set of tabs on the page.
+  const navCovers = !p.virtual && liveSource() === p && vodSource('movies') === p && vodSource('series') === p;
   const tabBtn = (t, label) => `<button data-tab="${t}"${t === firstTab ? ' class="active"' : ''}>${label}</button>`;
   view.innerHTML = `
-    ${showTabs ? `<div class="seg" id="seg">
+    ${showTabs ? `<div class="seg${navCovers ? ' nav-covers' : ''}" id="seg">
       ${(p.kind === 'xtream' || !liveEmpty) ? tabBtn('live', 'Live TV') : ''}${(p.kind === 'xtream' || k?.movies.length) ? tabBtn('movies', 'Movies') : ''}${(p.kind === 'xtream' || k?.series.length) ? tabBtn('series', 'Series') : ''}</div>` : ''}
     <div class="filters">
       <label class="search">${icon('search')}<input id="q" type="search" placeholder="Search" autocomplete="off" autocorrect="off" spellcheck="false" value="${esc(pendingQuery)}"></label>
@@ -1403,7 +1477,16 @@ function updateTopbar() {
   // The section you're in (Movies, Series, Live TV), not the provider's playlist name ("VoD").
   setTopbar({
     title: p.virtual ? playlistTitle(p) : ({ movies: 'Movies', series: 'Series', live: 'Live TV' })[state.tab] || playlistTitle(p),
-    back: '#/',
+    // Movies / Series: Back from a group ("See all", a service, a genre chip) or a search returns to the front page,
+    // not all the way Home.
+    back: live || p.virtual ? '#/' : () => {
+      if (state.current !== p || (state.group === null && !state.query)) { location.hash = '#/'; return; }
+      state.query = '';
+      const q = $('#q'); if (q) q.value = '';
+      const all = $('#chips [data-all]');
+      if (all) all.click(); else { state.group = null; refreshPlaylistView(); }
+      scrollTo(0, 0);
+    },
     actions: [
       live && !p.virtual && { icon: 'guide', label: 'TV guide', fn: () => { location.hash = `#/guide/${p.id}`; } },
       canReorder() && { icon: 'grip', label: state.reordering ? 'Done reordering' : 'Reorder channels', active: state.reordering, fn: toggleReordering },
@@ -1672,7 +1755,7 @@ function shelfHtml(title, key, items, { total = 0, group = null, pending = false
   shelfItems.set(key, items);
   const more = group !== null && total > items.length;
   return `<li class="shelf" data-key="${esc(key)}" ${group !== null ? `data-group="${esc(group)}"` : ''}>
-    <div class="shelf-head"><h3>${esc(title)}</h3>${group !== null ? `<button class="btn small" data-see="${esc(group)}">See all${total ? ` ${total.toLocaleString()}` : ''}</button>` : ''}</div>
+    <div class="shelf-head"><h3>${esc(title)}</h3>${group !== null ? `<button class="link see-all" data-see="${esc(group)}">See all</button>` : ''}</div>
     <ul class="shelf-row">${items.map((it, k) => cardHtml(it, key, k)).join('')}${pending && !items.length ? '<li class="shelf-empty muted">Loading…</li>' : ''}${more ? `<li class="scard more" data-see="${esc(group)}"><span class="poster-img more-tile"><b>+${(total - items.length).toLocaleString()}</b><span>more</span></span></li>` : ''}</ul>
   </li>`;
 }
@@ -1773,6 +1856,7 @@ function applyFilter({ keep = false } = {}) {
     list.onchange = e => { if (e.target.matches('[data-sort-vod]')) { state.vodSort = e.target.value; applyFilter(); } };
   }
   if (state.filtered.length) {
+    $('.filters .search')?.removeAttribute('hidden');
     renderMore();
     while (state.rendered < Math.min(keepRows, state.filtered.length)) renderMore();
     if (keep) scrollTo(0, keepY);
@@ -1784,7 +1868,11 @@ function applyFilter({ keep = false } = {}) {
       : p.id === 'recent' ? 'What you play shows up here.'
       : state.tab !== 'live' ? `This provider has no ${state.tab}.`
       : 'This playlist is empty. Use ⋯ → Add channel.';
-    list.innerHTML = `<li class="empty small">${esc(msg)}</li>`;
+    // Favorites / History with nothing in them: a proper empty state, and no search box over an empty list.
+    const blank = !loading && !items.length && (p.id === 'fav' || p.id === 'recent');
+    $('.filters .search')?.toggleAttribute('hidden', blank);
+    list.innerHTML = blank ? `<li class="empty">${icon(p.id === 'fav' ? 'star' : 'clock', 'big')}<p><b>${p.id === 'fav' ? 'No favorites yet' : 'Nothing watched yet'}</b></p><p class="muted">${esc(msg)}</p></li>`
+      : `<li class="empty small">${esc(msg)}</li>`;
   }
   renderSelbar();
 }
@@ -2238,6 +2326,7 @@ async function toggleFavorite(c, button) {
   button?.classList.toggle('on', adding);
   if (state.current?.id === 'fav') { state.current.channels = state.favorites; refreshPlaylistView({ keep: true }); }
   toast(adding ? 'Added to Favorites' : 'Removed from Favorites', { action: 'Undo', fn: () => toggleFavorite(c, button) });
+  if (adding && c.kind === 'series') askAlerts('New episodes of saved series arrive as notifications.');
 }
 
 async function addFavorites(channels) {
@@ -2761,14 +2850,32 @@ async function seriesSheet(s) {
   if (tm) info = { ...info, info: withTmdb(info.info || {}, tm) };
   const eps = info?.episodes || {};
   const seasons = Object.keys(eps).sort((a, b) => a - b);
-  const episodesOf = season => (eps[season] || []).map(ep => s.seasons ? { ...ep, src: p.id, duration: '', group: `${s.name} · Season ${season}` } : ({
+  const episodesOf = season => (eps[season] || []).map(ep => withTmdbEp(season, s.seasons ? { ...ep, src: p.id, duration: '', group: `${s.name} · Season ${season}` } : ({
     id: `e${ep.id}`, kind: 'episode', src: p.id, season,
     name: ep.title || `${s.name} S${season}E${ep.episode_num}`,
     url: x.episodeUrl(ep.id, ep.container_extension),
     logo: ep.info?.movie_image || s.logo,
     group: `${s.name} · Season ${season}`,
     num: ep.episode_num, duration: ep.info?.duration || '', plot: ep.info?.plot || '',
-  }));
+  })));
+  // TMDB's episode plots and full-size stills fill what the provider leaves out (often no plots, 185px stills).
+  const tmEps = new Map();
+  function withTmdbEp(season, e) {
+    const t = tmEps.get(String(season))?.get(Number(e.num));
+    if (!t) return e;
+    const small = !e.logo || e.logo === s.logo || /image\.tmdb\.org\/t\/p\/w(92|154|185|300)\//.test(e.logo);
+    return { ...e, plot: e.plot?.trim() || t.plot, logo: t.still && small ? t.still : e.logo, duration: e.duration || (t.runtime ? `${t.runtime}m` : '') };
+  }
+  const loadTmdbEps = se => {
+    if (!tm || tmEps.has(String(se))) return;
+    tmEps.set(String(se), new Map());
+    fetch(`${serverApi('tmdb/episodes')}&name=${encodeURIComponent(displayTitle(s.name))}&year=${Number(s.year) || vodMeta(s.name).year || ''}&season=${encodeURIComponent(se)}`)
+      .then(r => r.ok ? r.json() : null).then(d => {
+        if (!d?.episodes?.length) return;
+        tmEps.set(String(se), new Map(d.episodes.map(t => [t.n, t])));
+        if ($('#sheet .detail')?.dataset.id === s.id && String(season) === String(se)) render(true);
+      }).catch(() => {});
+  };
   // Start on the season of the most recently watched episode.
   const urls = new Map(seasons.flatMap(se => episodesOf(se).map(e => [e.url, se])));
   const last = Object.values(state.progress).filter(e => urls.has(e.item.url)).sort((a, b) => b.at - a.at)[0];
@@ -2780,6 +2887,7 @@ async function seriesSheet(s) {
   const continueEp = (last && !state.progress[last.item.url]?.done ? allEps.find(e => e.url === last.item.url) : null) || allEps.find(e => !state.progress[e.url]?.done) || allEps[0];
   const render = (keepScroll = false) => {
     const list = episodesOf(season);
+    loadTmdbEps(season);
     const art = i.backdrop_path?.[0] || i.cover || s.logo;
     const watched = allEps.filter(e => state.progress[e.url]?.done).length;
     sheet(`<div class="detail film series" data-id="${esc(s.id)}">
@@ -2920,7 +3028,10 @@ async function flushGuide() {
         if (!res.ok) throw new Error(await res.text());
         mergeGuide(p, await res.json());
       } catch {
-        list.slice(i).forEach(c => guideAsked.get(pid)?.delete(chanKey(c)));   // try again next time they're shown
+        // Try again in a couple of minutes, not at once: re-asking straight away made the Guide screen loop
+        // (Loading… → fail → re-render → re-ask) and hammer the provider's XMLTV link several times a second.
+        const retry = Date.now() - GUIDE_FRESH + 2 * 60_000;
+        list.slice(i).forEach(c => guideAsked.get(pid)?.set(chanKey(c), retry));
         refreshAfterGuide(pid);   // never leave the guide screen on "Loading…"
         break;
       }
@@ -3173,7 +3284,7 @@ const isFollowing = q => (state.follows || []).some(f => f.q.toLowerCase() === q
 async function toggleFollow(q) {
   state.follows ||= (await db.get('follows')) || [];
   if (isFollowing(q)) { state.follows = state.follows.filter(f => f.q.toLowerCase() !== q.trim().toLowerCase()); toast(`Stopped following ${q}`); }
-  else { state.follows.push({ q: q.trim(), at: Date.now() }); toast(`Following ${q}: every upcoming programme gets a reminder`); checkFollows(true); }
+  else { state.follows.push({ q: q.trim(), at: Date.now() }); toast(`Following ${q}: every upcoming programme gets a reminder`); checkFollows(true); askAlerts(`Reminders for ${q.trim()} arrive as notifications.`); }
   await db.set('follows', state.follows);
 }
 let followsAt = 0;
@@ -3199,6 +3310,7 @@ async function toggleReminder(c, prog) {
     toast('Reminder removed');
   } else {
     if ('Notification' in window && Notification.permission === 'default') { try { await Notification.requestPermission(); } catch {} }
+    await askAlerts('Reminders arrive as notifications.');
     const r = { key, at: prog[0], title: prog[2], channel: cloneChannel(c), set: Date.now() };
     delete syncMeta.remDel?.[key];
     state.reminders.push(r);
@@ -3209,10 +3321,308 @@ async function toggleReminder(c, prog) {
   scheduleReminders();
   syncSoon();
 }
+// ---------- Sports ----------
+// Live and upcoming sport on your own channels, on one page: the guide is searched for each competition (the list and
+// the rules for reading titles are in sports.js), plus whatever the sports channels are showing right now. Football is
+// searched first so the biggest part fills in first; results are kept for 30 minutes.
+const SPORTS_FRESH = 30 * MINUTE;
+const sportsHub = { at: 0, results: [], done: 0, total: 0, loading: null, batch: undefined, teams: new Map(), shown: { live: [], up: [] } };
+let sportsFilter = 'all';
+const sportsOpenDays = new Set();   // days expanded past the first rows
+const sportsPrefer = c => (/backup|\bsd\b/i.test(c.name) ? 0 : 2) + (isEnglishGroup(c.group || '') ? 2 : 0) + (/\b(hd|fhd|uhd|4k)\b/i.test(c.name) ? 1 : 0);
+const sportsChanCache = new WeakMap();
+const shortDay = t => { const d = fmtDay(t); return d === 'Today' || d === 'Tomorrow' ? d : new Date(t).toLocaleDateString([], { weekday: 'short' }); };
+// The channels results are matched to: visible live channels, English groups unless you chose every language.
+function sportsChannels(p) {
+  const all = m3uKinds(p)?.live || p.channels, en = state.settings.vodLanguage !== 'all';
+  const hit = sportsChanCache.get(all);
+  if (hit && hit.en === en && hit.n === all.length) return hit.list;
+  const list = all.filter(c => isLiveChannel(c) && !isSeparator(c) && visibleGroup(p, c.group || '') && (!en || sportsLangOk(c))).map(c => ({ ...c, src: p.id }));
+  sportsChanCache.set(all, { en, n: all.length, list });
+  return list;
+}
+const sportsLangOk = c => isEnglishGroup(c.group || '') && !otherLanguage(c);
+const sportsSources = () => state.playlists.filter(p => !p.virtual && p.content !== 'vod' && epgUrls(p).length);
+
+async function loadSports(force = false) {
+  if (sportsHub.loading) return sportsHub.loading;
+  if (!canSync() || (!force && sportsHub.at && Date.now() - sportsHub.at < SPORTS_FRESH)) return;
+  sportsHub.loading = (async () => {
+    const results = [];
+    sportsHub.done = 0; sportsHub.total = SPORT_QUERIES.length * Math.max(1, sportsSources().length);
+    const football = SPORT_QUERIES.slice(0, 13), rest = SPORT_QUERIES.slice(13);
+    const publish = () => { sportsHub.results = results.slice(); renderSportsSoon(); };
+    for (const p of sportsSources()) {
+      const chans = sportsChannels(p);
+      if (!chans.length) { sportsHub.done += SPORT_QUERIES.length; continue; }
+      const urls = epgUrls(p);
+      // A server that knows batched searches answers { found }; an older one only searches one word at a time.
+      if (sportsHub.batch === undefined) {
+        try { const r = await fetch(serverApi('guide'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ urls, finds: [] }) }); sportsHub.batch = r.ok && 'found' in await r.json(); } catch { sportsHub.batch = false; }
+      }
+      if (sportsHub.batch) {
+        const w = wantedFor(chans);
+        await Promise.all([football, rest].map(async qs => {
+          try {
+            const r = await fetch(serverApi('guide'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ urls, finds: qs, ids: [...w.ids], names: [...w.names] }) });
+            const found = r.ok ? (await r.json()).found || {} : {};
+            for (const q of qs) results.push(...matchUpcoming(found[q] || [], chans, normName, sportsPrefer));
+          } catch {}
+          sportsHub.done += qs.length; publish();
+        }));
+      } else {
+        const en = state.settings.vodLanguage !== 'all';
+        let i = 0;
+        await Promise.all([0, 1, 2].map(async () => {
+          while (i < SPORT_QUERIES.length) {
+            const q = SPORT_QUERIES[i++];
+            const l = await findOnTv(q).catch(() => []);
+            results.push(...l.filter(x => srcOf(x.channel) === p.id && (!en || sportsLangOk(x.channel))));
+            sportsHub.done++; publish();
+          }
+        }));
+      }
+    }
+    sportsHub.at = Date.now();
+    publish();
+  })().finally(() => { sportsHub.loading = null; renderSportsSoon(); });
+  return sportsHub.loading;
+}
+
+// Followed teams: the next game for each (findOnTv keeps its own 10-minute cache).
+async function loadTeams() {
+  state.follows ||= (await db.get('follows').catch(() => null)) || [];
+  await Promise.all(state.follows.map(async f => {
+    const l = await findOnTv(f.q).catch(() => []);
+    const en = state.settings.vodLanguage !== 'all';
+    sportsHub.teams.set(f.q.toLowerCase(), l.filter(x => x.prog[1] > Date.now() && !isNoise(x.prog, x.channel) && (!en || sportsLangOk(x.channel))));
+  }));
+  renderSportsSoon();
+}
+
+// What's on the sports channels now (a bounded set: one copy of each channel, English groups unless you chose otherwise).
+function sportsNow() {
+  const chans = [], seen = new Set();
+  for (const p of sportsSources()) {
+    for (const c of sportsChannels(p)) {
+      if (!isSportsChannel(c)) continue;
+      const k = normName(c.name);
+      if (seen.has(k)) continue;
+      seen.add(k); chans.push(c);
+      if (chans.length >= 160) break;
+    }
+  }
+  ensureGuide(chans)?.then(renderSportsSoon);
+  const out = [];
+  for (const c of chans) { const now = guideFor(c)?.nowNext(c).now; if (now) out.push({ channel: c, prog: now }); }
+  return out;
+}
+
+function showSports() {
+  state.current = null;
+  setTopbar({ title: 'Sports', back: '#/' });
+  view.innerHTML = '<div class="sports"><div class="chips sp-chips" id="sp-chips" hidden></div><div id="sp-body"></div></div>';
+  view.onclick = sportsClick;
+  renderSports();
+  // On a cold start the server may not be found yet: wait for it (the page shows its loading state meanwhile).
+  const go = () => { if (location.hash !== '#/sports') return; loadSports(); loadTeams(); renderSports(); };
+  if (detectedServer) go(); else Promise.race([serverReady, new Promise(r => setTimeout(r, 10000))]).then(go);
+}
+const renderSportsSoon = debounce(() => renderSports(), 120);
+setInterval(() => { if (location.hash === '#/sports' && !document.hidden) renderSports(); }, MINUTE);   // progress lines, live → upcoming
+
+const spLiveCard = (it, k) => {
+  const { channel: c, prog } = it, pct = ((Date.now() - prog[0]) / (prog[1] - prog[0])) * 100;
+  // Competition on its own line; the channel (also shown by its logo) shares the time line.
+  const comp = it.comp && it.comp !== it.title ? it.comp : '', ch = channelLabel(c.name);
+  return `<li class="onnow nc sp-live" data-live="${k}" role="button" tabindex="0">
+    <span class="nc-logo">${logoHtml(c)}</span>
+    <span class="nc-text"><b>${esc(it.title)}</b><span class="muted">${esc(comp || ch)}</span><span class="nc-time"><i class="nc-dot"></i>until ${fmtTime(prog[1])}${esc(comp ? ` · ${ch}` : '')}</span></span>
+    <span class="bar nc-bar"><i style="width:${Math.min(100, pct).toFixed(1)}%"></i></span></li>`;
+};
+const spBell = (it, attr) => {
+  const on = hasReminder(it.channel, it.prog);
+  return `<button type="button" class="icon-btn sp-bell${on ? ' on' : ''}" ${attr} aria-pressed="${on}" aria-label="${on ? 'Remove reminder' : 'Remind me'}">${icon(on ? 'bell-on' : 'bell')}</button>`;
+};
+const spRow = (it, k, attr = 'data-up') => `<li class="sp-row" ${attr}="${k}" role="button" tabindex="0">
+    <span class="sp-time">${fmtTime(it.prog[0])}</span>
+    <span class="sp-text"><span class="sp-title">${esc(it.title)}</span><span class="muted">${esc([it.comp && it.comp !== it.title ? it.comp : '', channelLabel(it.channel.name)].filter(Boolean).join(' · '))}</span></span>
+    ${spBell(it, `data-bell="${attr}:${k}"`)}</li>`;
+const spTeamCard = (f, k) => {
+  const list = sportsHub.teams.get(f.q.toLowerCase());
+  const next = list?.[0], live = next && next.prog[0] <= Date.now();
+  const when = !list ? '<span class="muted">Checking the guide…</span>'
+    : !next ? '<span class="muted">Nothing in the next 3 days</span>'
+    : `<span class="sp-team-title">${esc(cleanTitle(next.prog[2]))}</span><span class="sp-team-when">${live ? '<i class="nc-dot"></i>Live now' : esc(`${shortDay(next.prog[0])} ${fmtTime(next.prog[0])}`)} · ${esc(channelLabel(next.channel.name))}</span>`;
+  return `<li class="sp-team" data-team="${k}" role="button" tabindex="0"><b>${esc(f.q)}</b>${when}</li>`;
+};
+
+function renderSports() {
+  if (location.hash !== '#/sports') return;
+  const body = $('#sp-body'), chipsEl = $('#sp-chips');
+  if (!body) return;
+  const now = Date.now(), loading = !!sportsHub.loading;
+  const hub = buildSports(sportsHub.results, sportsNow(), now);
+  if (sportsFilter !== 'all' && !hub.sports.includes(sportsFilter) && !loading) sportsFilter = 'all';
+  const ids = hub.sports.length > 1 ? ['all', ...hub.sports] : [];
+  const x = chipsEl.scrollLeft;
+  chipsEl.innerHTML = ids.map(id => `<button type="button" class="chip${id === sportsFilter ? ' active' : ''}" data-sport="${id}" aria-pressed="${id === sportsFilter}">${esc(id === 'all' ? 'All' : SPORTS.find(s => s.id === id).label)}</button>`).join('');
+  chipsEl.hidden = !ids.length;
+  chipsEl.scrollLeft = x;
+  const live = bySport(hub.live, sportsFilter), up = bySport(hub.upcoming, sportsFilter);
+  sportsHub.shown = { live, up };
+  const keep = [...body.querySelectorAll('[data-keep]')].map(el => [el.dataset.keep, el.scrollLeft]);
+
+  let html = '';
+  if (!state.playlists.some(p => !p.virtual && p.content !== 'vod')) {
+    html = `<div class="empty sp-empty">${icon('trophy', 'big')}<p><b>No live channels yet</b></p><p class="muted">Add a playlist with live TV and its guide, and the matches on your channels show up here.</p><button class="btn primary" data-sp-add>Add playlist</button></div>`;
+  } else if (detectedServer && !canSync()) {
+    html = `<div class="empty sp-empty">${icon('trophy', 'big')}<p><b>Connect your server</b></p><p class="muted">Sports searches the whole TV guide for the next three days, which needs your server.</p><button class="btn primary" data-sp-server>Connect</button></div>`;
+  } else {
+    const follows = state.follows;   // undefined until read from storage: show neither the teams nor the prompt yet
+    if (sportsFilter === 'all' && follows && detectedServer) {
+      html += follows.length
+        ? `<section class="hub-sec sp-teams"><div class="hub-head"><h2>My teams</h2><span class="hub-links"><button type="button" class="link" data-follow-new>Follow</button></span></div>
+            <ul class="shelf-row home-shelf sp-team-row" data-keep="teams">${follows.map(spTeamCard).join('')}</ul></section>`
+        : `<button type="button" class="sp-cta" data-follow-new><span class="sp-cta-ico">${icon('plus')}</span><span class="sp-cta-text"><b>Follow a team</b><span class="muted">Get a reminder before every match</span></span>${icon('back', 'sp-chev')}</button>`;
+    }
+    if (live.length) html += `<section class="hub-sec sp-livesec"><div class="hub-head"><h2>Live now</h2></div>
+      <ul class="shelf-row home-shelf onnow-row sp-live-row" data-keep="live">${live.slice(0, 24).map(spLiveCard).join('')}</ul></section>`;
+    let k = 0;
+    for (const d of groupByDay(up, now)) {
+      const open = sportsOpenDays.has(d.key) || d.items.length <= 30;
+      const rows = (open ? d.items : d.items.slice(0, 25)).map(it => spRow(it, k + d.items.indexOf(it))).join('');
+      html += `<section class="hub-sec sp-day"><div class="hub-head"><h2>${esc(d.label)}</h2><span class="sp-date">${esc(d.date)}</span></div>
+        <ul class="sp-list">${rows}</ul>${open ? '' : `<button type="button" class="sp-more" data-more-day="${esc(d.key)}">Show all ${d.items.length}</button>`}</section>`;
+      k += d.items.length;
+    }
+    if (!live.length && !up.length) {
+      html += loading || !sportsHub.at || !detectedServer
+        ? `<section class="hub-sec sp-skel" aria-label="Loading"><div class="hub-head"><h2>Live now</h2></div><ul class="shelf-row onnow-row"><li class="onnow nc sk"></li><li class="onnow nc sk"></li></ul>
+            <div class="hub-head"><h2>Today</h2></div><ul class="sp-list">${'<li class="sp-row sk"><span class="sp-time"><i></i></span><span class="sp-text"><i></i><i></i></span></li>'.repeat(5)}</ul></section>`
+        : `<div class="empty sp-empty">${icon('trophy', 'big')}<p><b>No sport on your channels</b></p><p class="muted">Nothing from football, F1, NFL, boxing and the rest in the guide for the next three days.</p><button class="btn" data-sp-retry>Check again</button></div>`;
+    } else if (loading) {
+      html += `<p class="muted sp-status">Checking more sports…</p>`;
+    }
+  }
+  body.innerHTML = html;
+  for (const [key, left] of keep) { const el = body.querySelector(`[data-keep="${key}"]`); if (el) el.scrollLeft = left; }
+  addRowArrows(body);
+}
+
+function paintBell(btn, it) {
+  const on = hasReminder(it.channel, it.prog);
+  btn.classList.toggle('on', on);
+  btn.setAttribute('aria-pressed', on);
+  btn.setAttribute('aria-label', on ? 'Remove reminder' : 'Remind me');
+  btn.innerHTML = icon(on ? 'bell-on' : 'bell');
+}
+// A reminder set or removed on the programme page (or in a team's list) shows on this page's bells too.
+function repaintSportsBells(root = view) {
+  root.querySelectorAll('[data-bell]').forEach(b => { const it = sportsBellItem(b.dataset.bell); if (it) paintBell(b, it); });
+}
+let teamSheetItems = [];
+function sportsBellItem(ref) {
+  const [kind, k] = ref.split(':');
+  return kind === 'data-up' ? sportsHub.shown.up[+k] : kind === 'data-tm' ? teamSheetItems[+k] : null;
+}
+$('#sheet').addEventListener('click', e => {
+  if (location.hash === '#/sports' && e.target.closest('[data-remind]')) setTimeout(() => repaintSportsBells(), 400);
+});
+
+function sportsClick(e) {
+  const chip = e.target.closest('[data-sport]');
+  if (chip) {
+    sportsFilter = chip.dataset.sport;
+    renderSports();
+    if (scrollY > 0) scrollTo({ top: 0 });
+    return;
+  }
+  const bell = e.target.closest('[data-bell]');
+  if (bell) { const it = sportsBellItem(bell.dataset.bell); if (it) toggleReminder(it.channel, it.prog).then(() => paintBell(bell, it)); return; }
+  const lv = e.target.closest('[data-live]');
+  if (lv) return playChannel(sportsHub.shown.live.map(x => x.channel), +lv.dataset.live);
+  const up = e.target.closest('[data-up]');
+  if (up) { const it = sportsHub.shown.up[+up.dataset.up]; if (it) programmeSheet(it.channel, it.prog); return; }
+  const tm = e.target.closest('[data-team]');
+  if (tm) return teamSheet((state.follows || [])[+tm.dataset.team]);
+  if (e.target.closest('[data-follow-new]')) return followTeamSheet();
+  const more = e.target.closest('[data-more-day]');
+  if (more) { sportsOpenDays.add(more.dataset.moreDay); return renderSports(); }
+  if (e.target.closest('[data-sp-retry]')) { loadSports(true); return renderSports(); }
+  if (e.target.closest('[data-sp-add]')) return addPlaylistSheet();
+  if (e.target.closest('[data-sp-server]')) return serverProxy.needsKey ? enterServerKey() : settingsSheet();
+}
+
+async function followTeamSheet() {
+  const v = await formSheet({ title: 'Follow a team', intro: 'Every match on your channels gets a reminder, for as long as you follow.', submit: 'Follow',
+    fields: [{ name: 'q', label: 'Team, player or event', placeholder: 'e.g. Arsenal, Ronnie O’Sullivan, Ryder Cup', required: true }] });
+  const q = v?.q?.trim();
+  if (!q || q.length < 2) return;
+  if (!isFollowing(q)) await toggleFollow(q);
+  sportsHub.teams.delete(q.toLowerCase());
+  renderSports();
+  loadTeams();
+  setTimeout(() => repaintSportsBells(), 4000);   // following sets a reminder on each of its matches (checkFollows)
+}
+
+function teamSheet(f) {
+  if (!f) return;
+  teamSheetItems = (sportsHub.teams.get(f.q.toLowerCase()) || []).map(x => ({ ...x, title: cleanTitle(x.prog[2]), comp: classify(x.prog[2])?.comp || null }));
+  const now = Date.now(), live = teamSheetItems.filter(it => it.prog[0] <= now);
+  const liveRow = it => `<li class="sp-row" data-tm="${teamSheetItems.indexOf(it)}" role="button" tabindex="0"><span class="sp-time sp-now"><i class="nc-dot"></i>Live</span><span class="sp-text"><span class="sp-title">${esc(it.title)}</span><span class="muted">${esc(channelLabel(it.channel.name))}</span></span></li>`;
+  const days = groupByDay(teamSheetItems.filter(it => it.prog[0] > now), now);
+  const list = (live.length ? `<div class="section-title sp-sheet-day">Live now</div><ul class="sp-list">${live.map(liveRow).join('')}</ul>` : '')
+    + days.map(d => `<div class="section-title sp-sheet-day">${esc(d.label)} · ${esc(d.date)}</div><ul class="sp-list">${d.items.map(it => spRow(it, teamSheetItems.indexOf(it), 'data-tm')).join('')}</ul>`).join('');
+  sheet(`<div class="sheet-title">${esc(f.q)}</div>
+    <p class="muted sheet-intro">${teamSheetItems.length ? 'On your channels in the next three days. Each one gets a reminder.' : 'Nothing on your channels in the next three days. New matches get a reminder as soon as they’re in the guide.'}</p>
+    ${list ? `<div class="sp-sheet-list">${list}</div>` : ''}
+    <div class="form-actions"><button type="button" class="btn" data-unfollow>Unfollow ${esc(f.q)}</button></div>`, {
+    onMount: el => {
+      el.onclick = e => {
+        const bell = e.target.closest('[data-bell]');
+        if (bell) { const it = sportsBellItem(bell.dataset.bell); if (it) toggleReminder(it.channel, it.prog).then(() => { paintBell(bell, it); repaintSportsBells(); }); return; }
+        const row = e.target.closest('[data-tm]');
+        if (row) { const it = teamSheetItems[+row.dataset.tm]; if (!it) return; if (it.prog[0] <= Date.now()) { closeSheet(); playChannel([it.channel], 0); } else programmeSheet(it.channel, it.prog); return; }
+        if (e.target.closest('[data-unfollow]')) { closeSheet(); toggleFollow(f.q).then(() => { sportsHub.teams.delete(f.q.toLowerCase()); renderSports(); }); }
+      };
+    },
+  });
+}
 // iPhone app: each reminder is also a scheduled iOS notification, so it arrives with the app closed or the phone locked
 // (the in-app timer below can't run then). Same id = replaces, so re-sending on start-up is harmless.
 // Returns false when notifications are turned off, undefined in the browser.
 const reminderId = key => { let h = 0; for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) | 0; return `r${(h >>> 0).toString(36)}`; };
+// Alerts permission, asked once in plain words before iOS's own prompt: shortly after setup, or the first time you set a
+// reminder, save a series or follow something. If you said no, a reminder's toast says where to turn them on.
+async function askAlerts(why = '') {
+  if (!isNative) return;
+  let st;
+  try { st = (await globalThis.Capacitor.nativePromise('NativePlayer', 'notifications', {}))?.status; } catch { return; }
+  if (st !== 'ask') return;
+  try { if (localStorage.getItem('alerts-asked') && !why) return; localStorage.setItem('alerts-asked', '1'); } catch {}
+  return new Promise(done => sheet(`<div class="sheet-title">Turn on alerts?</div>
+    <p class="muted sheet-intro">${why ? `${esc(why)} ` : ''}M3U Player can tell you, even when the app is closed:</p>
+    <ul class="alert-list"><li>${icon('clock')}<span><b>Reminders</b> just before a programme starts</span></li>
+      <li>${icon('star')}<span><b>New episodes</b> of series you've saved</span></li>
+      <li>${icon('tv')}<span><b>Teams and shows you follow</b> when they're on TV</span></li></ul>
+    <div class="form-actions"><button class="btn" data-no>Not now</button><button class="btn primary" data-yes>Turn on</button></div>`, {
+    onMount: el => {
+      el.querySelector('[data-no]').onclick = closeSheet;
+      el.querySelector('[data-yes]').onclick = async () => {
+        closeSheet();
+        try {
+          const r = await globalThis.Capacitor.nativePromise('NativePlayer', 'notifications', { ask: true });
+          toast(r?.status === 'granted' ? 'Alerts are on' : 'Alerts are off — you can turn them on in iPhone Settings › M3U Player');
+          if (r?.status === 'granted') { scheduleReminders.synced = false; scheduleReminders(); }
+        } catch {}
+        done();
+      };
+    },
+    onClose: () => setTimeout(done, 0),   // "Not now", swiped away (Turn on resolves after iOS's own prompt)
+  }));
+}
+
 async function nativeReminder(key, r) {
   if (!isNative) return undefined;
   try {
@@ -3557,7 +3967,6 @@ function playlistMenu(p) {
       if (p.sourceUrl || p.kind === 'xtream') refreshSource(p); else { p.channels = applyContent(v, p.channels); await save(p); rerender(); }
     } }))) },
     canReorder() && { label: state.reordering ? 'Done reordering' : 'Reorder channels in this group (drag)', fn: toggleReordering },
-    viewing && live && state.group === null && !p.virtual && { label: 'Reorder channels… (open a group first)', fn: () => toast('Pick a group chip, then ⠿ in the top bar or ⋯ → Reorder channels') },
     real && live && { label: 'Add channel…', fn: () => addChannel(p) },
     live && p.channels.length && { label: 'Export / share M3U…', fn: () => exportMenu(p.name, p.channels, p.header) },
     narrowed && live && state.filtered.length && { label: `Export this view (${state.filtered.length.toLocaleString()})…`, fn: () => exportMenu(`${p.name} - ${state.group || 'search'}`, state.filtered, p.header) },
@@ -3568,6 +3977,7 @@ function playlistMenu(p) {
       p.channels = dedupe(p.channels);
       await save(p);
       rerender();
+      if (before.length === p.channels.length) return toast('No duplicates found');
       toast(`Removed ${plural(before.length - p.channels.length, 'duplicate')}`, { action: 'Undo', fn: async () => { p.channels = before; await save(p); rerender(); } });
     } },
     real && { label: 'Manage groups (hide, lock, reorder)…', fn: () => groupsSheet(p, viewing ? state.tab : 'live') },
@@ -4052,7 +4462,6 @@ async function settingsSheet() {
       <div class="section-title">Channels</div>
       <label class="switch"><span><b>Merge duplicate channels</b><span class="muted">Show each channel once; the copies become backup streams, used automatically if one fails.</span></span><input type="checkbox" name="mergeDupes" ${s.mergeDupes !== false ? 'checked' : ''}></label>
       <label class="switch"><span><b>Prefer 4K live channels</b><span class="muted">Where a channel also comes in 4K, play that copy (Safari and the iPhone app; the normal copy stays as backup).</span></span><input type="checkbox" name="prefer4k" ${s.prefer4k !== false ? 'checked' : ''}></label>
-      <label class="switch"><span><b>Continue watching on Home</b><span class="muted">Your last channel at the top of Home, one tap to play.</span></span><input type="checkbox" name="resumeCard" ${s.resumeCard !== false ? 'checked' : ''}></label>
       <div class="section-title">Playback</div>
       ${isNative ? '' : (() => {
         const opts = [['app', 'This app (built-in player)'], ['vlc', 'VLC (free; plays every format)'], ['infuse', 'Infuse'], ...(/Macintosh/.test(navigator.userAgent) ? [['iina', 'IINA (Mac, free)']] : [])];
@@ -4065,13 +4474,13 @@ async function settingsSheet() {
       <label>Movies &amp; series languages<select name="vodLanguage">
         ${[['en', 'English only'], ['all', 'All languages']].map(([v, l]) => `<option value="${v}" ${(s.vodLanguage || 'en') === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
-      <label>Buffering<select name="buffer">
-        ${[['auto', 'Auto (fast, steps up if a channel keeps stalling)'], ['fast', 'Fast switching (~4s buffer)'], ['balanced', 'Balanced (~8s buffer)'], ['stable', 'Stable (~14s buffer, slower switching)']].map(([v, l]) => `<option value="${v}" ${(s.buffer || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}
+      ${isNative ? '' : `<label>Buffering<select name="buffer">
+        ${[['auto', 'Auto (recommended)'], ['fast', 'Fast switching (~4s)'], ['balanced', 'Balanced (~8s)'], ['stable', 'Stable (~14s, slower switching)']].map(([v, l]) => `<option value="${v}" ${(s.buffer || 'auto') === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
       <label class="switch"><span><b>Use iPhone’s own player controls</b><span class="muted">Instead of the app’s controls (pause live, rewind, channel list on the video).</span></span>
         <input type="checkbox" name="nativeControls" ${s.nativeControls ? 'checked' : ''}></label>
       <label class="switch"><span><b>Try HLS for .ts links</b><span class="muted">Most IPTV providers also serve each .ts channel as .m3u8, which iPhone can play. Tried first, with the original link as backup.</span></span>
-        <input type="checkbox" name="tsToHls" ${s.tsToHls ? 'checked' : ''}></label>
+        <input type="checkbox" name="tsToHls" ${s.tsToHls ? 'checked' : ''}></label>`}
       <div class="form-actions"><button class="btn primary">Save settings</button></div>
     </form>
     <div class="section-title">Parental control</div>
@@ -4090,9 +4499,10 @@ async function settingsSheet() {
         const mergeWas = state.settings.mergeDupes !== false, langWas = state.settings.vodLanguage;
         Object.assign(state.settings, {
           ...(f.has('proxy') ? { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')) } : {}),
-          tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto'), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'), prefer4k: f.get('prefer4k') === 'on', livePlayer: String(f.get('livePlayer') || state.settings.livePlayer || 'app'),
+          // The iPhone app plays everything in its own VLC player: buffering / controls / .ts→HLS are web-player settings.
+          ...(isNative ? {} : { tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto') }), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'), prefer4k: f.get('prefer4k') === 'on', livePlayer: String(f.get('livePlayer') || state.settings.livePlayer || 'app'),
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
-          showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on', resumeCard: f.get('resumeCard') === 'on',
+          showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on',
         });
         if (mergeWas !== state.settings.mergeDupes) state.playlists.forEach(invalidate);
         if (langWas !== state.settings.vodLanguage) vodCache.clear();   // rebuilt with the new language filter on next view
@@ -4391,9 +4801,14 @@ function bindPlayer() {
   video.addEventListener('pause', () => trackProgress(true));
   video.addEventListener('ended', () => {
     trackProgress(true);
-    const pl = state.playing;
-    if (pl && nowChannel()?.kind === 'episode' && pl.index < pl.list.length - 1) showNextUp(pl.list[pl.index + 1]);
+    nu.ended = true;
+    if (nextEpisodeOf() && !nu.mode) showNextUp(nu.dismissed ? 5 : 10);
   });
+  video.addEventListener('playing', () => { nu.ended = false; });
+  video.addEventListener('timeupdate', checkCredits);
+  video.addEventListener('seeked', checkCredits);
+  // Any touch, click or key means someone is watching: the "Still watching?" count starts again.
+  for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, () => { nu.chain = 0; }, { capture: true, passive: true });
   video.addEventListener('timeupdate', updateSkipIntro);
   video.addEventListener('seeking', learnIntro);
   // One silent retry on a mid-stream fault (provider blip, segment timeout) before showing the error.
@@ -4565,7 +4980,7 @@ function playNative(list, index, c) {
   highlightPlaying();
   addRecent(c);
   const live = isLiveChannel(c);
-  const g = live && guideFor(c), now = g && g.nowNext(c).now;
+  const g = live && guideFor(c), nn = g && g.nowNext(c), now = nn && nn.now;
   if (live) ensureGuide([c]);
   const pr = state.progress[c.pkey || c.url];
   const start = !live && pr && !pr.done && pr.t > 30 ? pr.t : 0;
@@ -4574,8 +4989,15 @@ function playNative(list, index, c) {
     subtitle: now ? `${now[2]} · ends ${fmtTime(now[1])}` : live ? prettyGroup(c.group) || '' : vodLine(c),
     info: now ? now[3] || '' : c.plot || '',
     headers: headersFromOpts(c.opts), hasPrev: index > 0, hasNext: index < list.length - 1, art: c.logo || '',
-    ...nativeList(list, index, live),
+    ...nativeList(list, index, live), ...(live ? nativeNowNext(c, nn) : {}),
   }).catch(e => toast(e.message || 'Couldn’t open the player'));
+}
+// Live extras for the player: channel number, now / next (for its tuning card, Start over and mini guide), catch-up days.
+function nativeNowNext(c, nn) {
+  return {
+    num: c.num || 0, group: prettyGroup(c.group) || '', catchupDays: archiveDays(c) || 0,
+    nowT: nn?.now?.[2] || '', nowA: nn?.now?.[0] || 0, nowB: nn?.now?.[1] || 0, nextT: nn?.next?.[2] || '', nextA: nn?.next?.[0] || 0,
+  };
 }
 // An episode's own name: "Clean Entry" from "EN - S.W.A.T. Exiles (2026) (US) - S01E01 - Clean Entry" ('' when the file has none).
 function epTitle(name) {
@@ -4597,20 +5019,39 @@ function nativeList(list, index, live) {
     if (x.kind === 'episode') {
       const m = vodMeta(x.name), ep = epTitle(x.name);
       const n = m.episode ?? x.num;
-      return { t: n != null ? `${n}. ${ep || `Episode ${n}`}` : x.name, s: [m.season ? `Season ${m.season}` : '', x.duration || ''].filter(Boolean).join(' · ') };
+      // a: the episode's still, c: its line on the next-episode card ("S1 E2 · Title")
+      return { t: n != null ? `${n}. ${ep || `Episode ${n}`}` : x.name, s: [m.season ? `Season ${m.season}` : '', x.duration || ''].filter(Boolean).join(' · '), a: x.logo || '', c: epCardLine(x) };
     }
-    if (isLiveChannel(x)) { const g = guideFor(x), now = g && g.nowNext(x).now; return { t: x.name, s: now ? now[2] : prettyGroup(x.group) || '' }; }
+    if (isLiveChannel(x)) {
+      const g = guideFor(x), now = g && g.nowNext(x).now;
+      // l / n: logo and number; pa / pb: when what's on now started and ends (the mini guide's progress line)
+      return { t: x.name, s: now ? now[2] : prettyGroup(x.group) || '', l: x.logo || '', n: x.num || 0, pa: now ? now[0] : 0, pb: now ? now[1] : 0 };
+    }
     return { t: niceName(x), s: vodLine(x) };
   };
-  return { list: part.map(row), listStart: from, current: index, listTitle: live ? 'Channels' : list[index]?.kind === 'episode' ? 'Episodes' : 'Up next' };
+  const cur = list[index];
+  return { list: part.map(row), listStart: from, current: index, listTitle: live ? 'Channels' : cur?.kind === 'episode' ? 'Episodes' : 'Up next', show: cur?.kind === 'episode' ? showNameOf(cur) : '' };
 }
+// The player asks for these itself (evaluateJavaScript): fresh guide rows when its mini guide opens or a programme
+// ends, and catch-up links (Start over, rewinding further back than it has recorded) for the channel playing.
+window.__playerGuide = () => {
+  const pl = state.playing, c = nowChannel();
+  if (!pl || !c || !isLiveChannel(c)) return '';
+  const g = guideFor(c);
+  return JSON.stringify({ ...nativeList(pl.list, pl.index, true), ...nativeNowNext(c, g && g.nowNext(c)) });
+};
+window.__playerCatchup = (start, end) => {
+  const c = nowChannel();
+  return c && isLiveChannel(c) && archiveDays(c) ? catchupUrlFor(c, [start, Math.max(end, start + MINUTE)]) || '' : '';
+};
 window.__nativePlayer = ev => {
   const pl = state.playing, c = pl && pl.list[pl.index];
   if (!ev || !c) return;
   if (ev.type === 'step') { const i = pl.index + ev.dir; if (i >= 0 && i < pl.list.length) playChannel(pl.list, i); }
   if (ev.type === 'jump' && ev.index >= 0 && ev.index < pl.list.length && ev.index !== pl.index) playChannel(pl.list, ev.index);
   if ((ev.type === 'progress' || ev.type === 'closed') && !isLiveChannel(c) && c.kind !== 'catchup' && ev.d >= 60) writeProgress(c, ev.t, ev.d);
-  // 'ended': the player itself counts down "Next episode in 10" and then asks for the next one (a 'step').
+  // 'ended' / credits: the player shows its own next-episode card, counts down and then asks for the next one (a 'step'),
+  // after a 'progress' at the full length so the finished episode counts as watched.
   if (ev.type === 'closed') { state.playing = null; highlightPlaying(); if (!state.current) rerender(); }
   if (ev.type === 'error') report('native-play', `${ev.message}: ${c.name}`, isLiveChannel(c) ? 'live' : c.kind);
 };
@@ -4667,6 +5108,7 @@ function playChannel(list, index) {
   }
   trackProgress(true);
   const prev = nowChannel();
+  hideNextUp(); nu.ended = false; nu.dismissed = false;
   state.playing = { list, index };
   if (dlActive && !c.offline) { const m = state.downloads[dlActive.id]; if (m && !m.done) toast('Your download pauses while you watch and resumes afterwards'); }
   $('#player').hidden = false;

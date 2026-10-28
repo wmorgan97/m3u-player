@@ -44,7 +44,79 @@ class MainViewController: CAPBridgeViewController {
             NativePlayerPlugin.schedule(id: "test", at: Date().timeIntervalSince1970 * 1000 + 185_000, title: "Test programme", channelName: "Test channel", channel: ch) { r in NSLog("M3UTEST reminder scheduled %@", "\(r)") }
             return
         }
+        // `-testEpisodes <url> [-testStart secs]`: a pretend 3-episode season (with stills) on that stream, stepping
+        // through it like the web app does, to check the next-episode card without a provider.
+        if let e = args.firstIndex(of: "-testEpisodes"), e + 1 < args.count, let url = URL(string: args[e + 1]), presentedViewController == nil,
+           !children.contains(where: { $0 is VLCPlayerController }) {
+            let start = args.firstIndex(of: "-testStart").flatMap { $0 + 1 < args.count ? Double(args[$0 + 1]) : nil } ?? 0
+            let names = ["Pilot", "The Crossing", "Homecoming"]
+            func episode(_ n: Int) -> VLCPlayerController.Item {
+                var it = VLCPlayerController.Item(url: url, title: "The Test Show", subtitle: "S1 E\(n + 1) · \(names[n])", info: "", live: false, start: start,
+                                                  headers: ["X-Test-Mute": "1"], hasPrev: n > 0, hasNext: n < names.count - 1)
+                it.list = names.enumerated().map { ("\($0.offset + 1). \($0.element)", "Season 1") }
+                it.listArt = names.indices.map { "https://picsum.photos/seed/m3u-ep\($0 + 1)/640/360" }
+                it.listCard = names.enumerated().map { "S1 E\($0.offset + 1) · \($0.element)" }
+                it.listTitle = "Episodes"; it.current = n; it.show = "The Test Show"
+                return it
+            }
+            var index = 0
+            weak var player: VLCPlayerController?
+            let controller = VLCPlayerController(item: episode(0)) { event in
+                NSLog("M3UTEST player event %@", "\(event)")
+                let to = (event["type"] as? String) == "step" ? index + ((event["dir"] as? Int) ?? 0) : (event["type"] as? String) == "jump" ? ((event["index"] as? Int) ?? -1) : -1
+                guard names.indices.contains(to) else { return }
+                index = to
+                DispatchQueue.main.async { player?.load(episode(to)) }
+            }
+            player = controller
+            controller.show(in: self)
+            return
+        }
         #endif
+        // `-testChannels <base url>`: a pretend group of live channels (with logos and a guide) on the local test streams
+        // (scratchpad streams/serve.py: /live/<n>.ts and /hls/<n>/index.m3u8), to try zapping, timeshift and the mini guide.
+        if let e = args.firstIndex(of: "-testChannels"), e + 1 < args.count, presentedViewController == nil,
+           !children.contains(where: { $0 is VLCPlayerController }) {
+            let base = args[e + 1]
+            let names = ["BBC One", "BBC Two", "ITV1", "Channel 4", "Sky News", "Sky Sports Main Event", "Eurosport 1", "Discovery", "Comedy Central", "Film4", "Dave", "E4"]
+            let shows = ["The One Show", "Gardeners' World", "Coronation Street", "Grand Designs", "Sky News Tonight", "Premier League: Arsenal v Chelsea",
+                         "Tour de France Highlights", "Gold Rush", "Friends", "Paddington 2", "Taskmaster", "The Big Bang Theory"]
+            let now = Date().timeIntervalSince1970 * 1000
+            let catchup = args.contains("-testCatchup")
+            func channel(_ n: Int) -> VLCPlayerController.Item {
+                let hls = args.contains("-testHLS")
+                let url = URL(string: hls ? "\(base)/hls/\(n % 3)/index.m3u8" : "\(base)/live/\(n % 3).ts")!
+                var it = VLCPlayerController.Item(url: url, title: names[n], subtitle: "\(shows[n]) · ends 21:00", info: "A pretend programme description for the test channel.",
+                                                  live: true, start: 0, headers: ["X-Test-Mute": "1"], hasPrev: n > 0, hasNext: n < names.count - 1)
+                it.list = names.indices.map { (names[$0], shows[$0]) }
+                it.listTitle = "Channels"; it.current = n; it.num = 101 + n; it.group = "UK Entertainment"
+                it.listNum = names.indices.map { 101 + $0 }
+                it.listLogo = names.indices.map { "https://picsum.photos/seed/m3u-logo\($0)/96/96" }
+                it.listNowStart = names.indices.map { now - Double(($0 * 7 + 10) % 50 + 5) * 60_000 }
+                it.listNowEnd = names.indices.map { now + Double(($0 * 11 + 15) % 55 + 5) * 60_000 }
+                it.nowTitle = shows[n]; it.nowStart = it.listNowStart[n]; it.nowEnd = it.listNowEnd[n]
+                it.nextTitle = "The News at Ten"; it.nextStart = it.nowEnd
+                it.art = it.listLogo[n]
+                it.catchupDays = catchup ? 7 : 0
+                return it
+            }
+            var index = 0
+            weak var player: VLCPlayerController?
+            let controller = VLCPlayerController(item: channel(0)) { event in
+                NSLog("M3UTEST player event %@", "\(event)")
+                let to = (event["type"] as? String) == "step" ? index + ((event["dir"] as? Int) ?? 0) : (event["type"] as? String) == "jump" ? ((event["index"] as? Int) ?? -1) : -1
+                guard names.indices.contains(to) else { return }
+                index = to
+                DispatchQueue.main.async { player?.load(channel(to)) }
+            }
+            // Catch-up for the test: the "archive" is the same local stream (it can't really go back in time).
+            controller.askJS = { js, done in
+                if js.contains("__playerCatchup") { done(catchup ? "\(base)/live/\(index % 3).ts" : "") } else { done(nil) }
+            }
+            player = controller
+            controller.show(in: self)
+            return
+        }
         guard let i = args.firstIndex(of: "-testStream"), i + 1 < args.count, let url = URL(string: args[i + 1]), presentedViewController == nil else { return }
         let live = args.contains("-testLive")
         var item = VLCPlayerController.Item(url: url, title: "Test stream", subtitle: "Player check", info: "", live: live, start: 0, headers: ["X-Test-Mute": "1"], hasPrev: true, hasNext: true)
@@ -109,6 +181,7 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "unremind", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "takeReminderTap", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "notify", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "notifications", returnType: CAPPluginReturnPromise),
     ]
 
     // MARK: reminders
@@ -116,6 +189,19 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
     // if the app is closed or the phone is locked. Tapping it opens the app on that channel (see AppDelegate).
 
     /// { id, at (ms), title, channelName, channel (JSON string, handed back on tap) }
+    /// Notification permission: { status: granted | denied | ask }. With ask: true and not decided yet, shows iOS's prompt.
+    @objc func notifications(_ call: CAPPluginCall) {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { s in
+            if s.authorizationStatus == .notDetermined && call.getBool("ask") == true {
+                center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in call.resolve(["status": granted ? "granted" : "denied"]) }
+                return
+            }
+            let ok = s.authorizationStatus == .authorized || s.authorizationStatus == .provisional || s.authorizationStatus == .ephemeral
+            call.resolve(["status": ok ? "granted" : s.authorizationStatus == .notDetermined ? "ask" : "denied"])
+        }
+    }
+
     @objc func remind(_ call: CAPPluginCall) {
         guard let id = call.getString("id"), let at = call.getDouble("at") else { call.reject("Missing reminder"); return }
         NativePlayerPlugin.schedule(id: id, at: at, title: call.getString("title") ?? "", channelName: call.getString("channelName") ?? "",
@@ -219,11 +305,30 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
         item.current = call.getInt("current") ?? 0
         item.listTitle = call.getString("listTitle") ?? "Episodes"
         item.art = call.getString("art") ?? ""
+        let rows = (call.getArray("list") ?? []).compactMap { $0 as? [String: Any] }
+        item.listArt = rows.map { ($0["a"] as? String) ?? "" }
+        item.listCard = rows.map { ($0["c"] as? String) ?? "" }
+        item.show = call.getString("show") ?? ""
+        item.num = call.getInt("num") ?? 0
+        item.nowTitle = call.getString("nowT") ?? ""
+        item.nowStart = call.getDouble("nowA") ?? 0
+        item.nowEnd = call.getDouble("nowB") ?? 0
+        item.nowDesc = call.getString("info") ?? ""
+        item.nextTitle = call.getString("nextT") ?? ""
+        item.nextStart = call.getDouble("nextA") ?? 0
+        item.catchupDays = call.getInt("catchupDays") ?? 0
+        item.group = call.getString("group") ?? ""
+        item.listLogo = rows.map { ($0["l"] as? String) ?? "" }
+        item.listNum = rows.map { ($0["n"] as? NSNumber)?.intValue ?? 0 }
+        item.listNowStart = rows.map { ($0["pa"] as? NSNumber)?.doubleValue ?? 0 }
+        item.listNowEnd = rows.map { ($0["pb"] as? NSNumber)?.doubleValue ?? 0 }
         DispatchQueue.main.async {
             // Already open (channel up/down, next episode): swap the stream in place.
             if let open = self.vlcController, open.parent != nil {
+                // The player's own next-episode countdown ran out while it was the mini player: keep it small.
+                let stayMini = open.isMini && open.selfStepPending
                 open.load(item)
-                open.expand()   // picked something while it was the mini player: back to full screen
+                if !stayMini { open.expand() }   // picked something while it was the mini player: back to full screen
                 call.resolve()
                 return
             }
@@ -232,10 +337,20 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
                 return
             }
             let controller = VLCPlayerController(item: item) { [weak self] event in self?.emit(event) }
+            // The player asks the web app for fresh guide rows and catch-up links (it has the guide and the logins).
+            controller.askJS = { [weak self] js, done in
+                guard let web = self?.bridge?.webView else { return done(nil) }
+                web.evaluateJavaScript(js) { r, _ in done(r) }
+            }
             self.vlcController = controller
             controller.show(in: presenter)
             call.resolve()
         }
+    }
+
+    override public func load() {
+        LiveBuffer.purge()                   // recordings left behind by a killed app
+        LocalStreamServer.shared.start()     // ready before the first channel
     }
 
     @objc func close(_ call: CAPPluginCall) {
@@ -286,6 +401,11 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
 /// cropped, invisible) player lets them through to the app behind.
 final class PlayerRootView: UIView {
     var touchArea: CGRect?
+    var onTouch: (() -> Void)?   // any touch on the player: someone is watching (resets the autoplay run)
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        if event?.type == .touches { onTouch?() }
+        return super.hitTest(point, with: event)
+    }
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         if let a = touchArea { return a.contains(point) }
         return super.point(inside: point, with: event)
@@ -312,6 +432,20 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         var current = 0
         var listTitle = "Episodes"
         var art = ""   // poster / logo for the lock screen
+        var listArt: [String] = []    // per list row: the episode's still (next-episode card)
+        var listCard: [String] = []   // per list row: "S1 E2 · Title" for the next-episode card
+        var show = ""                 // the series' name ("Still watching …?")
+        // Live channels: number, what's on now / next (times in ms), days of catch-up, the group; per list row the
+        // channel's logo, number and the times of what's on now (the mini guide).
+        var num = 0
+        var nowTitle = "", nowStart: Double = 0, nowEnd: Double = 0, nowDesc = ""
+        var nextTitle = "", nextStart: Double = 0
+        var catchupDays = 0
+        var group = ""
+        var listLogo: [String] = []
+        var listNum: [Int] = []
+        var listNowStart: [Double] = []
+        var listNowEnd: [Double] = []
     }
 
     private let player = VLCMediaPlayer()
@@ -354,6 +488,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     // Picture shape, like VLC's: tap to cycle. Kept for the next channel / episode.
     private static let aspectModes = ["Best fit", "Fill screen", "Stretch", "16:9", "4:3", "2.35:1"]
     private var aspectMode = 0
+    private let middle = UIStackView()   // centre transport row
     private let spacer = UIView()   // takes the spare width when the slider is hidden (live), so "LIVE" stays small
     // Big centre read-out for swipes (brightness, volume, seek): visible even while the controls are hidden.
     private let hud = UILabel()
@@ -363,13 +498,21 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private let syncLabel = UILabel()
     private var syncKind = 0   // 0 audio, 1 subtitles
     // "Next episode in 10" at the end of an episode.
-    private let nextPanel = UIView()
-    private let nextName = UILabel()
-    private let nextCount = UILabel()
+    // Next episode: a card in the end credits (last 30 s), counting down 10 s inside its Play next button.
+    private let nextCard = NextEpisodeCard()
+    private enum CardMode { case none, next, still }
+    private var cardMode = CardMode.none
     private var countdown: Timer?
-    private var countdownLeft = 0
+    private var countdownTotal: Double = 10
+    private var countdownLeft: Double = 0
+    private var creditsDismissed = false   // "Watch credits": no card again until you seek out of the credits
+    private var ended = false
+    private var autoChain = 0              // episodes started by the countdown in a row, with no touch in between
+    private var stillAfter = 3             // "Still watching?" instead of the 4th
+    private var cardConstraints: (portrait: [NSLayoutConstraint], landscape: [NSLayoutConstraint]) = ([], [])
+    var selfStepPending = false            // the countdown asked for the next episode (don't pop the mini player open)
     // Swipes on films and episodes: left half brightness, right half volume, sideways to seek.
-    private enum Drag { case none, scrub, brightness, volume, minimize }
+    private enum Drag { case none, scrub, brightness, volume, minimize, guide }
     private var drag = Drag.none
     private var dragFrom: Double = 0
     private var scrubTarget: Double = 0
@@ -394,6 +537,48 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     // Bytes read, for the stream info panel's bitrate.
     private var samples: [(t: TimeInterval, bytes: Int64)] = []
 
+    // MARK: live state
+    // Channel changes: a tuning card (logo, number, name, what's on) from the moment you swipe until the picture comes,
+    // over the last frame. Rapid swipes are gathered up (only the channel you stop on is opened: one connection).
+    private let tuningCard = TuningCard()
+    private var freeze: UIView?                 // the last frame, held under the tuning card / while seeking
+    private var zapTarget: Int?                 // the channel (index in the app's list) a swipe is heading for
+    private var zapTimer: Timer?
+    private var lastZap: TimeInterval = 0
+    // Pause / rewind on live TV. Buffered: the channel goes through LiveBuffer (recorded to Caches, played from there).
+    // Catch-up: the provider's archive (Start over, or rewinding past what's been recorded). Direct: plain live.
+    private enum Feed { case direct, buffered, catchup }
+    private var feed = Feed.direct
+    private var buffer: LiveBuffer?
+    private var shiftTarget: Double?            // where the current session was asked to start (nil = live)
+    private var sessionContent: Double?         // where it really started (wall-clock time of that moment of TV)
+    private var firstPictureAt: TimeInterval = 0
+    private var pausedAt: TimeInterval?
+    private var pausedTotal: TimeInterval = 0
+    private var liveLag: Double = 0             // how far behind the provider "live" is (keyframe + buffering, HLS window)
+    private var catchupStart: Double = 0        // the moment of TV at the catch-up recording's 0:00
+    private var userPaused = false
+    private var lastTimeChange: TimeInterval = 0
+    private var stalls = 0
+    private let liveButton = UIButton(type: .custom)        // "● LIVE": red dot at live; tap to go back when behind
+    private let startOverButton = UIButton(type: .custom)   // "Start over": the current programme from its start
+    private var guide: GuidePanel?
+    /// Runs a line of the web app's JavaScript and hands back its value (fresh guide rows, catch-up links).
+    var askJS: ((String, @escaping (Any?) -> Void) -> Void)?
+    private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    private var wall: Double { Date().timeIntervalSince1970 }
+    /// Live buffering (ms) for channels straight from the provider. Starts low (a quick picture) and grows on its own
+    /// if this phone's connection stalls; kept between launches.
+    private static var liveCaching: Int {
+        get { let v = UserDefaults.standard.integer(forKey: "m3u.liveCaching"); return v > 0 ? v : 800 }
+        set { UserDefaults.standard.set(min(2500, max(600, newValue)), forKey: "m3u.liveCaching") }
+    }
+    /// What VLC itself would say: some providers only let VLC-looking players in.
+    private static let vlcAgent: String = {
+        let v = VLCLibrary.shared().version.split(separator: " ").first.map(String.init) ?? "3.0.21"
+        return "VLC/\(v) LibVLC/\(v)"
+    }()
+
     init(item: Item, onEvent: @escaping ([String: Any]) -> Void) {
         self.item = item
         self.onEvent = onEvent
@@ -401,7 +586,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
-    override func loadView() { view = PlayerRootView() }
+    override func loadView() {
+        let root = PlayerRootView()
+        root.onTouch = { [weak self] in self?.autoChain = 0 }
+        view = root
+    }
     private var root: PlayerRootView? { view as? PlayerRootView }
 
     override var prefersStatusBarHidden: Bool { !isMini }
@@ -437,7 +626,12 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         view.addSubview(videoView)
         player.drawable = videoView
         player.delegate = self
+        tuningCard.frame = view.bounds
+        tuningCard.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(tuningCard)
         buildOverlay()
+        LocalStreamServer.shared.start()
+        if item.live { overlay.alpha = 0; overlay.isUserInteractionEnabled = false }   // a channel opens on its tuning card, not the controls
 
         // Touch: a single tap shows/hides the controls, a double tap on the left/right third skips 10s.
         // Taps that land on a button or the slider go to that control only (see gestureRecognizer(_:shouldReceive:)).
@@ -452,6 +646,10 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         setUpMiniClose()
         setUpRemoteControls()
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments   // test hook: `-testStillAfter 1` asks "Still watching?" sooner
+        if let i = args.firstIndex(of: "-testStillAfter"), i + 1 < args.count, let n = Int(args[i + 1]) { stillAfter = n }
+        #endif
         load(item)
     }
 
@@ -476,8 +674,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             // is in thirds: left = brightness, middle = minimise (downward), right = volume. Live or film alike.
             let third = start.point.x < w / 3 ? 0 : start.point.x > w * 2 / 3 ? 2 : 1
             let vertical = abs(dy) > abs(dx)
-            if vertical && (start.point.y < 50 || start.point.y > h - 50) { touchStart = nil; return }   // the system's own edge swipes
+            // The system's own edge swipes (Notification Centre from the top, Home from the very bottom).
+            if vertical && (start.point.y < 50 || start.point.y > h - (dy < 0 ? 24 : 50)) { touchStart = nil; return }
             if vertical && dy > 0 && (portrait || third == 1) && parent != nil { drag = .minimize; hideOverlay() }
+            // Up in the middle (sideways) or anywhere (upright): the mini guide. Down is the mini player: the pair mirror.
+            else if vertical && dy < 0 && (portrait || third == 1) && item.live && !item.list.isEmpty { drag = .guide }
             else if vertical && !portrait && third == 0 { drag = .brightness; dragFrom = Double(UIScreen.main.brightness) }
             else if vertical && !portrait && third == 2 { drag = .volume; dragFrom = Double(AVAudioSession.sharedInstance().outputVolume) }
             else if vertical { touchStart = nil; return }
@@ -504,6 +705,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             let s = 1 - 0.5 * f
             view.transform = CGAffineTransform(translationX: w * 0.25 * f, y: max(0, dy) * 0.85).scaledBy(x: s, y: s)
             setCrop(min(1, f * 3), scale: s)   // the crop reaches the picture early in the pull
+        case .guide: break
         case .none: break
         }
     }
@@ -516,6 +718,12 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             if dy > view.bounds.height * 0.18 { minimize() } else { springBack() }
             return
         }
+        if drag == .guide {
+            drag = .none
+            let dy = (touches.first.map { $0.location(in: view).y } ?? 0) - (touchStart?.point.y ?? 0)
+            if dy < -40 { openGuide() }
+            return
+        }
         if drag != .none {
             if drag == .scrub { player.time = VLCTime(int: Int32(scrubTarget * 1000)) }
             let wasVolume = drag == .volume
@@ -526,10 +734,14 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         guard let t = touches.first, let start = touchStart else { return }
         let p = t.location(in: view), dx = p.x - start.point.x, dy = p.y - start.point.y
         if item.live && abs(dx) > 60 && abs(dx) > abs(dy) * 1.5 { return zap(next: dx < 0) }   // live: swipe left = next channel, right = previous
+        // A quick flick up (no move events on the way): the guide, as for a slower swipe.
+        let middle = view.bounds.height > view.bounds.width || (start.point.x > view.bounds.width / 3 && start.point.x < view.bounds.width * 2 / 3)
+        if item.live && dy < -60 && abs(dy) > abs(dx) * 1.5 && middle && start.point.y < view.bounds.height - 24 { return openGuide() }
         if abs(dx) < 12 && abs(dy) < 12 && ProcessInfo.processInfo.systemUptime - start.time < 0.6 { tapped(at: p) }
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         if drag == .minimize { drag = .none; springBack() }
+        if drag == .guide { drag = .none }
         if drag != .none { let wasVolume = drag == .volume; drag = .none; if !wasVolume { showHud(hud.text ?? "", sticky: false) } }
         touchStart = nil
         super.touchesCancelled(touches, with: event)
@@ -612,7 +824,13 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         gradient.frame = overlay.bounds
+        let wide = view.bounds.width > view.bounds.height
+        NSLayoutConstraint.deactivate(wide ? cardConstraints.portrait : cardConstraints.landscape)
+        NSLayoutConstraint.activate(wide ? cardConstraints.landscape : cardConstraints.portrait)
+        updateCardVisibility()
         if aspectMode == 1 || aspectMode == 2 { applyAspect() }   // fill / stretch follow the screen's shape when it turns
+        if guide != nil && !isMini { placeVideoForGuide(animated: false) }
+        middle.spacing = wide ? 30 : 14   // upright the five discs must fit the width with room either side
     }
 
     // MARK: stream
@@ -632,10 +850,17 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         elapsedLabel.isHidden = next.live
         qualityBadge.isHidden = true
         listButton.isHidden = next.list.count < 2
-        listButton.accessibilityLabel = next.listTitle
+        listButton.accessibilityLabel = next.live ? "Guide" : next.listTitle
+        // Live: the back / forward pair step 10 s through the recording (shown once there is one); films keep 30 s.
+        backButton.setImage(Self.symbol(next.live ? "gobackward.10" : "gobackward.30", Self.skipGlyph), for: .normal)
+        forwardButton.setImage(Self.symbol(next.live ? "goforward.10" : "goforward.30", Self.skipGlyph), for: .normal)
+        liveButton.isHidden = true
+        startOverButton.isHidden = true
         infoButton.isHidden = false   // stream info is always there
-        countdown?.invalidate()
-        nextPanel.isHidden = true
+        hideCard(animated: false)
+        ended = false
+        creditsDismissed = false
+        selfStepPending = false
         syncPanel.isHidden = true
         deinterlaceSet = false
         samples = []
@@ -648,30 +873,125 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         loadArtwork(next.art)
         prevButton.isEnabled = next.hasPrev
         nextButton.isEnabled = next.hasNext
-        prevButton.alpha = next.hasPrev ? 1 : 0.35
-        nextButton.alpha = next.hasNext ? 1 : 0.35
+        // Unavailable: the disc stays (the row keeps its shape), only the glyph fades.
+        prevButton.tintColor = next.hasPrev ? .white : Self.offTint
+        nextButton.tintColor = next.hasNext ? .white : Self.offTint
 
-        let media = VLCMedia(url: next.url)
-        media.addOption(next.live ? ":network-caching=1500" : ":network-caching=3000")
-        if let agent = next.headers["User-Agent"] { media.addOption(":http-user-agent=\(agent)") }
-        if let referrer = next.headers["Referer"] { media.addOption(":http-referrer=\(referrer)") }
-        if !next.live && next.start > 1 { media.addOption(":start-time=\(Int(next.start))") }
-        if next.headers["X-Test-Mute"] != nil { media.addOption(":no-audio") }   // test hook only: silent
-        spinner.startAnimating()
+        // A quiet stretch of live watching: the buffering can come down a little again.
+        if feed != .catchup && firstPicture && stalls == 0 && uptime - firstPictureAt > 600 && liveWasOn { Self.liveCaching -= 100 }
+        liveWasOn = next.live
+        if zapTimer?.isValid != true { zapTarget = nil }   // (a swipe still on its way keeps its target and card)
+        buffer?.stop(); buffer = nil   // first: the provider allows one connection
+        feed = .direct; shiftTarget = nil; sessionContent = nil; liveLag = 0; stalls = 0; triedDirect = false; expectBuffer = false
+        if next.live {
+            // Controls up (you pressed next): they show the new name; otherwise the tuning card does.
+            if !isMini && overlay.alpha < 0.5 && zapTarget == nil { showTuning(name: next.title, number: next.num, logo: next.art, now: next.nowTitle) }
+            startLive()
+            if !isMini && overlay.alpha > 0.5 { showOverlay() }
+        } else {
+            tuningCard.hide(animated: false); dropFreeze()
+            openMedia(next.url, caching: 3000, start: next.start)
+            if !isMini { showOverlay() }   // the next episode in the mini player: no controls on the card
+        }
+        updateLiveBar()
+        updateNowPlaying()
+    }
+    private var liveWasOn = false
+    private var triedDirect = false
+    private static var timeshift: Bool {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-testNoTimeshift") { return false }
+        #endif
+        return UserDefaults.standard.object(forKey: "m3u.timeshift") as? Bool ?? true
+    }
+    /// Live: VLC can keep saying "playing" while a live input is held paused, so the player's own state decides.
+    private var isPlayingNow: Bool { item.live ? !userPaused : player.isPlaying }
+    private func setPlayIcon() {
+        let playing = isPlayingNow
+        playButton.setImage(Self.symbol(playing ? "pause.fill" : "play.fill", Self.playGlyph), for: .normal)
+        playButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: playing ? 0 : 4, bottom: 0, right: 0)   // the triangle, optically centred
+    }
+    private static let offTint = UIColor(white: 1, alpha: 0.3)
+    private static let playGlyph: CGFloat = 26
+    private static let skipGlyph: CGFloat = 21
+    private static func symbol(_ name: String, _ size: CGFloat) -> UIImage? {
+        UIImage(systemName: name, withConfiguration: UIImage.SymbolConfiguration(pointSize: size, weight: .semibold))
+    }
+
+    /// Opens a stream in VLC (a fresh start: the session clock, pause and first-picture state reset).
+    private func openMedia(_ url: URL, caching: Int, start: Double = 0) {
+        let media = VLCMedia(url: url)
+        var c = caching
+        #if DEBUG
+        let a = ProcessInfo.processInfo.arguments
+        if let i = a.firstIndex(of: "-testCaching"), i + 1 < a.count, let v = Int(a[i + 1]) { c = v }
+        #endif
+        media.addOption(":network-caching=\(c)")
+        // (Also on the local recording's address: if it hands VLC on to the provider, they go with it.)
+        if let agent = item.headers["User-Agent"] { media.addOption(":http-user-agent=\(agent)") }
+        if let referrer = item.headers["Referer"] { media.addOption(":http-referrer=\(referrer)") }
+        if start > 1 { media.addOption(":start-time=\(Int(start))") }
+        if item.headers["X-Test-Mute"] != nil { media.addOption(":no-audio") }   // test hook only: silent
+        loadStartedAt = uptime; firstPicture = false; pausedAt = nil; pausedTotal = 0; userPaused = false; lastTimeChange = uptime
+        busy(true)
         player.media = media
         player.play()
-        showOverlay()
-        updateNowPlaying()
+        #if DEBUG
+        NSLog("M3UTTFP open caching=%d %@", c, url.absoluteString)
+        #endif
+    }
+
+    /// A live channel: through the timeshift buffer where it can be (pause, rewind), otherwise straight to VLC.
+    private func startLive() {
+        let scheme = item.url.scheme?.lowercased() ?? ""
+        guard Self.timeshift, scheme == "http" || scheme == "https" else { return openDirectLive() }
+        expectBuffer = true
+        let it = item
+        LocalStreamServer.shared.start { [weak self] port in
+            guard let self = self, !self.finished, self.item.url == it.url, self.buffer == nil else { return }
+            guard port != nil else { return self.openDirectLive() }
+            var h = it.headers
+            if h["User-Agent"] == nil { h["User-Agent"] = Self.vlcAgent }
+            let b = LiveBuffer(url: it.url, headers: h)
+            b.onFail = { [weak self, weak b] why in
+                guard let self = self, let b = b, self.buffer === b, !self.firstPicture else { return }
+                NSLog("M3UTS playing direct instead: %@", why)
+                b.stop(); self.buffer = nil
+                self.openDirectLive()
+            }
+            self.buffer = b
+            b.start()
+            self.startBuffered(target: nil)
+        }
+    }
+    private var expectBuffer = false
+    private func openDirectLive() {
+        expectBuffer = false
+        triedDirect = true
+        feed = .direct
+        openMedia(item.url, caching: Self.liveCaching)
+    }
+    /// A session of the recording: live (nil) or from a moment in it.
+    private func startBuffered(target: Double?) {
+        guard let b = buffer, let url = b.sessionURL(target: target) else { return openDirectLive() }
+        feed = .buffered; shiftTarget = target; sessionContent = nil
+        // From the phone's own storage there's no network to ride out: very little buffering, so seeks start quickly.
+        openMedia(url, caching: target == nil ? Self.liveCaching : 400)
+    }
+    private func busy(_ on: Bool) {
+        if on && !tuningCard.showing { spinner.startAnimating() } else if !on { spinner.stopAnimating() }
     }
 
     func finish() {
         guard !finished else { return }
         finished = true
         let (t, d) = position()
-        onEvent(["type": "closed", "t": t, "d": d])
+        onEvent(["type": "closed", "t": ended && d > 0 ? d : t, "d": d])
         tickTimer?.invalidate()
         hideTimer?.invalidate()
         countdown?.invalidate()
+        zapTimer?.invalidate()
+        buffer?.stop(); buffer = nil
         tearDownRemoteControls()
         if UIScreen.main.brightness != startBrightness { UIScreen.main.brightness = startBrightness }   // the phone's own brightness back
         player.stop()
@@ -689,12 +1009,31 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         let now = player.time.intValue
         if now != lastTime && player.isPlaying { spinner.stopAnimating() }
         lastTime = now
+        // Radio / audio-only channels never show a picture: playing is enough.
+        if !firstPicture && player.isPlaying && now > 1500 { markFirstPicture() }
+        // A live stall (the picture froze while it should be playing): more buffering next time.
+        if item.live && firstPicture && feed != .catchup && shiftTarget == nil && !userPaused && player.state != .paused && uptime - lastTimeChange > 1.5 {
+            if !stalling { stalling = true; stalls += 1; Self.liveCaching += 300; NSLog("M3UTTFP stall: live caching now %d", Self.liveCaching) }
+        }
+        // The provider dropped and the recording has picked up again, but VLC is stuck on the gap (a restarted feed's
+        // clock): start the session again from the recording, at the same distance behind.
+        if item.live, feed == .buffered, firstPicture, !userPaused, uptime - lastTimeChange > 4, uptime - recoveredAt > 10,
+           let b = buffer, !b.window.direct, wall - b.window.edge < 2, let pos = livePosition() {
+            recoveredAt = uptime
+            NSLog("M3UTS picture stuck: restarting the session")
+            holdFrame()
+            startBuffered(target: shiftTarget == nil && isAtLive ? nil : pos)
+        }
+        updateLiveBar()
+        if item.live && item.nowEnd > 0 && wall * 1000 > item.nowEnd { refreshNow() }
         if !item.live && !scrubbing && d > 0 { slider.value = Float(t / d) }
         if !item.live && !scrubbing { elapsedLabel.text = clock(t); timeLabel.text = clock(d) }
         updateQuality()
-        playButton.setImage(UIImage(systemName: player.isPlaying ? "pause.fill" : "play.fill"), for: .normal)
+        setPlayIcon()
         ticks += 1
-        if !item.live && d > 0 && ticks % 5 == 0 { onEvent(["type": "progress", "t": t, "d": d]) }
+        // (Once it has ended VLC's clock reads ~0: report the full length, or the episode would lose its "watched".)
+        if !item.live && d > 0 && ticks % 5 == 0 { onEvent(["type": "progress", "t": ended ? d : t, "d": d]) }
+        checkCredits(t, d)
         if ticks % 5 == 0 { updateNowPlaying() }
         if let m = player.media {
             samples.append((ProcessInfo.processInfo.systemUptime, Int64(m.statistics.readBytes)))
@@ -715,12 +1054,39 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60) : String(format: "%d:%02d", s / 60, s % 60)
     }
 
+    private var loadStartedAt: TimeInterval = 0
+    private var firstPicture = false
+    private var stalling = false
+    private var recoveredAt: TimeInterval = 0
+    func mediaPlayerTimeChanged(_ aNotification: Notification) {
+        lastTimeChange = uptime
+        stalling = false
+        guard !firstPicture, player.videoSize.width > 0 else { return }
+        markFirstPicture()
+    }
+    /// The new picture is up: the tuning card and held frame go, and the live clock starts.
+    private func markFirstPicture() {
+        firstPicture = true
+        firstPictureAt = uptime
+        if feed == .buffered, let b = buffer {
+            sessionContent = b.sessionStart() ?? shiftTarget ?? wall
+            if shiftTarget == nil { liveLag = max(0, wall - (sessionContent ?? wall)) }
+        }
+        tuningCard.hide()
+        dropFreeze()
+        busy(false)
+        NSLog("M3UTTFP %.0f ms live=%d feed=%@ lag=%.1f url=%@", (uptime - loadStartedAt) * 1000, item.live ? 1 : 0, "\(feed)", liveLag, item.url.absoluteString)
+        updateLiveBar()
+    }
+
     func mediaPlayerStateChanged(_ aNotification: Notification) {
         switch player.state {
         case .opening, .buffering:
-            if !player.isPlaying { spinner.startAnimating() }
+            if !player.isPlaying { busy(true) }
         case .playing:
+            ended = false   // played again after the end
             applyAspect()
+            if isMini { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.layoutInParent() } }   // next episode on the mini card: fit its picture
             // Interlaced broadcasts (most live sport, many UK channels) get VLC's smooth 50fps deinterlacer; progressive
             // pictures are left alone (auto only acts on interlaced frames).
             if !deinterlaceSet { deinterlaceSet = true; player.setDeinterlace(.auto, withFilter: item.live ? "yadif2x" : "yadif") }
@@ -730,15 +1096,29 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         case .paused:
             updateNowPlaying()
         case .error:
+            // The local recording couldn't be played: once, straight from the provider instead.
+            if item.live && feed == .buffered && !firstPicture && !triedDirect {
+                buffer?.stop(); buffer = nil
+                return openDirectLive()
+            }
+            tuningCard.hide(); dropFreeze()
             spinner.stopAnimating()
             statusLabel.text = "This stream couldn't be played"
             showOverlay(keep: true)
             onEvent(["type": "error", "message": "This stream couldn't be played"])
         case .ended:
+            if item.live {   // the archive ran up to now (or a feed dropped): back to live
+                if feed == .catchup || feed == .buffered { goLive() }
+                return
+            }
             let (t, d) = position()
             onEvent(["type": "progress", "t": d > 0 ? d : t, "d": d])
             onEvent(["type": "ended"])
-            if !item.live && item.hasNext && item.listTitle == "Episodes" { startCountdown() } else { showOverlay(keep: true) }
+            ended = true
+            if hasNextEpisode {
+                // Ended with no card up (a short video, or "Watch credits"): a short card, then the next one.
+                if cardMode == .none { presentCard(seconds: creditsDismissed ? 5 : 10) }
+            } else { showOverlay(keep: true) }
         default:
             break
         }
@@ -749,8 +1129,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private func buildOverlay() {
         overlay.frame = view.bounds
         overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        gradient.colors = [UIColor.black.withAlphaComponent(0.7).cgColor, UIColor.clear.cgColor, UIColor.clear.cgColor, UIColor.black.withAlphaComponent(0.75).cgColor]
-        gradient.locations = [0, 0.3, 0.6, 1]
+        // The controls' own backing, so they read over any picture: the whole frame dims a little, and soft gradients
+        // darken the top (titles, buttons) and bottom (bar, tools) further.
+        overlay.backgroundColor = UIColor(white: 0, alpha: 0.25)
+        gradient.colors = [UIColor.black.withAlphaComponent(0.55).cgColor, UIColor.clear.cgColor, UIColor.clear.cgColor, UIColor.black.withAlphaComponent(0.65).cgColor]
+        gradient.locations = [0, 0.28, 0.62, 1]
         overlay.layer.addSublayer(gradient)
         view.addSubview(overlay)
 
@@ -760,12 +1143,20 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         spinner.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(spinner)
 
-        func style(_ b: UIButton, _ symbol: String, _ size: CGFloat = 22) {
+        func style(_ b: UIButton, _ symbol: String, _ size: CGFloat = 22, box: CGFloat? = nil) {
             b.setImage(UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: size, weight: .semibold)), for: .normal)
             b.tintColor = .white
             b.translatesAutoresizingMaskIntoConstraints = false
-            b.widthAnchor.constraint(equalToConstant: size + 24).isActive = true
-            b.heightAnchor.constraint(equalToConstant: size + 24).isActive = true
+            b.widthAnchor.constraint(equalToConstant: box ?? size + 24).isActive = true
+            b.heightAnchor.constraint(equalToConstant: box ?? size + 24).isActive = true
+        }
+        // Centre transport: each on a translucent dark disc (they sit over the picture), play / pause the largest.
+        func disc(_ b: UIButton, _ symbol: String, _ glyph: CGFloat, _ d: CGFloat) {
+            style(b, symbol, glyph, box: d)
+            b.backgroundColor = UIColor(white: 0, alpha: 0.38)
+            b.layer.cornerRadius = d / 2
+            b.layer.borderWidth = 1 / UIScreen.main.scale
+            b.layer.borderColor = UIColor(white: 1, alpha: 0.14).cgColor
         }
         style(closeButton, "xmark")
         style(rotateButton, UIImage(systemName: "rectangle.landscape.rotate") != nil ? "rectangle.landscape.rotate" : "rotate.right")
@@ -774,17 +1165,18 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         style(audioButton, "speaker.wave.2")
         style(subsButton, "captions.bubble")
         style(infoButton, "info.circle")
-        style(playButton, "pause.fill", 34)
-        style(backButton, "gobackward.30", 26)
-        style(forwardButton, "goforward.30", 26)
-        style(prevButton, "backward.end.fill", 24)
-        style(nextButton, "forward.end.fill", 24)
-        style(listButton, "list.bullet")
-        style(aspectButton, "aspectratio", 20)
+        disc(playButton, "pause.fill", Self.playGlyph, 64)
+        disc(backButton, "gobackward.30", Self.skipGlyph, 48)
+        disc(forwardButton, "goforward.30", Self.skipGlyph, 48)
+        disc(prevButton, "backward.end.fill", 17, 44)
+        disc(nextButton, "forward.end.fill", 17, 44)
+        // Tools row: compact 36 pt targets so it sits close over the bar (one group with it).
+        style(listButton, "list.bullet", 20, box: 36)
+        style(aspectButton, "aspectratio", 20, box: 36)
         aspectButton.setImage(Self.aspectIcon(), for: .normal)
         aspectButton.accessibilityLabel = "Picture size"
         aspectButton.addTarget(self, action: #selector(aspectTapped), for: .touchUpInside)
-        style(lockButton, "lock", 20)
+        style(lockButton, "lock", 20, box: 36)
         lockButton.accessibilityLabel = "Lock screen"
         style(unlockButton, "lock.fill", 22)
         unlockButton.accessibilityLabel = "Unlock"
@@ -849,17 +1241,38 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         let top = UIStackView(arrangedSubviews: [titles, gap, infoButton, audioButton, subsButton, rotateButton, closeButton])
         top.alignment = .center
         top.spacing = 4
-        let middle = UIStackView(arrangedSubviews: [prevButton, backButton, playButton, forwardButton, nextButton])
+        middle.addArrangedSubview(prevButton); middle.addArrangedSubview(backButton); middle.addArrangedSubview(playButton)
+        middle.addArrangedSubview(forwardButton); middle.addArrangedSubview(nextButton)
         middle.alignment = .center
-        middle.spacing = 22
+        middle.spacing = 26
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bottom = UIStackView(arrangedSubviews: [liveBadge, elapsedLabel, slider, timeLabel, spacer])
+        // Live with a recording: [Start over] [−4:12] ———●——— [● LIVE]. The live edge is the bar's right end, so "LIVE"
+        // sits there; the time behind sits left, where the bar's own time does for films.
+        styleCapsule(startOverButton, symbol: "arrow.counterclockwise", title: "Start over")
+        startOverButton.accessibilityLabel = "Start this programme over"
+        startOverButton.addTarget(self, action: #selector(startOverTapped), for: .touchUpInside)
+        liveButton.contentEdgeInsets = UIEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
+        liveButton.layer.cornerRadius = 14
+        liveButton.layer.cornerCurve = .continuous
+        liveButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        liveButton.addTarget(self, action: #selector(liveTapped), for: .touchUpInside)
+        for b in [startOverButton, liveButton] {
+            b.setContentHuggingPriority(.required, for: .horizontal)
+            b.setContentCompressionResistancePriority(.required, for: .horizontal)
+            b.isHidden = true
+        }
+        styleLiveButton(atLive: true)
+        // A slim bar with a small thumb that grows under your finger.
+        slider.setThumbImage(Self.thumb(14), for: .normal)
+        slider.setThumbImage(Self.thumb(22), for: .highlighted)
+        let bottom = UIStackView(arrangedSubviews: [liveBadge, startOverButton, elapsedLabel, slider, timeLabel, liveButton, spacer])
         bottom.alignment = .center
         bottom.spacing = 12
         // The slider takes all the spare width (it collapsed to its thumb before); labels keep their size.
         slider.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
         liveBadge.setContentHuggingPriority(.required, for: .horizontal)
         slider.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        bottom.heightAnchor.constraint(greaterThanOrEqualToConstant: 34).isActive = true   // same height with or without the bar
         for v in [top, middle, bottom, statusLabel] as [UIView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             overlay.addSubview(v)
@@ -867,10 +1280,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         // Tools row just above the bar, like VLC-style players: picture size left, lock centre, list right.
         for b in [aspectButton, lockButton, listButton] { overlay.addSubview(b) }
         NSLayoutConstraint.activate([
-            aspectButton.leadingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.leadingAnchor, constant: 6),
+            // (glyph edges on the bar's 16 pt margins)
+            aspectButton.leadingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.leadingAnchor, constant: 8),
             lockButton.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
-            listButton.trailingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.trailingAnchor, constant: -6),
-        ] + [aspectButton, lockButton, listButton].map { $0.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: 2) })
+            listButton.trailingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.trailingAnchor, constant: -8),
+        ] + [aspectButton, lockButton, listButton].map { $0.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: 4) })
         unlockButton.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(unlockButton)
 
@@ -911,38 +1325,24 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         syncPanel.translatesAutoresizingMaskIntoConstraints = false
         overlay.addSubview(syncPanel)
 
-        nextPanel.backgroundColor = UIColor(white: 0.1, alpha: 0.92)
-        nextPanel.layer.cornerRadius = 14
-        nextPanel.isHidden = true
-        nextPanel.translatesAutoresizingMaskIntoConstraints = false
-        nextCount.font = .systemFont(ofSize: 13, weight: .medium)
-        nextCount.textColor = UIColor.white.withAlphaComponent(0.7)
-        nextName.font = .systemFont(ofSize: 16, weight: .semibold)
-        nextName.textColor = .white
-        let playNow = UIButton(type: .system)
-        playNow.setTitle("Play now", for: .normal)
-        playNow.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
-        playNow.setTitleColor(.black, for: .normal)
-        playNow.backgroundColor = .white
-        playNow.layer.cornerRadius = 8
-        playNow.heightAnchor.constraint(equalToConstant: 38).isActive = true
-        playNow.addTarget(self, action: #selector(playNextNow), for: .touchUpInside)
-        let cancel = UIButton(type: .system)
-        cancel.setTitle("Cancel", for: .normal)
-        cancel.titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
-        cancel.tintColor = .white
-        cancel.heightAnchor.constraint(equalToConstant: 38).isActive = true
-        cancel.addTarget(self, action: #selector(cancelNext), for: .touchUpInside)
-        let buttons = UIStackView(arrangedSubviews: [playNow, cancel])
-        buttons.distribution = .fillEqually
-        buttons.spacing = 8
-        let nextStack = UIStackView(arrangedSubviews: [nextCount, nextName, buttons])
-        nextStack.axis = .vertical
-        nextStack.spacing = 6
-        nextStack.setCustomSpacing(12, after: nextName)
-        nextStack.translatesAutoresizingMaskIntoConstraints = false
-        nextPanel.addSubview(nextStack)
-        view.addSubview(nextPanel)
+        nextCard.translatesAutoresizingMaskIntoConstraints = false
+        nextCard.alpha = 0
+        nextCard.isHidden = true
+        nextCard.onPrimary = { [weak self] in self?.cardPrimary() }
+        nextCard.onSecondary = { [weak self] in self?.cardSecondary() }
+        view.addSubview(nextCard)
+        // Bottom right when sideways; along the bottom, clear of the controls bar, when upright.
+        let sg = view.safeAreaLayoutGuide
+        cardConstraints.landscape = [
+            nextCard.trailingAnchor.constraint(equalTo: sg.trailingAnchor, constant: -16),
+            nextCard.bottomAnchor.constraint(equalTo: sg.bottomAnchor, constant: -16),
+            nextCard.widthAnchor.constraint(equalToConstant: 360),
+        ]
+        cardConstraints.portrait = [
+            nextCard.leadingAnchor.constraint(equalTo: sg.leadingAnchor, constant: 12),
+            nextCard.trailingAnchor.constraint(equalTo: sg.trailingAnchor, constant: -12),
+            nextCard.bottomAnchor.constraint(equalTo: sg.bottomAnchor, constant: -104),
+        ]
         NSLayoutConstraint.activate([
             hud.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             hud.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -90),
@@ -950,13 +1350,6 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             hud.widthAnchor.constraint(greaterThanOrEqualToConstant: 150),
             syncPanel.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
             syncPanel.bottomAnchor.constraint(equalTo: lockButton.topAnchor, constant: -10),
-            nextPanel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            nextPanel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -110),
-            nextPanel.widthAnchor.constraint(equalToConstant: 260),
-            nextStack.topAnchor.constraint(equalTo: nextPanel.topAnchor, constant: 14),
-            nextStack.bottomAnchor.constraint(equalTo: nextPanel.bottomAnchor, constant: -14),
-            nextStack.leadingAnchor.constraint(equalTo: nextPanel.leadingAnchor, constant: 14),
-            nextStack.trailingAnchor.constraint(equalTo: nextPanel.trailingAnchor, constant: -14),
         ])
         let g = overlay.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
@@ -967,7 +1360,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             middle.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
             bottom.leadingAnchor.constraint(equalTo: g.leadingAnchor, constant: 16),
             bottom.trailingAnchor.constraint(equalTo: g.trailingAnchor, constant: -16),
-            bottom.bottomAnchor.constraint(equalTo: g.bottomAnchor, constant: -12),
+            bottom.bottomAnchor.constraint(equalTo: g.bottomAnchor, constant: -8),
 
             statusLabel.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
             statusLabel.topAnchor.constraint(equalTo: middle.bottomAnchor, constant: 18),
@@ -981,11 +1374,13 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private func showOverlay(keep: Bool = false) {
         if locked { return }
         hideTimer?.invalidate()
+        if tuningCard.showing { tuningCard.hide(animated: true); if !firstPicture { spinner.startAnimating() } }   // the controls show the name now
         overlay.isUserInteractionEnabled = true
         UIView.animate(withDuration: 0.2) { self.overlay.alpha = 1 }
+        updateCardVisibility()
         if !keep {
             hideTimer = Timer.scheduledTimer(withTimeInterval: item.headers["X-Test-Mute"] != nil ? 30 : 4, repeats: false) { [weak self] _ in
-                guard let self = self, self.player.isPlaying, !self.scrubbing else { return }
+                guard let self = self, self.isPlayingNow, !self.scrubbing else { return }
                 self.hideOverlay()
             }
         }
@@ -995,9 +1390,10 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         hideTimer?.invalidate()
         overlay.isUserInteractionEnabled = false   // hidden controls can't be pressed by accident
         UIView.animate(withDuration: 0.25) { self.overlay.alpha = 0 }
+        updateCardVisibility()
     }
 
-    private var lastTap: (time: TimeInterval, x: CGFloat) = (0, 0)
+    private var lastTap: (time: TimeInterval, x: CGFloat, controls: Bool) = (0, 0, false)
     private func tapped(at point: CGPoint) {
         #if DEBUG
         NSLog("M3UDBG tap alpha=%.2f", overlay.alpha)
@@ -1005,12 +1401,23 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         let now = ProcessInfo.processInfo.systemUptime, x = point.x, w = view.bounds.width
         let side = x < w / 3 ? -1 : x > w * 2 / 3 ? 1 : 0
         let quickSecond = now - lastTap.time < 0.3 && abs(x - lastTap.x) < 80
-        lastTap = (now, x)
-        if quickSecond && side != 0 && !item.live { return skip(side) }
+        // Live: only while the controls were up at the first tap (the screen's thirds are for swipes otherwise).
+        let liveSkip = item.live && lastTap.controls && liveWindow() != nil
+        lastTap = (now, x, overlay.alpha > 0.5)
+        if quickSecond && side != 0 && (!item.live || liveSkip) { return skip(side) }
         if overlay.alpha > 0.5 { hideOverlay() } else { showOverlay() }
     }
 
     private func skip(_ dir: Int) {
+        if item.live {
+            guard let pos = livePosition() else { return }
+            if dir > 0 && isAtLive { return showOverlay() }
+            seekLive(to: pos + Double(dir) * 10)
+            statusLabel.text = dir < 0 ? "« 10s" : "10s »"
+            showOverlay()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in if self?.statusLabel.text?.contains("10s") == true { self?.statusLabel.text = "" } }
+            return
+        }
         if dir < 0 { player.jumpBackward(10); statusLabel.text = "« 10s" } else { player.jumpForward(10); statusLabel.text = "10s »" }
         showOverlay()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in if self?.statusLabel.text?.contains("10s") == true { self?.statusLabel.text = "" } }
@@ -1019,8 +1426,316 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     private func zap(next: Bool) {
         guard item.live else { return }
-        if next, item.hasNext { onEvent(["type": "step", "dir": 1]) }
-        if !next, item.hasPrev { onEvent(["type": "step", "dir": -1]) }
+        let to = (zapTarget ?? item.current) + (next ? 1 : -1)
+        if item.list.indices.contains(to - item.listStart) { return zapTo(index: to) }
+        // (No list to look ahead in: let the app step.)
+        if zapTarget == nil, next ? item.hasNext : item.hasPrev { onEvent(["type": "step", "dir": next ? 1 : -1]) }
+    }
+
+    /// Channel change, as it should feel: that channel's card at once (from the list the player already has), the old
+    /// one silenced, and the app asked for the new stream. Quick swipes in a row only open the one you stop on.
+    private func zapTo(index to: Int) {
+        let row = to - item.listStart
+        guard item.list.indices.contains(row) else { return }
+        let r = item.list[row]
+        let logo = item.listLogo.indices.contains(row) ? item.listLogo[row] : ""
+        let num = item.listNum.indices.contains(row) ? item.listNum[row] : 0
+        if overlay.alpha > 0.5 && guide == nil {
+            titleLabel.text = r.title; subtitleLabel.text = r.detail
+            holdFrame(); busy(true); showOverlay()
+        } else {
+            showTuning(name: r.title, number: num, logo: logo, now: r.detail)
+        }
+        player.pause()
+        let quick = uptime - lastZap < 0.6
+        lastZap = uptime
+        zapTarget = to
+        zapTimer?.invalidate()
+        let fire = { [weak self] in
+            self?.zapTimer = nil
+            self?.onEvent(["type": "jump", "index": to])
+        }
+        if quick { zapTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { _ in fire() } } else { fire() }
+    }
+
+    private func showTuning(name: String, number: Int, logo: String, now: String) {
+        holdFrame()
+        spinner.stopAnimating()
+        tuningCard.show(name: name, number: number, logo: logo, now: now)
+    }
+    /// Keeps the current picture on screen (dimmed by whatever is over it) until the next one arrives.
+    private func holdFrame() {
+        guard freeze == nil, !isMini, firstPicture || player.isPlaying else { return }
+        guard let snap = videoView.snapshotView(afterScreenUpdates: false) else { return }
+        snap.frame = videoView.frame
+        snap.transform = videoView.transform
+        snap.isUserInteractionEnabled = false
+        view.insertSubview(snap, aboveSubview: videoView)
+        freeze = snap
+    }
+    private func dropFreeze() {
+        guard let f = freeze else { return }
+        freeze = nil
+        UIView.animate(withDuration: 0.2, animations: { f.alpha = 0 }) { _ in f.removeFromSuperview() }
+    }
+
+    // MARK: live timeline
+    /// The stretch of this channel you can move about in (wall-clock seconds): from the oldest recorded moment (or the
+    /// programme's start, when the provider has catch-up) to live.
+    private func liveWindow() -> (start: Double, end: Double)? {
+        guard item.live else { return nil }
+        let now = wall
+        var start: Double?
+        if feed == .buffered, let b = buffer { let w = b.window; if !w.direct && w.start > 0 { start = w.start } }
+        // A channel still starting that will be recorded: the bar is there from the first moment (no jump when it fills).
+        if start == nil && expectBuffer && (buffer.map { !$0.window.direct } ?? true) { start = now - liveLag }
+        if feed == .catchup { start = catchupStart }
+        if catchupOK, item.nowStart > 0 {
+            let ps = item.nowStart / 1000
+            if ps > now - Double(item.catchupDays) * 86400 { start = min(start ?? ps, ps) }
+        }
+        guard let st = start else { return nil }
+        return (st, max(st, now - liveLag))
+    }
+    private var catchupOK: Bool { item.catchupDays > 0 && askJS != nil }
+    /// The moment of TV on screen now (wall-clock seconds).
+    private func livePosition() -> Double? {
+        switch feed {
+        case .direct: return wall - liveLag
+        case .catchup: return catchupStart + Double(max(0, player.time.intValue)) / 1000
+        case .buffered:
+            guard let start = sessionContent ?? shiftTarget else { return wall - liveLag }
+            guard firstPicture else { return start }
+            let played = (uptime - firstPictureAt) - pausedTotal - (pausedAt.map { uptime - $0 } ?? 0)
+            return start + max(0, played)
+        }
+    }
+    private var isAtLive: Bool {
+        guard feed != .catchup, let w = liveWindow(), let p = livePosition() else { return feed != .catchup }
+        return w.end - p < 8
+    }
+
+    private func setShown(_ v: UIView, _ on: Bool) { if v.isHidden == on { v.isHidden = !on } }
+    /// Once a second (and after every change): the bar, the time behind, LIVE, Start over.
+    private func updateLiveBar() {
+        guard item.live else { return }
+        let w = liveWindow(), pos = livePosition()
+        let shiftable = w != nil && pos != nil
+        setShown(liveBadge, !shiftable)
+        setShown(spacer, !shiftable)
+        setShown(slider, shiftable)
+        setShown(liveButton, shiftable)
+        setShown(backButton, shiftable)
+        setShown(forwardButton, shiftable)
+        guard let win = w, let p0 = pos else { setShown(elapsedLabel, false); setShown(startOverButton, false); return }
+        let span = max(1, win.end - win.start)
+        let p = min(max(p0, win.start), win.end)
+        let behind = win.end - p
+        let atLive = feed != .catchup && behind < 8
+        #if DEBUG
+        if ticks % 5 == 0 { NSLog("M3ULIVE feed=%@ win=%.1f..%.1f pos=%.1f behind=%.1f lag=%.1f paused=%.1f vlc=%d", "\(feed)", win.start - wall, win.end - wall, p0 - wall, behind, liveLag, pausedTotal, player.time.intValue) }
+        #endif
+        if !scrubbing {
+            slider.value = Float((p - win.start) / span)
+            elapsedLabel.text = "−" + clock(behind)
+            setShown(elapsedLabel, !atLive)
+        }
+        styleLiveButton(atLive: atLive)
+        forwardButton.isEnabled = !atLive
+        forwardButton.tintColor = atLive ? Self.offTint : .white
+        let ps = item.nowStart / 1000
+        let canStartOver = item.nowStart > 0 && item.nowEnd / 1000 > wall && ps >= win.start - 5 && p > ps + 30
+        setShown(startOverButton, canStartOver)
+    }
+
+    private var liveStyled: Bool?
+    private func styleLiveButton(atLive: Bool) {
+        guard liveStyled != atLive else { return }
+        liveStyled = atLive
+        // At live: a quiet filled capsule (red dot). Behind: the same capsule outlined, grey dot: a button back to live.
+        let dot = atLive ? UIColor(red: 1, green: 0.27, blue: 0.3, alpha: 1) : UIColor(white: 1, alpha: 0.45)
+        let t = NSMutableAttributedString(string: "● ", attributes: [.foregroundColor: dot, .font: UIFont.systemFont(ofSize: 10, weight: .bold)])
+        t.append(NSAttributedString(string: "LIVE", attributes: [.foregroundColor: UIColor.white, .font: UIFont.systemFont(ofSize: 12, weight: .semibold), .kern: 0.8]))
+        liveButton.setAttributedTitle(t, for: .normal)
+        liveButton.layer.borderWidth = 1
+        liveButton.layer.borderColor = UIColor(white: 1, alpha: atLive ? 0 : 0.45).cgColor
+        liveButton.backgroundColor = UIColor(white: 1, alpha: atLive ? 0.14 : 0.08)
+        liveButton.isUserInteractionEnabled = !atLive
+        liveButton.accessibilityLabel = atLive ? "Live" : "Go to live"
+    }
+    private func styleCapsule(_ b: UIButton, symbol: String, title: String) {
+        b.setImage(UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)), for: .normal)
+        b.setTitle(" " + title, for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+        b.tintColor = .white
+        b.setTitleColor(.white, for: .normal)
+        b.setTitleColor(UIColor(white: 1, alpha: 0.6), for: .highlighted)
+        b.backgroundColor = UIColor(white: 1, alpha: 0.14)
+        b.contentEdgeInsets = UIEdgeInsets(top: 0, left: 10, bottom: 0, right: 12)
+        b.layer.cornerRadius = 14
+        b.layer.cornerCurve = .continuous
+        b.heightAnchor.constraint(equalToConstant: 28).isActive = true
+    }
+    private static func thumb(_ d: CGFloat) -> UIImage {
+        let pad: CGFloat = 4
+        return UIGraphicsImageRenderer(size: CGSize(width: d + pad * 2, height: d + pad * 2)).image { ctx in
+            ctx.cgContext.setShadow(offset: CGSize(width: 0, height: 1), blur: 3, color: UIColor(white: 0, alpha: 0.4).cgColor)
+            UIColor.white.setFill()
+            UIBezierPath(ovalIn: CGRect(x: pad, y: pad, width: d, height: d)).fill()
+        }
+    }
+
+    @objc private func liveTapped() { goLive(); showOverlay() }
+    @objc private func startOverTapped() { seekLive(to: item.nowStart / 1000); showOverlay() }
+
+    /// Back to live: a new live session of the recording, or (from catch-up) the channel itself again.
+    private func goLive() {
+        guard item.live else { return }
+        holdFrame()
+        if feed == .buffered, buffer != nil { startBuffered(target: nil) }
+        else { buffer?.stop(); buffer = nil; feed = .direct; liveLag = 0; startLive() }
+        updateLiveBar()
+    }
+
+    /// Moves to a moment of this channel: within the recording, else from the provider's archive.
+    private func seekLive(to t: Double) {
+        guard let w = liveWindow() else { return }
+        if t >= w.end - 5 { if !isAtLive || feed == .catchup { goLive() }; return }
+        if feed == .buffered, let b = buffer, t >= b.window.start - 1 {
+            holdFrame()
+            startBuffered(target: max(t, b.window.start))
+        } else if feed == .catchup, t >= catchupStart, player.isSeekable, (player.media?.length.intValue ?? 0) > 0 {
+            player.time = VLCTime(int: Int32((t - catchupStart) * 1000))
+        } else if catchupOK, t > wall - Double(item.catchupDays) * 86400 {
+            startCatchup(at: t)
+        } else if feed == .buffered, let b = buffer {
+            holdFrame()
+            startBuffered(target: b.window.start)
+        }
+        updateLiveBar()
+    }
+
+    /// The provider's archive from `t` (to the end of the programme it falls in). The live recording stops: one connection.
+    private func startCatchup(at t: Double) {
+        let from = (t / 60).rounded(.down) * 60
+        let inNow = item.nowStart > 0 && from >= item.nowStart / 1000 - 60 && item.nowEnd > 0
+        let to = inNow ? item.nowEnd / 1000 : from + 3 * 3600
+        holdFrame(); busy(true)
+        askJS?("window.__playerCatchup && window.__playerCatchup(\(Int64(from * 1000)), \(Int64(to * 1000)))") { [weak self] r in
+            guard let self = self, !self.finished else { return }
+            guard let s = r as? String, !s.isEmpty, let url = URL(string: s) else {
+                self.busy(false); self.dropFreeze()
+                self.statusLabel.text = "Catch-up isn't available for this"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.statusLabel.text = "" }
+                return
+            }
+            self.buffer?.stop(); self.buffer = nil
+            self.feed = .catchup
+            self.catchupStart = from
+            self.openMedia(url, caching: 1500)
+            self.updateLiveBar()
+        }
+    }
+
+    /// Pause / play. A paused recording keeps recording; play carries on from where it stopped, behind live.
+    private func setPaused(_ p: Bool) {
+        if p {
+            player.pause()
+            userPaused = true
+            if feed == .buffered, pausedAt == nil { buffer?.pauseSession(); pausedAt = uptime }
+        } else {
+            if feed == .buffered, let a = pausedAt { buffer?.resumeSession(); pausedTotal += uptime - a; pausedAt = nil }
+            userPaused = false
+            player.play()
+        }
+        updateLiveBar()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.updateNowPlaying() }
+    }
+
+    // MARK: mini guide
+    private func guideData() -> GuideData {
+        let rows = item.list.indices.map { i in
+            GuideRow(name: item.list[i].title, number: item.listNum.indices.contains(i) ? item.listNum[i] : 0,
+                     logo: item.listLogo.indices.contains(i) ? item.listLogo[i] : "", now: item.list[i].detail,
+                     start: item.listNowStart.indices.contains(i) ? item.listNowStart[i] : 0,
+                     end: item.listNowEnd.indices.contains(i) ? item.listNowEnd[i] : 0)
+        }
+        return GuideData(rows: rows, current: item.current - item.listStart, group: item.group, nowTitle: item.nowTitle, nowStart: item.nowStart,
+                         nowEnd: item.nowEnd, nowDesc: item.nowDesc, nextTitle: item.nextTitle, nextStart: item.nextStart)
+    }
+    /// Fresh rows from the app (what's on changes while you watch): { list, listStart, current, group, nowT, nowA, … }.
+    private func applyGuideJSON(_ r: Any?) -> Bool {
+        guard let s = r as? String, let d = s.data(using: .utf8), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return false }
+        let rows = (o["list"] as? [[String: Any]]) ?? []
+        if !rows.isEmpty, let cur = o["current"] as? Int, cur == item.current {
+            item.list = rows.map { (($0["t"] as? String) ?? "", ($0["s"] as? String) ?? "") }
+            item.listStart = (o["listStart"] as? Int) ?? 0
+            item.listLogo = rows.map { ($0["l"] as? String) ?? "" }
+            item.listNum = rows.map { ($0["n"] as? NSNumber)?.intValue ?? 0 }
+            item.listNowStart = rows.map { ($0["pa"] as? NSNumber)?.doubleValue ?? 0 }
+            item.listNowEnd = rows.map { ($0["pb"] as? NSNumber)?.doubleValue ?? 0 }
+        }
+        if let t = o["nowT"] as? String {
+            item.nowTitle = t
+            item.nowStart = (o["nowA"] as? NSNumber)?.doubleValue ?? 0
+            item.nowEnd = (o["nowB"] as? NSNumber)?.doubleValue ?? 0
+            item.nextTitle = (o["nextT"] as? String) ?? ""
+            item.nextStart = (o["nextA"] as? NSNumber)?.doubleValue ?? 0
+            if !t.isEmpty { subtitleLabel.text = "\(t) · ends \(PlayerStyle.clock(item.nowEnd))" }
+        }
+        return true
+    }
+    private var nowAskedAt: TimeInterval = 0
+    /// The programme ended while you watched: what's on now (for the bar, Start over and the guide).
+    private func refreshNow() {
+        guard askJS != nil, uptime - nowAskedAt > 60 else { return }
+        nowAskedAt = uptime
+        askJS?("window.__playerGuide && window.__playerGuide()") { [weak self] r in _ = self?.applyGuideJSON(r); self?.updateLiveBar() }
+    }
+
+    private func openGuide() {
+        guard item.live, guide == nil, !isMini, !locked, !item.list.isEmpty else { return }
+        let g = GuidePanel(data: guideData())
+        g.frame = view.bounds
+        g.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        g.onClose = { [weak self] in self?.closeGuide() }
+        g.onPick = { [weak self] row in
+            guard let self = self else { return }
+            let to = self.item.listStart + row
+            self.closeGuide()
+            self.zapTo(index: to)
+        }
+        hideOverlay()
+        view.addSubview(g)
+        guide = g
+        placeVideoForGuide(animated: true)
+        g.present()
+        askJS?("window.__playerGuide && window.__playerGuide()") { [weak self] r in
+            guard let self = self, let g = self.guide, self.applyGuideJSON(r) else { return }
+            g.update(self.guideData())
+        }
+    }
+    private func closeGuide() {
+        guard let g = guide else { return }
+        guide = nil
+        g.dismiss { g.removeFromSuperview() }
+        UIView.animate(withDuration: 0.36, delay: 0, usingSpringWithDamping: 0.95, initialSpringVelocity: 0) {
+            self.videoView.transform = .identity
+            self.freeze?.transform = .identity
+        }
+    }
+    /// Upright, the picture moves to the top so the guide sheet sits under it (nothing covered); sideways it stays put.
+    private func placeVideoForGuide(animated: Bool) {
+        guard let g = guide else { return }
+        var t = CGAffineTransform.identity
+        if view.bounds.height > view.bounds.width {
+            let band = pictureBand(view.bounds.size)
+            let dy = view.safeAreaInsets.top + 6 - band.minY
+            t = CGAffineTransform(translationX: 0, y: dy)
+            g.videoBottom = band.maxY + dy + 10
+        }
+        let apply = { self.videoView.transform = t; self.freeze?.transform = t; g.setNeedsLayout(); g.layoutIfNeeded() }
+        if animated { UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.92, initialSpringVelocity: 0.2, options: [], animations: apply) } else { apply() }
     }
 
     // MARK: mini player
@@ -1128,9 +1843,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     func minimize() {
         guard let host = parent, !isMini, !locked else { springBack(); return }
+        closeGuide()
         view.autoresizingMask = []   // sized by layoutInParent while it is the card (never by autoresizing while scaled)
         isMini = true
         hideOverlay(); hud.alpha = 0; volumePill.alpha = 0
+        updateCardVisibility()
         // Watching sideways: the app comes back upright with the card in its corner (the card follows the turn).
         landscapeBeforeMini = forcedLandscape
         if forcedLandscape { setForcedLandscape(false) }
@@ -1164,6 +1881,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         }
         hostAppearanceChanged()
         showOverlay()
+        updateCardVisibility()
     }
 
     private func springBack() {
@@ -1288,30 +2006,115 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     @objc private func syncDone() { syncPanel.isHidden = true; showOverlay() }
 
     // MARK: next episode
-    private func startCountdown() {
-        let i = item.current - item.listStart + 1
-        nextName.text = item.list.indices.contains(i) ? item.list[i].title : "Next episode"
-        countdownLeft = 10
-        nextCount.text = "Next episode in 10"
-        nextPanel.isHidden = false
-        countdown?.invalidate()
-        countdown = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.countdownLeft -= 1
-            self.nextCount.text = "Next episode in \(self.countdownLeft)"
-            if self.countdownLeft <= 0 { self.playNextNow() }
+    private var hasNextEpisode: Bool { !item.live && item.hasNext && item.listTitle == "Episodes" }
+    private var nextRow: Int { item.current - item.listStart + 1 }
+
+    /// Every second: the card shows once the credits start (last 30 s; short videos only at the end) and goes
+    /// again when you seek back out of them.
+    private func checkCredits(_ t: Double, _ d: Double) {
+        guard hasNextEpisode, !ended, !scrubbing, d > 0, t > 0 else { return }
+        let window: Double = d >= 180 ? 30 : 0
+        let inCredits = window > 0 && d - t <= window
+        if inCredits {
+            if cardMode == .none && !creditsDismissed { presentCard(seconds: 10) }
+        } else {
+            creditsDismissed = false
+            if cardMode != .none { hideCard(animated: true) }
         }
     }
-    @objc private func playNextNow() { countdown?.invalidate(); nextPanel.isHidden = true; onEvent(["type": "step", "dir": 1]) }
-    @objc private func cancelNext() { countdown?.invalidate(); nextPanel.isHidden = true; showOverlay(keep: true) }
+
+    private func presentCard(seconds: Double) {
+        #if DEBUG
+        NSLog("M3UDBG card present %.0f mini=%d chain=%d", seconds, isMini ? 1 : 0, autoChain)
+        #endif
+        let i = nextRow
+        let card = item.listCard.indices.contains(i) && !item.listCard[i].isEmpty ? item.listCard[i]
+            : item.list.indices.contains(i) ? item.list[i].title : "Next episode"
+        let art = item.listArt.indices.contains(i) ? item.listArt[i] : ""
+        if autoChain >= stillAfter {
+            // Three in a row with nobody touching the phone: ask before playing more.
+            cardMode = .still
+            let show = item.show.isEmpty ? "" : " " + item.show
+            nextCard.configure(kicker: "Up next: \(card)", title: "Still watching\(show)?", art: art, primary: "Continue", secondary: "Stop", countdown: false)
+        } else {
+            cardMode = .next
+            nextCard.configure(kicker: "Next episode", title: card, art: art, primary: "Play next", secondary: ended ? "Close" : "Watch credits", countdown: true)
+            countdownTotal = seconds
+            countdownLeft = seconds
+            nextCard.progress = 0
+            countdown?.invalidate()
+            let step = 0.05
+            countdown = Timer.scheduledTimer(withTimeInterval: step, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                // Runs while the episode plays (or has ended) and the card can be seen or the player is the mini card;
+                // a pause, or the controls covering the card, hold it.
+                guard self.ended || self.player.isPlaying, self.isMini || self.locked || self.nextCard.alpha > 0.5 else { return }
+                self.countdownLeft -= step
+                self.nextCard.progress = CGFloat(1 - max(0, self.countdownLeft) / self.countdownTotal)
+                if self.countdownLeft <= 0 { self.advance(auto: true) }
+            }
+        }
+        nextCard.isHidden = false
+        nextCard.transform = CGAffineTransform(translationX: 0, y: 18)
+        // Sideways the controls would cover it: tuck them away (a tap brings them back, and the card steps aside).
+        if view.bounds.width > view.bounds.height && overlay.alpha > 0.5 && !scrubbing && !isMini { hideOverlay() }
+        updateCardVisibility()
+    }
+
+    /// The card is hidden while the player is the mini card, and sideways while the controls are up (they'd overlap).
+    private func updateCardVisibility() {
+        guard cardMode != .none else { return }
+        let wide = view.bounds.width > view.bounds.height
+        let show = !isMini && !locked && !(wide && overlay.alpha > 0.5 && overlay.isUserInteractionEnabled)
+        if show { view.bringSubviewToFront(nextCard) }
+        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+            self.nextCard.alpha = show ? 1 : 0
+            self.nextCard.transform = show ? .identity : CGAffineTransform(translationX: 0, y: 18)
+        }
+    }
+
+    private func hideCard(animated: Bool) {
+        countdown?.invalidate()
+        countdown = nil
+        cardMode = .none
+        let done = { self.nextCard.isHidden = self.cardMode == .none }
+        if !animated { nextCard.alpha = 0; done(); return }
+        UIView.animate(withDuration: 0.25, animations: {
+            self.nextCard.alpha = 0
+            self.nextCard.transform = CGAffineTransform(translationX: 0, y: 18)
+        }) { _ in done() }
+    }
+
+    private func cardPrimary() {
+        autoChain = 0
+        advance(auto: false)
+    }
+    private func cardSecondary() {
+        if cardMode == .still { hideCard(animated: true); finish(); return }   // Stop
+        // Watch credits: carry on watching; if it then ends, a short card takes you on.
+        hideCard(animated: true)
+        creditsDismissed = true
+        if ended { showOverlay(keep: true) }
+    }
+    /// On to the next episode, the one finishing counted as watched.
+    private func advance(auto: Bool) {
+        hideCard(animated: true)
+        let (t, d) = position()
+        if d > 0 { onEvent(["type": "progress", "t": max(t, d), "d": d]) }
+        autoChain = auto ? autoChain + 1 : 0
+        selfStepPending = true
+        onEvent(["type": "step", "dir": 1])
+    }
 
     // MARK: lock screen
     private func setUpRemoteControls() {
         let c = MPRemoteCommandCenter.shared()
-        func on(_ cmd: MPRemoteCommand, _ f: @escaping (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) { remoteTargets.append((cmd, cmd.addTarget(handler: f))) }
-        on(c.playCommand) { [weak self] _ in self?.player.play(); return .success }
-        on(c.pauseCommand) { [weak self] _ in self?.player.pause(); return .success }
-        on(c.togglePlayPauseCommand) { [weak self] _ in self?.playPause(); return .success }
+        func on(_ cmd: MPRemoteCommand, _ f: @escaping (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) {
+            remoteTargets.append((cmd, cmd.addTarget { [weak self] e in self?.autoChain = 0; return f(e) }))   // a press = someone's there
+        }
+        on(c.playCommand) { [weak self] _ in self?.setPaused(false); return .success }
+        on(c.pauseCommand) { [weak self] _ in self?.setPaused(true); return .success }
+        on(c.togglePlayPauseCommand) { [weak self] _ in self?.playPause(); return .success }   // (uses isPlayingNow)
         on(c.nextTrackCommand) { [weak self] _ in self?.onEvent(["type": "step", "dir": 1]); return .success }
         on(c.previousTrackCommand) { [weak self] _ in self?.onEvent(["type": "step", "dir": -1]); return .success }
         c.skipForwardCommand.preferredIntervals = [30]
@@ -1333,7 +2136,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         guard !finished else { return }
         let (t, d) = position()
         var info: [String: Any] = [MPMediaItemPropertyTitle: item.title, MPMediaItemPropertyArtist: item.subtitle,
-                                   MPNowPlayingInfoPropertyPlaybackRate: player.isPlaying ? 1.0 : 0.0, MPNowPlayingInfoPropertyIsLiveStream: item.live]
+                                   MPNowPlayingInfoPropertyPlaybackRate: isPlayingNow ? 1.0 : 0.0, MPNowPlayingInfoPropertyIsLiveStream: item.live]
         if !item.live && d > 0 { info[MPMediaItemPropertyPlaybackDuration] = d; info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = t }
         if let a = artwork { info[MPMediaItemPropertyArtwork] = a }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
@@ -1423,6 +2226,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     /// Episodes (or channels) list: pick one to play it here.
     @objc private func showList() {
+        if item.live && !item.list.isEmpty { return openGuide() }
         let picker = EpisodeListController(title: item.listTitle, rows: item.list, current: item.current - item.listStart) { [weak self] row in
             guard let self = self else { return }
             self.onEvent(["type": "jump", "index": self.item.listStart + row])
@@ -1433,22 +2237,33 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         present(nav, animated: true)
         showOverlay(keep: true)
     }
-    @objc private func prevTapped() { onEvent(["type": "step", "dir": -1]); showOverlay() }
-    @objc private func nextTapped() { onEvent(["type": "step", "dir": 1]); showOverlay() }
+    @objc private func prevTapped() { if item.live { zap(next: false) } else { onEvent(["type": "step", "dir": -1]) }; showOverlay() }
+    @objc private func nextTapped() { if item.live { zap(next: true) } else { onEvent(["type": "step", "dir": 1]) }; showOverlay() }
 
     @objc private func playPause() {
         #if DEBUG
         NSLog("M3UDBG playPause playing=%d", player.isPlaying ? 1 : 0)
         #endif
-        if player.isPlaying { player.pause(); showOverlay(keep: true) } else { player.play(); showOverlay() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.updateNowPlaying() }
+        if isPlayingNow { setPaused(true); showOverlay(keep: true) } else { setPaused(false); showOverlay() }
+        setPlayIcon()
     }
 
-    @objc private func jumpBack() { player.jumpBackward(30); showOverlay() }
-    @objc private func jumpForward() { player.jumpForward(30); showOverlay() }
+    @objc private func jumpBack() { if item.live { return skip(-1) }; player.jumpBackward(30); showOverlay() }
+    @objc private func jumpForward() { if item.live { return skip(1) }; player.jumpForward(30); showOverlay() }
 
     @objc private func scrubStart() { scrubbing = true; showOverlay(keep: true) }
+    /// Live: the bar's position as a moment of TV.
+    private func liveScrubTarget() -> Double? {
+        guard let w = liveWindow() else { return nil }
+        return w.start + Double(slider.value) * (w.end - w.start)
+    }
     @objc private func scrubEnd() {
+        if item.live {
+            scrubbing = false
+            if let t = liveScrubTarget() { seekLive(to: t) }
+            showOverlay()
+            return
+        }
         // Seek by time (exact), not by VLC's 0-1 position, which jumps back to the start on some streamed files.
         let d = Double(player.media?.length.intValue ?? 0)
         if d > 0 { player.time = VLCTime(int: Int32(Double(slider.value) * d)) } else { player.position = slider.value }
@@ -1456,6 +2271,14 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         showOverlay()
     }
     @objc private func scrubMoved() {
+        if item.live {
+            if let t = liveScrubTarget(), let w = liveWindow() {
+                let behind = w.end - t
+                elapsedLabel.text = "−" + clock(max(0, behind))
+                setShown(elapsedLabel, true)
+            }
+            return
+        }
         let d = Double(player.media?.length.intValue ?? 0) / 1000
         if d > 0 { elapsedLabel.text = clock(Double(slider.value) * d) }
     }
@@ -1521,5 +2344,160 @@ final class EpisodeListController: UITableViewController {
         tableView.deselectRow(at: indexPath, animated: true)
         let row = indexPath.row
         dismiss(animated: true) { [onPick] in onPick(row) }
+    }
+}
+
+/// The next-episode card: the next episode's still, a small label, its name, and two clear buttons. The primary one
+/// fills up as the countdown runs. It keeps every touch to itself (no swipes or taps go through to the player).
+final class NextEpisodeCard: UIView {
+    var onPrimary: (() -> Void)?
+    var onSecondary: (() -> Void)?
+    var progress: CGFloat = 0 { didSet { primary.progress = progress } }
+    private let thumb = UIImageView()
+    private let kicker = UILabel()
+    private let title = UILabel()
+    private let primary = FillButton()
+    private let secondary = UIButton(type: .custom)
+    private var artURL = ""
+    private static var images: [String: UIImage] = [:]
+    static let accent = UIColor(red: 0.357, green: 0.576, blue: 1, alpha: 1)   // the app's blue (#5b93ff)
+
+    init() {
+        super.init(frame: .zero)
+        // Dark, blurred backing so the card and its buttons read over bright and dark frames alike.
+        layer.cornerRadius = 18
+        layer.cornerCurve = .continuous
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.45
+        layer.shadowRadius = 18
+        layer.shadowOffset = CGSize(width: 0, height: 8)
+        let back = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterialDark))
+        back.backgroundColor = UIColor(white: 0.06, alpha: 0.55)
+        back.layer.cornerRadius = 18
+        back.layer.cornerCurve = .continuous
+        back.layer.borderWidth = 1
+        back.layer.borderColor = UIColor.white.withAlphaComponent(0.12).cgColor
+        back.clipsToBounds = true
+        back.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(back)
+
+        thumb.contentMode = .scaleAspectFill
+        thumb.clipsToBounds = true
+        thumb.layer.cornerRadius = 10
+        thumb.layer.cornerCurve = .continuous
+        thumb.backgroundColor = UIColor(white: 1, alpha: 0.08)
+        thumb.tintColor = UIColor(white: 1, alpha: 0.35)
+        kicker.font = .systemFont(ofSize: 12, weight: .semibold)
+        kicker.textColor = UIColor(white: 1, alpha: 0.7)
+        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        title.textColor = .white
+        title.numberOfLines = 2
+
+        primary.backgroundColor = Self.accent
+        primary.addTarget(self, action: #selector(primaryTapped), for: .touchUpInside)
+        secondary.backgroundColor = UIColor(white: 1, alpha: 0.16)
+        secondary.layer.borderWidth = 1
+        secondary.layer.borderColor = UIColor(white: 1, alpha: 0.45).cgColor
+        secondary.addTarget(self, action: #selector(secondaryTapped), for: .touchUpInside)
+        for b in [primary, secondary] {
+            b.layer.cornerRadius = 12
+            b.layer.cornerCurve = .continuous
+            b.clipsToBounds = true
+            b.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+            b.titleLabel?.adjustsFontSizeToFitWidth = true
+            b.titleLabel?.minimumScaleFactor = 0.8
+            b.setTitleColor(.white, for: .normal)
+            b.tintColor = .white
+            b.heightAnchor.constraint(equalToConstant: 46).isActive = true
+            b.addTarget(self, action: #selector(pressDown(_:)), for: [.touchDown, .touchDragEnter])
+            b.addTarget(self, action: #selector(pressUp(_:)), for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
+        }
+
+        let text = UIStackView(arrangedSubviews: [kicker, title])
+        text.axis = .vertical
+        text.spacing = 3
+        let top = UIStackView(arrangedSubviews: [thumb, text])
+        top.spacing = 12
+        top.alignment = .center
+        let buttons = UIStackView(arrangedSubviews: [primary, secondary])
+        buttons.spacing = 10
+        buttons.distribution = .fillEqually
+        let stack = UIStackView(arrangedSubviews: [top, buttons])
+        stack.axis = .vertical
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            back.topAnchor.constraint(equalTo: topAnchor), back.bottomAnchor.constraint(equalTo: bottomAnchor),
+            back.leadingAnchor.constraint(equalTo: leadingAnchor), back.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 14),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            thumb.widthAnchor.constraint(equalToConstant: 128),
+            thumb.heightAnchor.constraint(equalTo: thumb.widthAnchor, multiplier: 9.0 / 16.0),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func configure(kicker k: String, title t: String, art: String, primary p: String, secondary s: String, countdown: Bool) {
+        kicker.text = k
+        title.text = t
+        primary.setTitle(" " + p, for: .normal)
+        primary.setImage(UIImage(systemName: "play.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .bold)), for: .normal)
+        primary.progress = 0
+        primary.showsFill = countdown
+        primary.accessibilityLabel = p
+        secondary.setTitle(s, for: .normal)
+        loadArt(art)
+    }
+
+    private func loadArt(_ url: String) {
+        artURL = url
+        if let img = Self.images[url] { thumb.image = img; thumb.contentMode = .scaleAspectFill; return }
+        thumb.image = UIImage(systemName: "play.rectangle", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .regular))
+        thumb.contentMode = .center
+        guard !url.isEmpty, let u = URL(string: url) else { return }
+        URLSession.shared.dataTask(with: u) { [weak self] data, _, _ in
+            guard let data = data, let img = UIImage(data: data) else { return }
+            DispatchQueue.main.async {
+                Self.images[url] = img
+                guard let self = self, self.artURL == url else { return }
+                UIView.transition(with: self.thumb, duration: 0.2, options: .transitionCrossDissolve) {
+                    self.thumb.image = img
+                    self.thumb.contentMode = .scaleAspectFill
+                }
+            }
+        }.resume()
+    }
+
+    @objc private func primaryTapped() { onPrimary?() }
+    @objc private func secondaryTapped() { onSecondary?() }
+    @objc private func pressDown(_ b: UIButton) { UIView.animate(withDuration: 0.1) { b.transform = CGAffineTransform(scaleX: 0.96, y: 0.96); b.alpha = 0.85 } }
+    @objc private func pressUp(_ b: UIButton) { UIView.animate(withDuration: 0.15) { b.transform = .identity; b.alpha = 1 } }
+
+    // Touches on the card stay on the card: no swipe-to-minimise, seek or brightness from here.
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {}
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {}
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {}
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {}
+}
+
+/// A button with a lighter band sweeping across it: the countdown, without any numbers.
+final class FillButton: UIButton {
+    private let fill = UIView()
+    var showsFill = true { didSet { fill.isHidden = !showsFill } }
+    var progress: CGFloat = 0 { didSet { setNeedsLayout() } }
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        fill.backgroundColor = UIColor(white: 1, alpha: 0.24)
+        fill.isUserInteractionEnabled = false
+        addSubview(fill)
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        fill.frame = CGRect(x: 0, y: 0, width: bounds.width * min(1, max(0, progress)), height: bounds.height)
+        sendSubviewToBack(fill)
     }
 }

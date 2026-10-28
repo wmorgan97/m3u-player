@@ -4,6 +4,8 @@
 //   GET  /tmdb/status?key=<PROXY_KEY>                    -> { configured }
 //   POST /tmdb/key?key=<PROXY_KEY>   body { key }         -> checks the key with TMDB, then saves it ('' removes it)
 //   GET  /tmdb/info?key=..&kind=movie|tv&name=..&year=.. -> details for one title (cached for two weeks)
+//   GET  /tmdb/episodes?key=..&name=..&year=..&season=N  -> { episodes: [{ n, title, plot, still, runtime, air }] }
+//        (episode plots and stills for a season; cached a day while it's airing, two weeks once it's finished)
 
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
@@ -156,6 +158,28 @@ export async function info(kind, name, year) {
   return data;
 }
 
+// One season's episodes. Providers often give no plots and only tiny stills; TMDB has both.
+export async function episodes(name, year, season) {
+  const show = await info('tv', name, year);
+  if (!show?.tid) return null;
+  const c = await loadCache();
+  const ck = `eps|${show.tid}|${season}`;
+  const hit = c.get(ck);
+  if (hit && Date.now() - hit.at < (hit.done ? INFO_TTL : 86400_000)) return hit.data;
+  let d;
+  try { d = await call(`/tv/${show.tid}/season/${season}`, { language: 'en-US' }); }
+  catch (e) { if (/404/.test(e.message)) d = { episodes: [] }; else throw e; }
+  const today = new Date().toISOString().slice(0, 10);
+  const list = (d.episodes || []).map(e => ({
+    n: e.episode_number, title: e.name || '', plot: String(e.overview || '').slice(0, 600),
+    still: e.still_path ? `${IMG}w780${e.still_path}` : '', runtime: e.runtime || 0, air: e.air_date || '',
+  }));
+  const data = { tid: show.tid, season, episodes: list };
+  c.set(ck, { at: Date.now(), done: list.length > 0 && list.every(e => e.air && e.air < today && e.plot), data });
+  saveSoon();
+  return data;
+}
+
 export async function handleTmdb(req, res, url, send) {
   if (PROXY_KEY && url.searchParams.get('key') !== PROXY_KEY) return send(res, 403, 'Wrong or missing key');
   const json = (code, obj) => send(res, code, JSON.stringify(obj), { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -179,6 +203,12 @@ export async function handleTmdb(req, res, url, send) {
       const year = Number(url.searchParams.get('year')) || 0;
       if (!name) return json(400, { error: 'Missing name' });
       return json(200, (await info(kind, name, year)) || {});
+    }
+    if (url.pathname === '/tmdb/episodes') {
+      const name = String(url.searchParams.get('name') || '').slice(0, 200);
+      const year = Number(url.searchParams.get('year')) || 0, season = Number(url.searchParams.get('season'));
+      if (!name || !(season >= 0 && season < 200)) return json(400, { error: 'Missing name or season' });
+      return json(200, (await episodes(name, year, season)) || { episodes: [] });
     }
     return send(res, 404, 'Not found');
   } catch (e) {

@@ -58,10 +58,16 @@ async function build(urls) {
   return { at: Date.now(), chans, names: data.names, display: data.display || {} };
 }
 
+const MAX_INDEXES = 3;
 function indexFor(urls) {
   const key = urls.join('\n');
   let ix = indexes.get(key);
-  if (!ix) { ix = { at: 0, chans: null, names: {}, job: null }; indexes.set(key, ix); }
+  if (!ix) {
+    // Each index holds a whole guide in memory: keep at most a few (oldest dropped), so odd link combinations can't
+    // pile up and run the server out of memory (it did once, 2026-10-28).
+    while (indexes.size >= MAX_INDEXES) indexes.delete(indexes.keys().next().value);
+    ix = { at: 0, chans: null, names: {}, job: null }; indexes.set(key, ix);
+  }
   if (!ix.job && Date.now() - ix.at > REFRESH) {
     ix.job = build(urls)
       .then(r => Object.assign(ix, r))
@@ -92,7 +98,8 @@ export async function handleGuide(req, res, url, send, allow) {
   if (req.method !== 'POST') return send(res, 405, 'POST only');
   let q;
   try { q = JSON.parse(await readBody(req)); } catch { return send(res, 400, 'Bad body'); }
-  const urls = (q.urls || []).filter(u => { try { return allowed(new URL(u)); } catch { return false; } });
+  // Each link once, at most 4: the same pair sent twice is the same guide, not a new one to build.
+  const urls = [...new Set((Array.isArray(q.urls) ? q.urls : []).map(String))].filter(u => { try { return allowed(new URL(u)); } catch { return false; } }).slice(0, 4);
   if (!urls.length) return send(res, 400, 'No usable guide link');
   remember(urls);
   const ix = indexFor(urls);
@@ -130,6 +137,28 @@ export async function handleGuide(req, res, url, send, allow) {
     }
     out.sort((a, b) => a.start - b.start);
     return send(res, 200, JSON.stringify({ at: ix.at, matches: out.slice(0, 200) }), { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  }
+  // Sports hub: several searches in one request, only on the channels the app has (ids / normalised names, as for a
+  // listings request), so a popular word ("Premier League") isn't cut off by the same programme on hundreds of foreign
+  // channels. -> { at, found: { [query]: [{ id, name, start, end, title, desc }] } }, each soonest first, at most 300.
+  if (Array.isArray(q.finds)) {
+    const qs = q.finds.filter(f => typeof f === 'string').slice(0, 40).map(f => ({ f, words: fold(f).split(' ').filter(w => w.length > 1) })).filter(x => x.words.length);
+    const only = new Set();
+    for (const id of q.ids || []) if (ix.chans.has(id)) only.add(id);
+    for (const n of q.names || []) { const id = ix.names[n]; if (id && ix.chans.has(id)) only.add(id); }
+    const now = Date.now(), until = now + 72 * HOUR, found = Object.fromEntries(qs.map(x => [x.f, []]));
+    for (const id of only.size ? only : ix.chans.keys()) {
+      const json = ix.chans.get(id), folded = fold(json);
+      const hit = qs.filter(x => folded.includes(x.words[0]));
+      if (!hit.length) continue;
+      for (const p of JSON.parse(json)) {
+        if (p[1] <= now || p[0] >= until) continue;
+        const t = ` ${fold(p[2])} `;
+        for (const x of hit) if (x.words.every(w => t.includes(` ${w} `))) found[x.f].push({ id, name: ix.display?.[id] || id, start: p[0], end: p[1], title: p[2], desc: (p[3] || '').slice(0, 300) });
+      }
+    }
+    for (const k of Object.keys(found)) found[k] = found[k].sort((a, b) => a.start - b.start).slice(0, 300);
+    return send(res, 200, JSON.stringify({ at: ix.at, found }), { 'content-type': 'application/json', 'cache-control': 'no-store' });
   }
   const names = {}, ids = new Set();
   for (const id of q.ids || []) if (ix.chans.has(id)) ids.add(id);

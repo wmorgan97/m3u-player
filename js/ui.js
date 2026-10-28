@@ -39,6 +39,9 @@ const PATHS = {
   expand: '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>',
   download: '<path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/>',
   search2: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
+  trophy: '<path d="M7.5 4h9v5.5a4.5 4.5 0 01-9 0z"/><path d="M7.5 6H4.5a3 3 0 003.2 4M16.5 6h3a3 3 0 01-3.2 4M12 14v3.5M8.5 20.5h7M9.5 17.5h5"/>',
+  bell: '<path d="M6 10.5a6 6 0 0112 0c0 4.2 1.6 5.8 2 6.3H4c.4-.5 2-2.1 2-6.3z"/><path d="M10 20a2.2 2.2 0 004 0"/>',
+  'bell-on': '<path class="dot" d="M5.2 10.5a6.8 6.8 0 0113.6 0c0 3.9 1.4 5.3 2 5.9.5.5.2 1.4-.6 1.4H3.8c-.8 0-1.1-.9-.6-1.4.6-.6 2-2 2-5.9z"/><path d="M10 20.2a2.2 2.2 0 004 0"/>',
 };
 
 export const icon = (name, cls = '') => `<svg class="ico ${cls}" viewBox="0 0 24 24" aria-hidden="true">${PATHS[name]}</svg>`;

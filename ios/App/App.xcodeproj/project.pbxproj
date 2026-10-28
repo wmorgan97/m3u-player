@@ -18,6 +18,8 @@
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
 		9582B6832FE993A70072D4E8 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9582B6822FE993A50072D4E8 /* SceneDelegate.swift */; };
 		A7C3E1F02B4D5E6F70810001 /* NativePlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1F02B4D5E6F70810002 /* NativePlayer.swift */; };
+		A7C3E1F02B4D5E6F70810021 /* PlayerGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1F02B4D5E6F70810022 /* PlayerGuide.swift */; };
+		A7C3E1F02B4D5E6F70810011 /* LiveBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1F02B4D5E6F70810012 /* LiveBuffer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +34,8 @@
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
 		9582B6822FE993A50072D4E8 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		A7C3E1F02B4D5E6F70810002 /* NativePlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePlayer.swift; sourceTree = "<group>"; };
+		A7C3E1F02B4D5E6F70810022 /* PlayerGuide.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerGuide.swift; sourceTree = "<group>"; };
+		A7C3E1F02B4D5E6F70810012 /* LiveBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveBuffer.swift; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
@@ -70,6 +74,8 @@
 			children = (
 				9582B6822FE993A50072D4E8 /* SceneDelegate.swift */,
 				A7C3E1F02B4D5E6F70810002 /* NativePlayer.swift */,
+				A7C3E1F02B4D5E6F70810022 /* PlayerGuide.swift */,
+				A7C3E1F02B4D5E6F70810012 /* LiveBuffer.swift */,
 				50379B222058CBB4000EE86E /* capacitor.config.json */,
 				504EC3071FED79650016851F /* AppDelegate.swift */,
 				504EC30B1FED79650016851F /* Main.storyboard */,
@@ -168,6 +174,8 @@
 				504EC3081FED79650016851F /* AppDelegate.swift in Sources */,
 				9582B6832FE993A70072D4E8 /* SceneDelegate.swift in Sources */,
 				A7C3E1F02B4D5E6F70810001 /* NativePlayer.swift in Sources */,
+				A7C3E1F02B4D5E6F70810021 /* PlayerGuide.swift in Sources */,
+				A7C3E1F02B4D5E6F70810011 /* LiveBuffer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
