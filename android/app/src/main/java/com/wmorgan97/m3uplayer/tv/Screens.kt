@@ -31,6 +31,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.focusable
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -73,7 +74,9 @@ fun HomeScreen(act: TvActivity) {
     val scope = rememberCoroutineScope()
 
     LazyColumn(Modifier.fillMaxSize(), state = rememberPageState(), contentPadding = PaddingValues(bottom = 56.dp)) {
-        item { Hero(act, ((movies?.trending ?: emptyList()).take(4) + (series?.trending ?: emptyList()).take(3)).filter { it.backdrop.isNotEmpty() }, movies == null && series == null) }
+        // Trending films and series alternate (#1 movie, #1 series, #2 movie, …), each ranked within its own kind.
+        item { Hero(act, run { val m = (movies?.trending ?: emptyList()).filter { it.backdrop.isNotEmpty() }.take(4); val sr = (series?.trending ?: emptyList()).filter { it.backdrop.isNotEmpty() }.take(4)
+            (0 until maxOf(m.size, sr.size)).flatMap { k -> listOfNotNull(m.getOrNull(k), sr.getOrNull(k)) } }, movies == null && series == null) }
         if (cw.isNotEmpty()) {
             item { RowTitle("Continue watching") }
             item {
@@ -163,42 +166,63 @@ fun Hero(act: TvActivity, items: List<Vod>, loading: Boolean = false) {
     val mod = Modifier.fillMaxWidth().height(340.dp).padding(start = Tv.margin, end = Tv.margin, top = Tv.topMargin)
     if (items.isEmpty()) { Box(mod.clip(shape).let { if (loading) it.shimmer() else it.background(Tv.surface) }); return }
     var focused by remember { mutableStateOf(false) }
-    val state = rememberCarouselState()
-    Carousel(itemCount = items.size, carouselState = state,
-        modifier = mod.onFocusChanged { focused = it.hasFocus }
-            .border(if (focused) 4.dp else 0.dp, if (focused) Tv.focusRing else Color.Transparent, shape).clip(shape)
-            .onKeyEvent { e -> if (e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter)) { items.getOrNull(state.activeItemIndex)?.let { act.go(Screen.Details(it)) }; true } else false },
-        contentTransformStartToEnd = fadeIn() togetherWith fadeOut(), contentTransformEndToStart = fadeIn() togetherWith fadeOut(), autoScrollDurationMillis = 9000) { i ->
+    // Own slide timer: the TV carousel stops auto-sliding while focused when an accessibility service is on (the Shield
+    // runs one), so slides advance here every 10 s, cross-fading over 0.8 s, and wait longer after you've moved by hand.
+    var index by remember(items) { mutableIntStateOf(0) }
+    var touchedAt by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(items) {
+        while (true) {
+            delay(10_000)
+            if (System.currentTimeMillis() - touchedAt > 12_000) index = (index + 1) % items.size
+        }
+    }
+    // Every slide's backdrop is fetched up front, so a slide never appears blank and then pops in.
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(items) { val l = coil.Coil.imageLoader(ctx); items.forEach { l.enqueue(coil.request.ImageRequest.Builder(ctx).data(it.backdrop).build()) } }
+    // Rank within its own kind ("#3 trending series"), not its place in the mixed films + series banner.
+    val ranks = remember(items) { val n = HashMap<String, Int>(); items.map { v -> (n.merge(v.kind, 1, Int::plus) ?: 1) } }
+    Box(mod.onFocusChanged { focused = it.hasFocus }
+            .border(if (focused) 1.5.dp else 0.dp, if (focused) Tv.focusRing.copy(alpha = .85f) else Color.Transparent, shape).clip(shape)   // thin, clean focus line
+            .onKeyEvent { e ->
+                if (e.type != KeyEventType.KeyDown) {
+                    if (e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter)) { items.getOrNull(index)?.let { act.go(Screen.Details(it)) }; return@onKeyEvent true }
+                    return@onKeyEvent false
+                }
+                when (e.key) {
+                    Key.DirectionRight -> { index = (index + 1) % items.size; touchedAt = System.currentTimeMillis(); true }
+                    Key.DirectionLeft -> if (index > 0) { index--; touchedAt = System.currentTimeMillis(); true } else false   // left on the first slide: the menu
+                    else -> false
+                }
+            }.focusable()) {
+    androidx.compose.animation.Crossfade(index.coerceIn(0, items.size - 1), animationSpec = androidx.compose.animation.core.tween(800), label = "hero") { i ->
         val v = items[i]
         Box(Modifier.fillMaxSize()) {
-            Picture(v.backdrop, Modifier.fillMaxSize())
+            Picture(v.backdrop, Modifier.fillMaxSize(), fade = false)   // (the slide change already cross-fades)
             Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0xF20E1014), Color(0xB30E1014), Color.Transparent), endX = 1400f)))
             Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0x990E1014)), startY = 400f)))
             Column(Modifier.align(Alignment.CenterStart).padding(start = 40.dp).fillMaxWidth(.56f)) {
-                Text("#${i + 1} TRENDING ${if (v.kind == "series") "SERIES" else "MOVIE"}", fontSize = Tv.label, color = Tv.accent, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                Text("#${ranks.getOrElse(i) { i + 1 }} TRENDING ${if (v.kind == "series") "SERIES" else "MOVIE"}", fontSize = Tv.label, color = Tv.accent, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
                 Spacer(Modifier.height(8.dp))
                 Text(v.title, fontSize = Tv.display, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = 38.sp)
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     v.year?.let { Tag("$it") }
-                    v.rating?.let { Tag("★ %.1f".format(it), color = Tv.star) }
+                    v.rating?.takeIf { it > 0 }?.let { Tag("★ %.1f".format(it), color = Tv.star) }
                     quality(v.name, v.group)?.let { Tag(it) }
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(v.overview, fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 3, overflow = TextOverflow.Ellipsis, lineHeight = 20.sp)
-                Spacer(Modifier.height(16.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.background(if (focused) Tv.text else Color(0x33FFFFFF), RoundedCornerShape(8.dp)).padding(horizontal = 16.dp, vertical = 8.dp)) {
-                        Text(if (v.kind == "series") "Episodes" else "More info", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold, color = if (focused) Tv.bg else Tv.text)
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Text("OK", fontSize = Tv.label, color = Tv.muted)
+                Spacer(Modifier.height(18.dp))
+                // One clear action, lit when the banner has focus (OK opens it).
+                Row(Modifier.background(if (focused) Tv.text else Color(0x33FFFFFF), RoundedCornerShape(8.dp)).padding(start = 12.dp, end = 18.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(if (v.kind == "series") Icons.Default.VideoLibrary else Icons.Default.PlayArrow, null, Modifier.size(20.dp), tint = if (focused) Tv.bg else Tv.text)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (v.kind == "series") "Episodes" else "Watch", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold, color = if (focused) Tv.bg else Tv.text)
                 }
             }
-            Row(Modifier.align(Alignment.BottomEnd).padding(16.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                repeat(items.size) { k -> Box(Modifier.size(if (k == i) 16.dp else 6.dp, 6.dp).background(if (k == i) Tv.text else Color(0x66FFFFFF), RoundedCornerShape(3.dp))) }
-            }
         }
+    }
+        CarouselDefaults.IndicatorRow(itemCount = items.size, activeItemIndex = index, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp))
     }
 }
 

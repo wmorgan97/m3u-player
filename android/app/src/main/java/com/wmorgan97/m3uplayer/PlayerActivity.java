@@ -844,6 +844,7 @@ public class PlayerActivity extends AppCompatActivity {
         int ps = player == null ? Player.STATE_IDLE : player.getPlaybackState();
         boolean toPreview = live && player != null && runningUrl != null && state != S_FAILED && (ps == Player.STATE_READY || ps == Player.STATE_BUFFERING);
         if (toPreview) { handedBack = true; PlayerHolder.returnPlayer(player, runningUrl); }
+        else if (player != null) { player.stop(); runningUrl = null; }   // free the provider's one connection now, before the preview may start
         // A closing player screen is no longer "the" player: the next channel must start a new one, not be sent here.
         if (current == this) current = null;
         super.finish();

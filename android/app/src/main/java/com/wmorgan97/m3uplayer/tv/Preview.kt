@@ -55,21 +55,29 @@ object Preview {
     /** Takes back the full-screen player (still playing [chUrl]) for the preview window. */
     fun adopt(p: ExoPlayer, chUrl: String) {
         if (player != null && player !== p) runCatching { player?.release() }
-        player = p; url = testUrl ?: chUrl; unzooming = true
+        player = p; url = chUrl; unzooming = true
     }
+    /** True while the full-screen player is up (or the app is in the background): the preview starts nothing then. */
+    var suspended by mutableStateOf(false)
     internal fun unzoomDone() { unzooming = false }
     /** Already showing a picture of this channel (so the window needn't show its name card first). */
     fun isShowing(ch: Channel?) = ch != null && url == (testUrl ?: ch.url) && player?.let { it.playbackState == Player.STATE_READY && it.videoSize.width > 0 } == true
     /** The preview's channel, falling back to the last channel watched (once the channel list is loaded). */
     fun current(): Channel? = channel ?: Repo.lastChannelUrl?.let { Repo.channelByUrl(it) }?.also { c -> select(c, Repo.live?.channels?.filter { it.group == c.group }?.takeIf { c in it } ?: listOf(c)) }
-    private var player: ExoPlayer? = null
+    // The player as Compose state: the window always shows whichever player is current (a frozen frame came from the
+    // window still holding a player that had been handed over or stopped).
+    private var playerState = mutableStateOf<ExoPlayer?>(null)
+    private var player: ExoPlayer?
+        get() = playerState.value
+        set(v) { playerState.value = v }
+    val current: ExoPlayer? get() = playerState.value
     private var url: String? = null
 
     fun player(c: Context): ExoPlayer = player ?: PlayerHolder.create(c).also { player = it }
 
     fun play(c: Context, ch: Channel) {
         val src = testUrl ?: ch.url
-        if (src == url) return
+        if (src == url && player != null) return
         url = src
         val p = player(c)
         var agent = "Mozilla/5.0 (Linux; Android TV) AppleWebKit/537.36"
@@ -104,19 +112,20 @@ fun PreviewBox(channel: Channel?, resumeTick: Int, modifier: Modifier = Modifier
     var playing by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
     var view by remember { mutableStateOf<PlayerView?>(null) }
-    LaunchedEffect(channel?.url, resumeTick) {
+    LaunchedEffect(channel?.url, resumeTick, Preview.suspended) {
         playing = Preview.isShowing(channel); failed = false
+        if (Preview.suspended) return@LaunchedEffect   // full screen is playing: never a second stream underneath
         if (channel == null) { Preview.stop(); return@LaunchedEffect }
-        delay(150)
-        Preview.play(ctx, channel)
+        if (!playing) delay(150)
+        Preview.play(ctx, channel)   // (does nothing when it is already playing this channel, e.g. handed back from full screen)
         val p = Preview.player(ctx)
-        view?.player = p
         // The name card stays until there's a picture; after 15 s (or an error) the preview gives up and closes the stream.
         repeat(150) { if (p.playbackState == Player.STATE_READY && p.videoSize.width > 0) { playing = true; return@LaunchedEffect }; if (p.playerError != null) { failed = true; Preview.stop(); return@LaunchedEffect }; delay(100) }
         failed = true; Preview.stop()
     }
     DisposableEffect(Unit) { onDispose { Preview.stop(); Preview.shown = false; Preview.resetZoom() } }
     LaunchedEffect(playing) { Preview.shown = playing }
+    LaunchedEffect(Preview.current, view) { view?.player = Preview.current }   // the window follows the current player
     // Grow-to-full-screen: scale and move the window from where it sits to the whole screen, corners straightening out.
     val root = androidx.compose.ui.platform.LocalView.current
     var bounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
@@ -124,7 +133,6 @@ fun PreviewBox(channel: Channel?, resumeTick: Int, modifier: Modifier = Modifier
     LaunchedEffect(Preview.zooming, Preview.unzooming) {
         when {
             Preview.unzooming -> {   // starts full size (it still is, from going full screen); shrinks once the player screen has faded
-                view?.player = Preview.player(ctx)   // the live picture at once (not the window's last frame from before)
                 grow.snapTo(1f); kotlinx.coroutines.delay(140)
                 grow.animateTo(0f, androidx.compose.animation.core.tween(450, easing = androidx.compose.animation.core.CubicBezierEasing(0.4f, 0f, 0.2f, 1f))); Preview.unzoomDone()
             }
@@ -149,7 +157,7 @@ fun PreviewBox(channel: Channel?, resumeTick: Int, modifier: Modifier = Modifier
         AndroidView(factory = { c ->
             (android.view.LayoutInflater.from(c).inflate(com.wmorgan97.m3uplayer.R.layout.m3u_preview_player, null) as PlayerView).apply {
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                player = Preview.player(c)
+                player = Preview.current
             }.also { view = it }
         }, modifier = Modifier.fillMaxSize(), onRelease = { it.player = null })
         if (!playing) Box(Modifier.fillMaxSize().background(Tv.surface), contentAlignment = Alignment.Center) {

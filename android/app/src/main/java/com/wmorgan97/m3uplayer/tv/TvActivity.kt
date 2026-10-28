@@ -105,14 +105,21 @@ class TvActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (Repo.hasKey()) lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
-        // Back from full screen on a live channel: the preview window takes the player back and shrinks into place.
-        val pc = Preview.channel; val scr = stack.last()
-        val back = if (pc != null && Repo.preview && (scr is Screen.Live || scr is Screen.Guide)) com.wmorgan97.m3uplayer.PlayerHolder.takeReturned(pc.url) else null
+        // Back from full screen on a live channel: the preview takes back the player, playing whichever channel you ended
+        // on (you may have changed channel in full screen), and the window shrinks into place.
+        val scr = stack.last()
+        val r = if (Repo.preview && (scr is Screen.Live || scr is Screen.Guide)) com.wmorgan97.m3uplayer.PlayerHolder.takeReturnedAny() else null
         Preview.resetZoom()
-        if (back != null && pc != null) Preview.adopt(back, pc.url) else com.wmorgan97.m3uplayer.PlayerHolder.dropReturned()
+        com.wmorgan97.m3uplayer.PlayerHolder.dropReturned()
+        if (r != null) {
+            val p = r[0] as androidx.media3.exoplayer.ExoPlayer; val u = r[1] as String
+            val hit = liveLists.firstNotNullOfOrNull { (_, l) -> l.firstOrNull { it.url == u }?.let { it to l } }
+            if (hit != null) { Preview.select(hit.first, hit.second); Preview.adopt(p, u) } else com.wmorgan97.m3uplayer.PlayerHolder.giveBackPublic(p)
+        }
+        Preview.suspended = false
         resumeTick++
     }
-    override fun onStop() { super.onStop(); Preview.stop() }   // Home / the player: the preview's stream closes
+    override fun onStop() { super.onStop(); Preview.suspended = true; Preview.stop() }   // Home / the player: the preview's stream closes
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); testHook(intent) }
 
     /** Test hook (adb only): `--es testStream <url> --ei testIndex n` plays a pretend channel list on that stream, so the

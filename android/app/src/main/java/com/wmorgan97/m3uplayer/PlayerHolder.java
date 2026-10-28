@@ -33,6 +33,11 @@ public final class PlayerHolder {
         if (returned != null && returned != p) { ExoPlayer old = returned; returned = null; giveBack(old); }
         returned = p; returnedUrl = url;
     }
+    /** Whatever player came back (and the stream it is playing), or null. Taken once. */
+    public static synchronized Object[] takeReturnedAny() {
+        if (returned == null) return null;
+        Object[] r = {returned, returnedUrl}; returned = null; returnedUrl = null; return r;
+    }
     /** The returned player if it is playing [url]; null otherwise. */
     public static synchronized ExoPlayer takeReturned(String url) {
         if (returned == null || url == null || !url.equals(returnedUrl)) return null;
@@ -64,6 +69,8 @@ public final class PlayerHolder {
         }
         if (spare == null) spare = p; else p.release();
     }
+
+    public static void giveBackPublic(ExoPlayer p) { giveBack(p); }
 
     public static ExoPlayer create(Context c) { return build(c.getApplicationContext()); }
 
