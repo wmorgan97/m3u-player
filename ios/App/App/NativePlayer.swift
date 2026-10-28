@@ -240,6 +240,17 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private let volumeView = MPVolumeView(frame: CGRect(x: -2000, y: -2000, width: 10, height: 10))
     private var volumeSlider: UISlider? { volumeView.subviews.compactMap { $0 as? UISlider }.first }
     private var startBrightness: CGFloat = 1
+    // Volume read-out. The hidden volume control above (needed for the volume swipe) makes iOS hide its own volume
+    // indicator, so the side buttons changed the volume with nothing on screen. This draws one instead, where iOS puts
+    // its own: a slim frosted bar on the left edge by the volume buttons, filling from the bottom with a speaker under it,
+    // shown on every change (buttons or swipe), then fading.
+    private let volumePill = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+    private let volumeIcon = UIImageView()
+    private let volumeTrack = UIView()
+    private let volumeFill = UIView()
+    private var volumeFillHeight: NSLayoutConstraint?
+    private var volumeObs: NSKeyValueObservation?
+    private var volumeHide: Timer?
     // Lock screen / Control Center / headphone buttons.
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
     private var artwork: MPMediaItemArtwork?
@@ -297,6 +308,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         view.addSubview(volumeView)
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
+        setUpVolumeIndicator()
         setUpRemoteControls()
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
         load(item)
@@ -334,7 +346,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         case .volume:
             let v = min(1, max(0, dragFrom - Double(dy / (h * 0.6))))
             volumeSlider?.value = Float(v)
-            showHud("Volume  \(Int(v * 100))%", sticky: true)
+            showVolume(Float(v))   // (the same pill as the side buttons)
         case .none: break
         }
     }
@@ -342,8 +354,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         defer { touchStart = nil; super.touchesEnded(touches, with: event) }
         if drag != .none {
             if drag == .scrub { player.time = VLCTime(int: Int32(scrubTarget * 1000)) }
+            let wasVolume = drag == .volume
             drag = .none
-            showHud(hud.text ?? "", sticky: false)
+            if !wasVolume { showHud(hud.text ?? "", sticky: false) }   // (volume has its own pill, which fades by itself)
             return
         }
         guard let t = touches.first, let start = touchStart else { return }
@@ -352,10 +365,73 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         if abs(dx) < 12 && abs(dy) < 12 && ProcessInfo.processInfo.systemUptime - start.time < 0.6 { tapped(at: p) }
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if drag != .none { drag = .none; showHud(hud.text ?? "", sticky: false) }
+        if drag != .none { let wasVolume = drag == .volume; drag = .none; if !wasVolume { showHud(hud.text ?? "", sticky: false) } }
         touchStart = nil
         super.touchesCancelled(touches, with: event)
     }
+    private func setUpVolumeIndicator() {
+        volumePill.layer.cornerRadius = 19
+        volumePill.clipsToBounds = true
+        volumePill.alpha = 0
+        volumePill.isUserInteractionEnabled = false
+        volumePill.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(volumePill)
+        volumeIcon.tintColor = .white
+        volumeIcon.contentMode = .scaleAspectFit
+        volumeIcon.translatesAutoresizingMaskIntoConstraints = false
+        volumeTrack.backgroundColor = UIColor(white: 1, alpha: 0.25)
+        volumeTrack.layer.cornerRadius = 3
+        volumeTrack.translatesAutoresizingMaskIntoConstraints = false
+        volumeFill.backgroundColor = .white
+        volumeFill.layer.cornerRadius = 3
+        volumeFill.translatesAutoresizingMaskIntoConstraints = false
+        volumePill.contentView.addSubview(volumeIcon)
+        volumePill.contentView.addSubview(volumeTrack)
+        volumeTrack.addSubview(volumeFill)
+        let fill = volumeFill.heightAnchor.constraint(equalToConstant: 0)
+        volumeFillHeight = fill
+        NSLayoutConstraint.activate([
+            volumePill.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 10),
+            volumePill.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 96),   // below the title row, above the middle controls
+            volumePill.widthAnchor.constraint(equalToConstant: 38),
+            volumePill.heightAnchor.constraint(equalToConstant: 170),
+            volumeTrack.topAnchor.constraint(equalTo: volumePill.contentView.topAnchor, constant: 16),
+            volumeTrack.centerXAnchor.constraint(equalTo: volumePill.contentView.centerXAnchor),
+            volumeTrack.widthAnchor.constraint(equalToConstant: 6),
+            volumeTrack.bottomAnchor.constraint(equalTo: volumeIcon.topAnchor, constant: -10),
+            volumeIcon.bottomAnchor.constraint(equalTo: volumePill.contentView.bottomAnchor, constant: -12),
+            volumeIcon.centerXAnchor.constraint(equalTo: volumePill.contentView.centerXAnchor),
+            volumeIcon.widthAnchor.constraint(equalToConstant: 20),
+            volumeIcon.heightAnchor.constraint(equalToConstant: 16),
+            volumeFill.leadingAnchor.constraint(equalTo: volumeTrack.leadingAnchor),
+            volumeFill.trailingAnchor.constraint(equalTo: volumeTrack.trailingAnchor),
+            volumeFill.bottomAnchor.constraint(equalTo: volumeTrack.bottomAnchor),
+            fill,
+        ])
+        // The side buttons: the system volume changes; show it.
+        volumeObs = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.new]) { [weak self] _, change in
+            guard let v = change.newValue else { return }
+            DispatchQueue.main.async { self?.showVolume(v) }
+        }
+    }
+
+    private func showVolume(_ v: Float) {
+        let level = min(1, max(0, v))
+        let name = level == 0 ? "speaker.slash.fill" : level < 0.34 ? "speaker.wave.1.fill" : level < 0.67 ? "speaker.wave.2.fill" : "speaker.wave.3.fill"
+        volumeIcon.image = UIImage(systemName: name)
+        view.layoutIfNeeded()
+        volumeFillHeight?.constant = volumeTrack.bounds.height * CGFloat(level)
+        UIView.animate(withDuration: 0.12, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
+            self.volumePill.alpha = 1
+            self.view.layoutIfNeeded()
+        }
+        view.bringSubviewToFront(volumePill)
+        volumeHide?.invalidate()
+        volumeHide = Timer.scheduledTimer(withTimeInterval: 1.4, repeats: false) { [weak self] _ in
+            UIView.animate(withDuration: 0.35) { self?.volumePill.alpha = 0 }
+        }
+    }
+
     private func showHud(_ text: String, sticky: Bool) {
         hudTimer?.invalidate()
         hud.text = text
