@@ -275,7 +275,11 @@ class TvActivity : ComponentActivity() {
     /** Plays one of a list (channels of a group, episodes of a season) in the TV player. */
     fun play(items: List<JSONObject>, index: Int) {
         playList = items; playIndex = index
-        Preview.release()   // one stream at a time: the preview's connection is closed before the full-screen one opens
+        // One stream at a time. Going full screen on the channel already in the preview hands its player (and connection)
+        // over, so the picture carries on; anything else closes the preview first.
+        val first = items.getOrNull(index)
+        val handed = if (first?.optBoolean("live") == true && Preview.channel?.url == first.optString("url")) Preview.handOff() else null
+        if (handed != null) com.wmorgan97.m3uplayer.PlayerHolder.handOff(handed, first!!.optString("url")) else Preview.release()
         liveLists.firstOrNull { it.first === items }?.second?.let { l -> l.getOrNull(index)?.let { Preview.select(it, l) } }
         NativePlayerPlugin.listener = NativePlayerPlugin.Listener { onPlayerEvent(it) }
         val it = playerItem(index)

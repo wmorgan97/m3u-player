@@ -61,6 +61,14 @@ object Preview {
     }
 
     /** Closes the stream (keeps the player for the next preview). */
+    /** Gives up the running player (for the full-screen player to carry on with), or null if nothing is playing. */
+    fun handOff(): ExoPlayer? {
+        val p = player ?: return null
+        val ok = url != null && p.playerError == null && (p.playbackState == Player.STATE_READY || p.playbackState == Player.STATE_BUFFERING)
+        if (!ok) return null
+        player = null; url = null
+        return p
+    }
     fun stop() { url = null; player?.let { runCatching { it.stop(); it.clearMediaItems() } } }
     /** Frees the player and its decoder entirely (before full-screen playback). */
     fun release() { url = null; player?.let { runCatching { it.release() } }; player = null }

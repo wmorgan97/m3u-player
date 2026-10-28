@@ -16,10 +16,23 @@ import androidx.media3.extractor.ts.TsExtractor;
 @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
 public final class PlayerHolder {
     private static ExoPlayer spare;
+    // The preview's player, still playing, handed over when you go full screen on the channel it shows (no reconnect).
+    private static ExoPlayer handed;
+    private static String handedUrl;
+
+    /** The preview gives its running player to the next player screen; [url] is the channel it is playing. */
+    public static synchronized void handOff(ExoPlayer p, String url) {
+        if (handed != null && handed != p) { try { handed.release(); } catch (Exception ignored) { /* stale hand-off; nothing to save */ } }
+        handed = p; handedUrl = url;
+    }
+    /** The channel the player just taken is already playing (null if it was a fresh player). Read once. */
+    static synchronized String takeHandedUrl() { String u = handedUrl; handedUrl = null; return u; }
 
     public static synchronized void warm(Context c) { if (spare == null) spare = build(c.getApplicationContext()); }
 
     static synchronized ExoPlayer take(Context c) {
+        if (handed != null) { ExoPlayer h = handed; handed = null; return h; }
+        handedUrl = null;
         ExoPlayer p = spare != null ? spare : build(c.getApplicationContext());
         spare = null;
         return p;

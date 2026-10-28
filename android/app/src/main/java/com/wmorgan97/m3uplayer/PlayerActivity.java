@@ -137,6 +137,7 @@ public class PlayerActivity extends AppCompatActivity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | WindowManager.LayoutParams.FLAG_FULLSCREEN);
         buildUi();
         player = PlayerHolder.take(this);   // built ahead of time while you browse, so the player screen opens with it ready
+        runningUrl = PlayerHolder.takeHandedUrl();   // or the preview's player, already playing this channel
         playerView.setPlayer(player);
         player.addListener(listener = new Player.Listener() {
             @Override public void onRenderedFirstFrame() {
@@ -168,8 +169,15 @@ public class PlayerActivity extends AppCompatActivity {
 
     // ---------- stream ----------
 
+    private String runningUrl;   // the stream the player is connected to right now (null when stopped)
+
     public void load(JSObject next) {
         if (player == null) return;   // destroyed
+        // Already playing this exact channel (the preview's player handed over, or the same item again): keep the stream,
+        // just show the screen. Going full screen from the preview no longer drops and reopens the connection.
+        int ps = player.getPlaybackState();
+        boolean same = next.optBoolean("live", true) && runningUrl != null && runningUrl.equals(next.optString("url"))
+            && player.getPlayerError() == null && (ps == Player.STATE_READY || ps == Player.STATE_BUFFERING);
         loadAt = System.currentTimeMillis();
         item = next;
         live = next.optBoolean("live", true);
@@ -207,7 +215,14 @@ public class PlayerActivity extends AppCompatActivity {
         long now = android.os.SystemClock.uptimeMillis();
         boolean burst = now - lastLoadReq < ZAP_BURST_MS;
         lastLoadReq = now;
-        if (burst) { player.stop(); ui.postDelayed(startRun, ZAP_SETTLE_MS); } else begin(token);
+        if (same) {
+            frameShown = player.getVideoSize().width > 0;
+            videoW = player.getVideoSize().width; videoH = player.getVideoSize().height;
+            setState(ps == Player.STATE_READY && frameShown ? S_PLAYING : S_BUFFERING);
+            if (!player.getPlayWhenReady()) player.play();
+            loadAt = 0;
+        }
+        else if (burst) { player.stop(); runningUrl = null; ui.postDelayed(startRun, ZAP_SETTLE_MS); } else begin(token);
         if (live) { hideOverlay(); showBanner(); } else { showOverlay(); }   // live: the channel banner, as on a TV; films: the controls
         justShown = live;
     }
@@ -233,6 +248,7 @@ public class PlayerActivity extends AppCompatActivity {
         MediaItem.Builder media = new MediaItem.Builder().setUri(url);
         if (url.toLowerCase(Locale.ROOT).contains(".m3u8")) media.setMimeType(MimeTypes.APPLICATION_M3U8);
         player.setMediaSource(new DefaultMediaSourceFactory(http, PlayerHolder.extractors()).createMediaSource(media.build()));
+        runningUrl = url;
         double start = next.optDouble("start", 0);
         long at = resumeAtMs >= 0 ? resumeAtMs : start > 1 ? (long) (start * 1000) : 0;
         if (!live && at > 0) player.seekTo(at);
@@ -262,7 +278,7 @@ public class PlayerActivity extends AppCompatActivity {
         ui.postAtTime(() -> {
             if (t != token || player == null || stopped || !player.getPlayWhenReady() || player.getPlaybackState() != Player.STATE_BUFFERING) return;
             android.util.Log.w("M3U", "live stream stalled for " + STALL_MS + "ms");
-            player.stop();   // drop the dead connection now, so the retry isn't refused for using a second one
+            player.stop(); runningUrl = null;   // drop the dead connection now, so the retry isn't refused for using a second one
             recover(t, true, "The stream stopped sending video.", null);
         }, STALL, android.os.SystemClock.uptimeMillis() + STALL_MS);
     }
@@ -347,7 +363,7 @@ public class PlayerActivity extends AppCompatActivity {
     private void fail(String message, String code) {
         setState(S_FAILED);
         ui.removeCallbacksAndMessages(RETRY);
-        player.stop();   // let go of the provider's one connection
+        player.stop(); runningUrl = null;   // let go of the provider's one connection
         hideOverlay();
         if (channelList != null) channelList.setVisibility(View.GONE);
         errorText.setText(message);
@@ -812,7 +828,7 @@ public class PlayerActivity extends AppCompatActivity {
             double d = player.getDuration() > 0 ? player.getDuration() / 1000.0 : 0;
             event("progress", resumeAtMs / 1000.0, d);   // save it now: the app may be killed while in the background
         }
-        player.stop();
+        player.stop(); runningUrl = null;
         resumePending = true;
     }
 
