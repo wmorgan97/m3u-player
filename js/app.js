@@ -5,6 +5,7 @@ import { net, fetchText, isMixed, streamUrl } from './net.js';
 import { Xtream, parseXtreamLink, liveChannels, movieItems, seriesItems } from './xtream.js';
 import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from './epg.js';
 import { groupSeries, vodMeta, displayTitle } from './vod.js';
+import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -118,7 +119,8 @@ async function init() {
   else if (location.hash.startsWith('#/guide') && state.current) ensureGuide(guideScope(state.current));
   if (resumeChannel) ensureGuide([resumeChannel]);
   syncNow();
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); } });
+  setTimeout(() => checkNewEpisodes(), 20_000);   // after start-up, quietly
   // The saved guides load once the first screen is up and the remote is responsive, not during it.
   await new Promise(r => setTimeout(r, 600));
   await Promise.all(state.playlists.map(p => loadGuide(p.id)));
@@ -3026,6 +3028,48 @@ function programmeSheet(c, prog) {
   });
 }
 
+// ---------- new episodes of favourite series ----------
+// Each favourite series' episode list is compared with the last one seen (see newepisodes.js); new ones are announced
+// with a notification (the iPhone app: a real iOS one; tapping it opens the series). Checked on start-up and whenever the
+// app comes back to the front, at most every 3 hours; the iPhone also asks iOS for background time to check.
+const EP_CHECK_EVERY = 3 * 60 * MINUTE;
+let epChecking = null;
+function checkNewEpisodes(force = false) {
+  if (epChecking) return epChecking;
+  epChecking = (async () => {
+    const meta = (await db.get('epSeen')) || { at: 0, series: {} };
+    if (!force && Date.now() - (meta.at || 0) < EP_CHECK_EVERY) return 0;
+    const favs = (state.favorites || []).filter(f => f.kind === 'series' && f.sid != null).slice(-40);
+    let found = 0;
+    for (const f of favs) {
+      const p = playlistOf(f), x = p && xtOf(p);
+      if (!x) continue;
+      let list;
+      try { list = episodeList(await x.seriesInfo(f.sid)); } catch { continue; }   // offline / provider busy: try next time
+      const key = `${p.id}|${f.sid}`;
+      const { added, seen } = diffEpisodes(meta.series[key], list);
+      meta.series[key] = seen;
+      if (added.length) { found++; announceEpisodes(f, added); }
+      await new Promise(r => setTimeout(r, 400));   // gentle on the provider
+    }
+    meta.at = Date.now();
+    await db.set('epSeen', meta);
+    return found;
+  })().finally(() => { epChecking = null; });
+  return epChecking;
+}
+function announceEpisodes(series, added) {
+  const name = displayTitle(series.name);
+  const { title, body } = newEpisodeText(name, added);
+  if (isNative) {
+    globalThis.Capacitor.nativePromise('NativePlayer', 'notify', { id: `ep-${series.id}-${added[added.length - 1].id}`, title, body, series: JSON.stringify(cloneChannel(series)) }).catch(() => {});
+  } else {
+    try { if (Notification.permission === 'granted') new Notification(title, { body, icon: 'icons/icon-192.png' }); } catch {}
+  }
+  if (!document.hidden) toast(`${title} — ${body}`, { action: 'Open', fn: () => seriesSheet(series) });
+}
+globalThis.__bgCheck = () => checkNewEpisodes(true).catch(() => 0);   // iOS background refresh (see AppDelegate)
+
 // ---------- reminders ----------
 // Fire a few minutes before a programme starts: a phone notification when the installed app has
 // permission, and always a tap-to-watch toast if the app is open.
@@ -3072,6 +3116,7 @@ globalThis.__reminderTap = async () => {
   try {
     const res = await globalThis.Capacitor.nativePromise('NativePlayer', 'takeReminderTap', {});
     if (res?.channel) playChannel([JSON.parse(res.channel)], 0);
+    if (res?.series) seriesSheet(JSON.parse(res.series));   // a new-episode notification: open that series
   } catch {}
 };
 

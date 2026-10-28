@@ -20,6 +20,17 @@ class MainViewController: CAPBridgeViewController {
         let args = ProcessInfo.processInfo.arguments
         #if DEBUG
         // Test hook: `-testReminder <stream url>` schedules a real reminder 5 s from now for a pretend channel on that stream.
+        // `-testNewEpisode`: a sample new-episode notification, exactly as the favourites check would post it.
+        if args.contains("-testNewEpisode"), !testReminderDone {
+            testReminderDone = true
+            let content = UNMutableNotificationContent()
+            content.title = "New episode: The Test Show"; content.body = "S2 E5 · The Return"; content.sound = .default
+            content.userInfo = ["series": "{\"name\":\"The Test Show\",\"kind\":\"series\"}"]
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in
+                UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "ep-test", content: content, trigger: UNTimeIntervalNotificationTrigger(timeInterval: 8, repeats: false)))
+            }
+            return
+        }
         // `-testReminderTap <stream url>`: as if the app had just been opened by tapping a reminder for that channel.
         if let r = args.firstIndex(of: "-testReminderTap"), r + 1 < args.count, !testReminderDone {
             testReminderDone = true
@@ -69,11 +80,14 @@ class MainViewController: CAPBridgeViewController {
 /// A reminder notification tapped: its channel, until the web app picks it up (it may still be loading).
 enum ReminderTaps {
     static var pending: String?
-    static func tapped(_ channel: String, webView: WKWebView?) {
-        pending = channel
+    static var pendingSeries: String?
+    static func tapped(_ channel: String, webView: WKWebView?) { tapped(channel: channel, series: nil, webView: webView) }
+    static func tapped(channel: String?, series: String?, webView: WKWebView?) {
+        if let c = channel { pending = c }
+        if let s = series { pendingSeries = s }
         // Tell the page; on a cold launch it may still be loading, so keep asking until it has taken the channel.
         func poke(_ tries: Int) {
-            guard pending != nil, tries > 0 else { return }
+            guard pending != nil || pendingSeries != nil, tries > 0 else { return }
             let web = webView ?? (UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.windows.first?.rootViewController as? CAPBridgeViewController }.first)?.webView
             web?.evaluateJavaScript("typeof window.__reminderTap === 'function' && (window.__reminderTap(), true)", completionHandler: nil)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { poke(tries - 1) }
@@ -94,6 +108,7 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "remind", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "unremind", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "takeReminderTap", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "notify", returnType: CAPPluginReturnPromise),
     ]
 
     // MARK: reminders
@@ -128,6 +143,20 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    /// A notification now (new episodes): { id, title, body, series (JSON, opened on tap) }.
+    @objc func notify(_ call: CAPPluginCall) {
+        let content = UNMutableNotificationContent()
+        content.title = call.getString("title") ?? ""
+        content.body = call.getString("body") ?? ""
+        content.sound = .default
+        content.userInfo = ["series": call.getString("series") ?? ""]
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { call.resolve(["shown": false]); return }
+            center.add(UNNotificationRequest(identifier: call.getString("id") ?? UUID().uuidString, content: content, trigger: nil)) { _ in call.resolve(["shown": true]) }
+        }
+    }
+
     @objc func unremind(_ call: CAPPluginCall) {
         guard let id = call.getString("id") else { call.reject("Missing id"); return }
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["remind-\(id)"])
@@ -137,7 +166,11 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
     /// The channel of a reminder notification the app was opened from (once), for the web app to start playing.
     @objc func takeReminderTap(_ call: CAPPluginCall) {
         let ch = ReminderTaps.pending; ReminderTaps.pending = nil
-        call.resolve(ch.map { ["channel": $0] } ?? [:])
+        let se = ReminderTaps.pendingSeries; ReminderTaps.pendingSeries = nil
+        var out: [String: Any] = [:]
+        if let ch = ch { out["channel"] = ch }
+        if let se = se { out["series"] = se }
+        call.resolve(out)
     }
 
     @objc func play(_ call: CAPPluginCall) {
