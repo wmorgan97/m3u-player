@@ -3676,7 +3676,7 @@ const ADD_HINTS = {
 function addPlaylistSheet() {
   sheet(`<div class="sheet-title">Add playlist</div>
     <div class="tabs">
-      <button class="tab active" data-tab="xtream">Xtream</button><button class="tab" data-tab="url">Link</button>
+      <button class="tab active" data-tab="xtream">Xtream</button><button class="tab" data-tab="url">M3U URL</button>
       <button class="tab" data-tab="file">File</button><button class="tab" data-tab="paste">Paste</button>
     </div>
     <form class="form" id="addform">

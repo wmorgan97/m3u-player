@@ -21,12 +21,23 @@ class MainViewController: CAPBridgeViewController {
         item.list = (1...12).map { ("Episode \($0)", "S1 E\($0)") }
         item.listTitle = "Episodes"
         item.current = 2
-        let controller = VLCPlayerController(item: item) { event in print("[player] \(event)") }
-        controller.modalPresentationStyle = .fullScreen
-        present(controller, animated: false)
+        let controller = VLCPlayerController(item: item) { event in NSLog("M3UTEST player event %@", "\(event)") }
+        guard !children.contains(where: { $0 is VLCPlayerController }) else { return }
+        controller.show(in: self)
     }
 
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+
+    // The player sits on top of the app as a child (so it can shrink into a mini player with the app usable behind it):
+    // while it is full screen, it decides the status bar, home indicator and rotation.
+    private var fullPlayer: VLCPlayerController? { children.compactMap { $0 as? VLCPlayerController }.first { !$0.isMini } }
+    override var childForStatusBarHidden: UIViewController? { fullPlayer }
+    override var childForHomeIndicatorAutoHidden: UIViewController? { fullPlayer }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { fullPlayer?.supportedInterfaceOrientations ?? .allButUpsideDown }
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        children.compactMap { $0 as? VLCPlayerController }.forEach { $0.layoutInParent() }
+    }
 }
 
 /// Native features the web app calls through `Capacitor.nativePromise('NativePlayer', …)`:
@@ -95,8 +106,9 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
         item.art = call.getString("art") ?? ""
         DispatchQueue.main.async {
             // Already open (channel up/down, next episode): swap the stream in place.
-            if let open = self.vlcController, open.presentingViewController != nil {
+            if let open = self.vlcController, open.parent != nil {
                 open.load(item)
+                open.expand()   // picked something while it was the mini player: back to full screen
                 call.resolve()
                 return
             }
@@ -105,9 +117,8 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
                 return
             }
             let controller = VLCPlayerController(item: item) { [weak self] event in self?.emit(event) }
-            controller.modalPresentationStyle = .fullScreen
             self.vlcController = controller
-            presenter.present(controller, animated: true)
+            controller.show(in: presenter)
             call.resolve()
         }
     }
@@ -153,6 +164,16 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
             presenter.present(sheet, animated: true)
             call.resolve()
         }
+    }
+}
+
+/// The player's root view. While it is the mini player only the visible card takes touches; the rest of the (scaled,
+/// cropped, invisible) player lets them through to the app behind.
+final class PlayerRootView: UIView {
+    var touchArea: CGRect?
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if let a = touchArea { return a.contains(point) }
+        return super.point(inside: point, with: event)
     }
 }
 
@@ -233,7 +254,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private var countdown: Timer?
     private var countdownLeft = 0
     // Swipes on films and episodes: left half brightness, right half volume, sideways to seek.
-    private enum Drag { case none, scrub, brightness, volume }
+    private enum Drag { case none, scrub, brightness, volume, minimize }
     private var drag = Drag.none
     private var dragFrom: Double = 0
     private var scrubTarget: Double = 0
@@ -265,9 +286,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+    override func loadView() { view = PlayerRootView() }
+    private var root: PlayerRootView? { view as? PlayerRootView }
 
-    override var prefersStatusBarHidden: Bool { true }
-    override var prefersHomeIndicatorAutoHidden: Bool { true }
+    override var prefersStatusBarHidden: Bool { !isMini }
+    override var prefersHomeIndicatorAutoHidden: Bool { !isMini }
     // Rotate button: forces landscape even with the phone's rotation lock on (like VLC), and back to portrait.
     private var forcedLandscape = false
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { forcedLandscape ? .landscape : .allButUpsideDown }
@@ -275,10 +298,10 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         forcedLandscape.toggle()
         if #available(iOS 16.0, *) {
             let mask: UIInterfaceOrientationMask = forcedLandscape ? .landscapeRight : .portrait
-            setNeedsUpdateOfSupportedInterfaceOrientations()
+            (parent ?? self).setNeedsUpdateOfSupportedInterfaceOrientations()
             view.window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
             if !forcedLandscape {   // back to following the phone (portrait while rotation lock is on)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.setNeedsUpdateOfSupportedInterfaceOrientations() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in (self?.parent ?? self)?.setNeedsUpdateOfSupportedInterfaceOrientations() }
             }
         } else {
             UIDevice.current.setValue((forcedLandscape ? UIInterfaceOrientation.landscapeRight : .portrait).rawValue, forKey: "orientation")
@@ -309,6 +332,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
         setUpVolumeIndicator()
+        setUpMiniClose()
         setUpRemoteControls()
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
         load(item)
@@ -317,18 +341,25 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     // MARK: touch
     private var touchStart: (point: CGPoint, time: TimeInterval)?
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if isMini { touchStart = touches.first.map { ($0.location(in: parent?.view), ProcessInfo.processInfo.systemUptime) }; return }
         if locked { showUnlock(); return super.touchesBegan(touches, with: event) }   // locked: a touch only offers the unlock button
         if let t = touches.first, !isOnControl(t) { touchStart = (t.location(in: view), ProcessInfo.processInfo.systemUptime) }
         super.touchesBegan(touches, with: event)
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesMoved(touches, with: event)
-        guard !locked, !item.live, let t = touches.first, let start = touchStart else { return }
+        if isMini { return miniMoved(touches) }
+        guard !locked, let t = touches.first, let start = touchStart else { return }
         let p = t.location(in: view), dx = p.x - start.point.x, dy = p.y - start.point.y
         let h = view.bounds.height, w = view.bounds.width
+        let portrait = h > w
         if drag == .none {
             guard max(abs(dx), abs(dy)) > 14 else { return }
-            if abs(dx) > abs(dy) { drag = .scrub; dragFrom = position().0; scrubTarget = dragFrom }
+            // Portrait: a downward swipe shrinks the player into the mini player (YouTube-style), live or film.
+            if portrait && dy > 0 && abs(dy) > abs(dx) && start.point.y >= 50 && parent != nil { drag = .minimize; hideOverlay() }
+            else if item.live { return }   // live: sideways swipes change channel (on release, see touchesEnded)
+            else if abs(dx) > abs(dy) { drag = .scrub; dragFrom = position().0; scrubTarget = dragFrom }
+            else if portrait { touchStart = nil; return }   // films in portrait: up/down is for minimising, not brightness/volume
             else if start.point.y < 50 || start.point.y > h - 50 { touchStart = nil; return }   // the system's own edge swipes
             else if start.point.x < w / 2 { drag = .brightness; dragFrom = Double(UIScreen.main.brightness) }
             else { drag = .volume; dragFrom = Double(AVAudioSession.sharedInstance().outputVolume) }
@@ -347,11 +378,24 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             let v = min(1, max(0, dragFrom - Double(dy / (h * 0.6))))
             volumeSlider?.value = Float(v)
             showVolume(Float(v))   // (the same pill as the side buttons)
+        case .minimize:
+            // Follows the finger: shrinks toward the corner as it is pulled down.
+            let f = min(1, max(0, dy) / (h * 0.6))
+            let s = 1 - 0.5 * f
+            view.transform = CGAffineTransform(translationX: w * 0.25 * f, y: max(0, dy) * 0.85).scaledBy(x: s, y: s)
+            setCrop(min(1, f * 3), scale: s)   // the crop reaches the picture early in the pull
         case .none: break
         }
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         defer { touchStart = nil; super.touchesEnded(touches, with: event) }
+        if isMini { return miniEnded(touches) }
+        if drag == .minimize {
+            drag = .none
+            let dy = (touches.first.map { $0.location(in: view).y } ?? 0) - (touchStart?.point.y ?? 0)
+            if dy > view.bounds.height * 0.18 { minimize() } else { springBack() }
+            return
+        }
         if drag != .none {
             if drag == .scrub { player.time = VLCTime(int: Int32(scrubTarget * 1000)) }
             let wasVolume = drag == .volume
@@ -361,10 +405,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         }
         guard let t = touches.first, let start = touchStart else { return }
         let p = t.location(in: view), dx = p.x - start.point.x, dy = p.y - start.point.y
-        if abs(dy) > 60 && abs(dy) > abs(dx) * 1.5 { return swipe(up: dy < 0) }          // vertical swipe: channel up/down
+        if item.live && abs(dx) > 60 && abs(dx) > abs(dy) * 1.5 { return zap(next: dx < 0) }   // live: swipe left = next channel, right = previous
         if abs(dx) < 12 && abs(dy) < 12 && ProcessInfo.processInfo.systemUptime - start.time < 0.6 { tapped(at: p) }
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if drag == .minimize { drag = .none; springBack() }
         if drag != .none { let wasVolume = drag == .volume; drag = .none; if !wasVolume { showHud(hud.text ?? "", sticky: false) } }
         touchStart = nil
         super.touchesCancelled(touches, with: event)
@@ -510,7 +555,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         tearDownRemoteControls()
         if UIScreen.main.brightness != startBrightness { UIScreen.main.brightness = startBrightness }   // the phone's own brightness back
         player.stop()
-        dismiss(animated: true)
+        leaveHost()
     }
 
     private func position() -> (Double, Double) {
@@ -852,10 +897,185 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     }
 
 
-    private func swipe(up: Bool) {
+    private func zap(next: Bool) {
         guard item.live else { return }
-        if up, item.hasNext { onEvent(["type": "step", "dir": 1]) }
-        if !up, item.hasPrev { onEvent(["type": "step", "dir": -1]) }
+        if next, item.hasNext { onEvent(["type": "step", "dir": 1]) }
+        if !next, item.hasPrev { onEvent(["type": "step", "dir": -1]) }
+    }
+
+    // MARK: mini player
+    // Swipe down (portrait) shrinks the player into a card in the bottom-right corner, still playing, with the app
+    // usable behind it. Tap the card (or swipe it up) for full screen again; swipe it down or tap × to stop.
+    private(set) var isMini = false
+    private let miniClose = UIButton(type: .system)
+
+    func show(in host: UIViewController) {
+        host.addChild(self)
+        view.frame = host.view.bounds
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.alpha = 0
+        view.transform = CGAffineTransform(translationX: 0, y: 40)
+        host.view.addSubview(view)
+        didMove(toParent: host)
+        UIView.animate(withDuration: 0.28, delay: 0, options: .curveEaseOut) { self.view.alpha = 1; self.view.transform = .identity }
+        hostAppearanceChanged()
+    }
+
+    private func leaveHost() {
+        guard let host = parent else { dismiss(animated: true); return }
+        UIView.animate(withDuration: 0.22, delay: 0, options: .curveEaseIn, animations: {
+            self.view.alpha = 0
+            if self.isMini { self.view.transform = self.view.transform.concatenating(CGAffineTransform(translationX: 0, y: 60)) }
+        }) { _ in
+            self.willMove(toParent: nil)
+            self.view.removeFromSuperview()
+            self.removeFromParent()
+            host.setNeedsStatusBarAppearanceUpdate()
+            host.setNeedsUpdateOfHomeIndicatorAutoHidden()
+            if #available(iOS 16.0, *) { host.setNeedsUpdateOfSupportedInterfaceOrientations() }
+        }
+    }
+
+    private func hostAppearanceChanged() {
+        guard let host = parent else { return }
+        host.setNeedsStatusBarAppearanceUpdate()
+        host.setNeedsUpdateOfHomeIndicatorAutoHidden()
+        if #available(iOS 16.0, *) { host.setNeedsUpdateOfSupportedInterfaceOrientations() }
+    }
+
+    // While shrinking/growing, the full-size player is cropped to the picture's 16:9 band (the black above and below a
+    // portrait player would otherwise make a tall card that snaps to 16:9 at the end).
+    private let cropMask = UIView()
+    private func pictureBand(_ size: CGSize) -> CGRect {
+        // The picture's real shape (2.35:1 films, 16:9 TV…), as VLC draws it fitted to the width; 16:9 until known.
+        let v = player.videoSize
+        let aspect = v.width > 0 && v.height > 0 ? v.width / v.height : 16 / 9
+        let h = min(size.height, size.width / aspect)
+        return CGRect(x: 0, y: (size.height - h) / 2, width: size.width, height: h)
+    }
+    /// 0 = whole player, 1 = just the picture band (with the card's rounded corners at scale k).
+    private func setCrop(_ f: CGFloat, cornerOnScreen: CGFloat = 12, scale k: CGFloat = 1) {
+        let full = CGRect(origin: .zero, size: view.bounds.size), band = pictureBand(view.bounds.size)
+        cropMask.backgroundColor = .black
+        cropMask.frame = CGRect(x: 0, y: full.minY + (band.minY - full.minY) * f, width: full.width, height: full.height + (band.height - full.height) * f)
+        cropMask.layer.cornerRadius = cornerOnScreen / max(k, 0.01) * f
+        if view.mask !== cropMask { view.mask = cropMask }
+    }
+    private func clearCrop() { view.mask = nil; view.layer.cornerRadius = 0 }
+
+    private func miniFrame(in hostView: UIView) -> CGRect {
+        let b = hostView.bounds, safe = hostView.safeAreaInsets
+        let band = pictureBand(view.bounds.size)
+        let w = (min(b.width, b.height) * 0.52).rounded(), h = (w * band.height / max(band.width, 1)).rounded()
+        return CGRect(x: b.width - w - 12 - safe.right, y: b.height - safe.bottom - h - 76, width: w, height: h)   // (above the app's tab bar)
+    }
+
+    // The mini player is the full-size player drawn scaled down onto the card and cropped to its picture: the video is
+    // never resized (resizing VLC's view made it go black for a moment), only transformed.
+    private func miniTransform(in host: UIView) -> (CGAffineTransform, CGFloat) {
+        let full = view.bounds.size, band = pictureBand(full), target = miniFrame(in: host)
+        let k = target.width / band.width
+        // Scale about the view's centre, then move the picture band's centre onto the card's centre.
+        let bandOffset = (band.midY - full.height / 2) * k
+        let t = CGAffineTransform(translationX: target.midX - full.width / 2, y: target.midY - full.height / 2 - bandOffset).scaledBy(x: k, y: k)
+        return (t, k)
+    }
+
+    private func placeMiniClose(scale k: CGFloat) {
+        let band = pictureBand(view.bounds.size), size = 26 / k, inset = 6 / k
+        NSLayoutConstraint.deactivate(miniClose.constraints + view.constraints.filter { $0.firstItem === miniClose || $0.secondItem === miniClose })
+        miniClose.translatesAutoresizingMaskIntoConstraints = true
+        miniClose.frame = CGRect(x: band.maxX - size - inset, y: band.minY + inset, width: size, height: size)
+        miniClose.layer.cornerRadius = size / 2
+        miniClose.setImage(UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12 / k, weight: .bold)), for: .normal)
+    }
+
+    /// Keeps the mini card in its corner when the screen turns or the app's layout changes.
+    func layoutInParent() {
+        guard let host = parent, isMini, drag == .none, touchStart == nil else { return }
+        let (t, k) = miniTransform(in: host.view)
+        view.transform = t
+        setCrop(1, scale: k)
+        placeMiniClose(scale: k)
+        root?.touchArea = pictureBand(view.bounds.size)
+    }
+
+    func minimize() {
+        guard let host = parent, !isMini, !locked else { springBack(); return }
+        isMini = true
+        hideOverlay(); hud.alpha = 0; volumePill.alpha = 0
+        let (t, k) = miniTransform(in: host.view)
+        placeMiniClose(scale: k)
+        miniClose.alpha = 0; miniClose.isHidden = false
+        view.bringSubviewToFront(miniClose)
+        root?.touchArea = pictureBand(view.bounds.size)
+        UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0.2, options: [.beginFromCurrentState, .allowUserInteraction]) {
+            self.view.transform = t
+            self.setCrop(1, scale: k)
+        } completion: { _ in
+            guard self.isMini else { return }
+            UIView.animate(withDuration: 0.15) { self.miniClose.alpha = 1 }
+        }
+        hostAppearanceChanged()
+    }
+
+    func expand() {
+        guard parent != nil, isMini else { return }
+        isMini = false
+        root?.touchArea = nil
+        UIView.animate(withDuration: 0.1) { self.miniClose.alpha = 0 } completion: { _ in if !self.isMini { self.miniClose.isHidden = true } }
+        UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0.2, options: [.beginFromCurrentState]) {
+            self.view.transform = .identity
+            self.setCrop(0)
+        } completion: { _ in
+            if !self.isMini { self.clearCrop() }
+        }
+        hostAppearanceChanged()
+        showOverlay()
+    }
+
+    private func springBack() {
+        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0.3, options: [.beginFromCurrentState]) {
+            self.view.transform = .identity
+            self.setCrop(0)
+        } completion: { _ in if !self.isMini { self.clearCrop() } }
+    }
+
+    private func miniMoved(_ touches: Set<UITouch>) {
+        guard let t = touches.first, let start = touchStart, let host = parent else { return }
+        let dy = t.location(in: host.view).y - start.point.y
+        let base = miniTransform(in: host.view).0
+        view.transform = base.concatenating(CGAffineTransform(translationX: 0, y: dy > 0 ? dy : dy * 0.4))   // follows the finger down; resists going up
+        view.alpha = dy > 0 ? max(0.35, 1 - dy / 220) : 1
+    }
+
+    private func miniEnded(_ touches: Set<UITouch>) {
+        defer { touchStart = nil }
+        guard let t = touches.first, let start = touchStart, let host = parent else { return }
+        let dy = t.location(in: host.view).y - start.point.y, dx = t.location(in: host.view).x - start.point.x
+        if dy > 50 { finish(); return }                                  // swiped down: stop
+        let base = miniTransform(in: host.view).0
+        UIView.animate(withDuration: 0.25) { self.view.transform = base; self.view.alpha = 1 }
+        if dy < -40 || (abs(dx) < 12 && abs(dy) < 12) { expand() }       // swiped up or tapped: full screen
+    }
+
+    @objc private func miniCloseTapped() { finish() }
+
+    private func setUpMiniClose() {
+        miniClose.setImage(UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .bold)), for: .normal)
+        miniClose.tintColor = .white
+        miniClose.backgroundColor = UIColor(white: 0, alpha: 0.55)
+        miniClose.layer.cornerRadius = 13
+        miniClose.isHidden = true
+        miniClose.translatesAutoresizingMaskIntoConstraints = false
+        miniClose.addTarget(self, action: #selector(miniCloseTapped), for: .touchUpInside)
+        view.addSubview(miniClose)
+        NSLayoutConstraint.activate([
+            miniClose.topAnchor.constraint(equalTo: view.topAnchor, constant: 6),
+            miniClose.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
+            miniClose.widthAnchor.constraint(equalToConstant: 26),
+            miniClose.heightAnchor.constraint(equalToConstant: 26),
+        ])
     }
 
     @objc private func closeTapped() { finish() }
