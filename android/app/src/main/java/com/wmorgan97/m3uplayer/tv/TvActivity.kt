@@ -62,6 +62,35 @@ class TvActivity : ComponentActivity() {
     private var backAt = 0L
     private var lastRepeatAt = 0L
     private var pinGate by mutableStateOf<(() -> Unit)?>(null)   // a locked channel waiting for its PIN
+    // ---------- voice search ----------
+    // The mic beside the search field, the remote's search key, or the Assistant's "search for … on M3U Player":
+    // Android's speech recogniser (Google's on the Shield) listens; what it heard goes into Search and runs.
+    var listening by mutableStateOf(false); private set
+    var voiceText: String? = null
+    var voiceTick by mutableIntStateOf(0); private set
+    private val voice = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { r ->
+        listening = false
+        val heard = r.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.trim()
+        if (r.resultCode == RESULT_OK && !heard.isNullOrEmpty()) searchFor(heard)
+    }
+    /** Opens Search (if it isn't open) with [text] in the field, searched at once. */
+    fun searchFor(text: String) { if (stack.lastOrNull() !is Screen.Search) root(Screen.Search); voiceText = text; voiceTick++ }
+    fun startVoice() {
+        if (stack.lastOrNull() !is Screen.Search) root(Screen.Search)
+        val i = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "en-GB")
+            .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "Search channels, programmes, movies and series")
+            .putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        try { voice.launch(i); listening = true }
+        catch (e: android.content.ActivityNotFoundException) { listening = false; android.widget.Toast.makeText(this, "Voice search isn't available on this device", android.widget.Toast.LENGTH_SHORT).show() }
+    }
+    private fun handleSearchIntent(i: Intent?) {
+        if (i?.action != Intent.ACTION_SEARCH) return
+        val q = i.getStringExtra(android.app.SearchManager.QUERY)?.trim(); i.action = null
+        if (!q.isNullOrEmpty()) searchFor(q) else startVoice()
+    }
+
     var resumeTick by mutableIntStateOf(0)                // bumped on coming back (from the player): the preview starts again   // a reminder that just came up (shown over the app)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,6 +110,7 @@ class TvActivity : ComponentActivity() {
             .build())
         Repo.cachedSync()
         testHook(intent)   // (adb test hook: on create and on new intents only, never again on resume)
+        handleSearchIntent(intent)
         lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
         lifecycleScope.launch { runCatching { Repo.liveChannels() }; delay(4000); Repo.warmAllLogos(applicationContext) }   // channels ready before Live TV is opened
         lifecycleScope.launch { delay(1500); runCatching { Repo.overview("movies") }; runCatching { Repo.overview("series") } }   // rows ready before Movies / Series are opened
@@ -89,6 +119,8 @@ class TvActivity : ComponentActivity() {
         lifecycleScope.launch { while (true) { checkReminders(); delay(15_000) } }
         // Every 10 min, pick up what the other devices changed (reminders set on the phone, favourites) while the app stays open.
         lifecycleScope.launch { while (true) { delay(10 * 60_000L); if (Repo.hasKey()) runCatching { Repo.sync() } } }
+        // Followed teams: every 3 hours, a reminder for each of their matches (checkFollows keeps its own pace).
+        lifecycleScope.launch { delay(90_000); while (true) { SportsHub.checkFollows(applicationContext); delay(30 * 60_000L) } }
         // Guide auto-refresh for the channels you use most (favourites, recents, the preview's group): every 30 min it asks
         // again, and each channel actually re-downloads at most every 3 h. The server re-reads the guide source every 6 h.
         lifecycleScope.launch {
@@ -124,13 +156,16 @@ class TvActivity : ComponentActivity() {
         resumeTick++
     }
     override fun onStop() { super.onStop(); Preview.suspended = true; Preview.stop() }   // Home / the player: the preview's stream closes
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); testHook(intent) }
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); testHook(intent); handleSearchIntent(intent) }
 
     /** Test hook (adb only): `--es testStream <url> --ei testIndex n` plays a pretend channel list on that stream, so the
      *  player's channel panel, last-channel entry and zapping can be checked without touching the provider. */
     private fun testHook(i: Intent?) {
         i?.getStringExtra("testPreview")?.let { Preview.testUrl = it.ifEmpty { null }; i.removeExtra("testPreview") }
         i?.getStringExtra("testSports")?.let { SportsHub.test = it; i.removeExtra("testSports") }
+        i?.getStringExtra("testFollows")?.let { f -> i.removeExtra("testFollows"); Repo.testFollows = f.split('|').filter { it.isNotBlank() }.map { Repo.Follow(it.trim(), 1) }.ifEmpty { null }; Repo.version++ }
+        // `--es testFollowSync <name>`: follows <name> (synced), then unfollows it 5 s later: checks the server round trip.
+        i?.getStringExtra("testFollowSync")?.let { n -> i.removeExtra("testFollowSync"); Repo.toggleFollow(n); lifecycleScope.launch { delay(5_000); if (Repo.isFollowing(n)) Repo.toggleFollow(n) } }
         i?.getStringExtra("testScreen")?.let { sc -> i.removeExtra("testScreen"); when (sc) { "live" -> root(Screen.Live()); "guide" -> root(Screen.Guide()); "home" -> root(Screen.Home); "sports" -> root(Screen.Sports) } }
         i?.getStringExtra("testSeries")?.let { q -> i.removeExtra("testSeries")   // test hook: open the first series found for q
             lifecycleScope.launch { runCatching { Repo.search(q) }.getOrNull()?.second?.firstOrNull()?.let { root(Screen.Vods("series")); go(Screen.Details(it)) } } }
@@ -169,6 +204,11 @@ class TvActivity : ComponentActivity() {
             val t = android.os.SystemClock.uptimeMillis()
             if (e.repeatCount > 0 && (t - e.eventTime > 40 || t - lastRepeatAt < 90)) return true
             lastRepeatAt = t
+        }
+        // The remote's search / mic key: Search, listening.
+        if (e.keyCode == KeyEvent.KEYCODE_SEARCH || e.keyCode == KeyEvent.KEYCODE_VOICE_ASSIST) {
+            if (e.action == KeyEvent.ACTION_UP && !listening) startVoice()
+            return true
         }
         if (e.action == KeyEvent.ACTION_DOWN && e.keyCode in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 && stack.last() !is Screen.Search && stack.last() !is Screen.Settings) {
             zap = (zap + (e.keyCode - KeyEvent.KEYCODE_0)).takeLast(4)

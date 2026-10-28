@@ -3,6 +3,7 @@ package com.wmorgan97.m3uplayer.tv
 import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,6 +18,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -79,6 +88,41 @@ private val COMPETITIONS = listOf(
     Competition("MLB", listOf("MLB"), true),
 )
 
+/** UK channels (the default for Sports, as on the iPhone: js/sports.js isUkChannel): a UK group or name tag ("UK| Sky
+ *  Sports", "UK: Sky Sports 1", "(UK)", "🇬🇧"), or a UK broadcaster's name, as long as nothing marks it as another
+ *  country ("CA| TSN", "🇺🇸 TV Guide (USA)", "US: ESPN") or language ("DE| Sport"). */
+private val UK_TAG = Regex("""(?:^|[\s|:·\-–\[(/])(?:uk|gb|united kingdom)(?=$|[\s|:·\-–\])/])|🇬🇧""", RegexOption.IGNORE_CASE)
+private val UK_BRAND = Regex("""sky sports|\btnt sports?\b|\bbt sport|\bbbc\b|\bitv ?\d?\b|\bstv\b|channel [45]\b|premier sports|eurosport|viaplay|\blfc tv\b|\bmutv\b|racing tv|\bs4c\b|\bfreesports\b|\bboxnation\b""", RegexOption.IGNORE_CASE)
+private val NOT_UK = Regex("""(?:^|[\s|:·\-–\[(/])(?:us|usa|ca|can|canada|au|aus|australia|nz|new zealand|za|ie|ireland|in|india|my|sg|ph|mena|arab|latino|africa)(?=$|[\s|:·\-–\])/])|🇺🇸|🇨🇦|🇦🇺|🇳🇿|🇮🇪""", RegexOption.IGNORE_CASE)
+private val NOT_UK_NAME = Regex("""^\s*(?:us|usa|ca|au|nz|ie|za|in|sg|my|hk|id|ph)\s*[:|\-]""", RegexOption.IGNORE_CASE)
+// Providers file other countries' channels under "UK| Football" too (Astro, SG Hub Sports, Now Sports HK, beIN, Vidio):
+// their own names give them away, whatever the group says.
+private val FOREIGN_BRAND = Regex("""\b(?:astro|starhub|hub sports?|now sports|bein|supersport|sportsnet|tsn|espn|fox sports?|kayo|optus|stan sport|spark sport|sky sport(?!s)|vidio|mola|true ?sports?|ziggo|canal\+|movistar|star sports?|sony (?:ten|six|sports)|ten sports?|willow|sportv|tudn|tyc)\b|\bv\+|vision\+""", RegexOption.IGNORE_CASE)
+private val OTHER_LANG_TAG = Regex("""^\s*(?:fr|de|es|it|nl|pt|pl|tr|ar|ru|gr|ro|bg|hu|cz|sk|se|no|dk|fi|be|ch|at|br|mx|la|in|pk|il|ir|al|rs|hr|si|ba|mk|cn|jp|kr|ph|my|th|vn|af|ex|ku|mt|lat|swe|nor|den|ger|ita|esp|por|pol|tur|ara|rus|bra|mex|hrv)\s*[:|\-]""", RegexOption.IGNORE_CASE)
+private val ukGroups = java.util.concurrent.ConcurrentHashMap<String, Int>()   // group -> 0 not UK, 1 UK, 2 depends on the name
+fun isUkChannel(c: Channel): Boolean {
+    val g = ukGroups.getOrPut(c.group) { if (OTHER_LANG_TAG.containsMatchIn(c.group) || NOT_UK.containsMatchIn(c.group) || FOREIGN_BRAND.containsMatchIn(c.group)) 0 else if (UK_TAG.containsMatchIn(c.group)) 1 else 2 }
+    if (g == 0 || OTHER_LANG_TAG.containsMatchIn(c.name) || NOT_UK_NAME.containsMatchIn(c.name) || FOREIGN_BRAND.containsMatchIn(c.name)) return false
+    return g == 1 || UK_TAG.containsMatchIn(c.name) || UK_BRAND.containsMatchIn(c.name)
+}
+
+/** Actually live, not just on air (as the iPhone: js/sports.js isNoise + isLiveEvent): the guide tags live events
+ *  ("Arsenal v Chelsea ᴸᶦᵛᵉ", "Live: …", "… (Live)"), or the description says it's live coverage. Replays, "Best of",
+ *  "Gold", old finals and studio shows ("The Premier League Show ᴸᶦᵛᵉ") don't count. */
+private val TAGS = Regex("[ᴬ-ᵪᶜ-ᶿ²³¹⁰-₟ⱽ]+")
+private val NOT_EVENT = Regex("""\b(show|stories|years|netbusters|reload|weekly|episode|special|extra|talk|soccer saturday|goals on sunday|highlights?|hls|magazine|review|preview|reloaded|rewind|classics?|best (?:goals|of)|goals|gold(?! cup)|en 60|compacto|resumo|top 10|power rankings|fantasy|report|re-?airs?|stock exchange|countdown|draw|press conference|documentary|anthology|replay|encore|retro|in 90|recap|wrap|wins the|story of|look ?back|legends|greatest|the debate|news|daily|tonight show|podcast|uncut|central|centre|center)\b""", RegexOption.IGNORE_CASE)
+private val PLACEHOLDER = Regex("""^[\s#*=_~-]{2,}|no event|^next\s*\||^\W*$|off ?air|to be announced|^tba$|^tbc$|stream (?:offline|starts)""", RegexOption.IGNORE_CASE)
+private val LIVE_MARK = Regex("""ᴸᶦᵛᵉ|^\s*live\b|[(\[\-–|]\s*live\s*[)\]]?\s*$|\blive\s*[:|]""", RegexOption.IGNORE_CASE)
+private val LIVE_DESC = Regex("""^(?:live|live coverage|coverage of)\b|\blive coverage\b|\bcoverage of\b.*\blive\b""", RegexOption.IGNORE_CASE)
+private val NOT_LIVE_DESC = Regex("""\b(relive|highlights|replay|repeat|classic)\b""", RegexOption.IGNORE_CASE)
+fun isLiveEvent(title: String, desc: String): Boolean {
+    val t = title.replace(TAGS, "").trim()
+    if (t.isEmpty() || PLACEHOLDER.containsMatchIn(t) || NOT_EVENT.containsMatchIn(t)) return false
+    if (LIVE_MARK.containsMatchIn(title)) return true
+    val d = desc.take(120)
+    return LIVE_DESC.containsMatchIn(d) && !NOT_LIVE_DESC.containsMatchIn(d)
+}
+
 /** One programme on one of your channels; [comp] is the competition it was found under (null: a sports channel's own). */
 data class SportItem(val c: Channel, val p: Programme, val comp: String?) {
     val key get() = "${c.url}|${p.start}"
@@ -99,20 +143,31 @@ object SportsHub {
      *  clears) a reminder on it, so the dialog and the bell can be checked without pressing OK near a live channel. */
     @Volatile var test: String? = null
     val busy get() = running.value
+    /** Whether [q]'s search has come back (saved or fresh): until then a team's card says it's looking. */
+    fun searched(q: String) = q in raw
     val doneCount get() = raw.size
     val total get() = COMPETITIONS.sumOf { it.queries.size }
     private val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
 
-    private fun file(c: Context, q: String) = File(c.filesDir, "sports-" + q.lowercase().replace(Regex("[^a-z0-9]+"), "-") + ".json")
+    // UK-only and all-countries results are saved apart (a UK search only looks through your UK channels' guide).
+    private fun file(c: Context, q: String) = File(c.filesDir, "sports-" + q.lowercase().replace(Regex("[^a-z0-9]+"), "-") + (if (Repo.sportsAll) "-all" else "") + ".json")
+    @Volatile private var again = false
+
+    /** UK channels only, or every country's: the page re-filters at once; going wider searches the guide again. */
+    fun showAll(c: Context, v: Boolean) {
+        if (Repo.sportsAll == v) return
+        Repo.sportsAll = v
+        if (v) { fetchedAt.clear(); again = true; refresh(c) }
+    }
 
     /** Saved results at once, then fresh searches (3 at a time) for any older than 30 minutes. */
     fun refresh(c: Context) {
-        if (running.value) return
-        running.value = true
+        if (running.value) { again = true; return }   // (runs again when this pass ends: e.g. a team just followed)
+        running.value = true; again = false
         scope.launch {
             try {
                 val now = System.currentTimeMillis()
-                val queries = COMPETITIONS.flatMap { it.queries }
+                val queries = (COMPETITIONS.flatMap { it.queries } + Repo.follows.map { it.q }).distinct()
                 for (q in queries) if (q !in raw) runCatching {   // the saved copies first: the page has shape at once
                     val f = file(c, q); if (!f.exists()) return@runCatching
                     raw[q] = parse(JSONObject(f.readText()).optJSONArray("matches")); fetchedAt[q] = f.lastModified()
@@ -128,22 +183,7 @@ object SportsHub {
                 val stale = queries.filter { force || (fetchedAt[it] ?: 0) <= now - FRESH }
                 if (stale.isEmpty()) return@launch
                 while (com.wmorgan97.m3uplayer.PlayerActivity.current != null) delay(5_000)   // never while watching
-                val batched = try {
-                    val ix = kotlinx.coroutines.withContext(Dispatchers.Default) { indexFor(live!!) }
-                    val body = JSONObject().put("urls", JSONArray(urls)).put("finds", JSONArray(stale))
-                        .put("ids", JSONArray(ix.byId.keys)).put("names", JSONArray(ix.byName.keys)).toString()
-                    val found = JSONObject(post(Repo.api("guide"), body)).optJSONObject("found")
-                    if (found != null) {
-                        for (q in stale) {
-                            val a = found.optJSONArray(q) ?: JSONArray()
-                            raw[q] = parse(a); fetchedAt[q] = System.currentTimeMillis()
-                            runCatching { file(c, q).writeText(JSONObject().put("matches", a).toString()) }
-                        }
-                        Log.i(TAG, "sports: ${stale.size} searches in one request, ${stale.sumOf { raw[it]?.size ?: 0 }} matches")
-                        true
-                    } else false
-                } catch (e: Exception) { Log.w(TAG, "sports batch failed: ${e.javaClass.simpleName}"); false }
-                if (batched) return@launch
+                if (searchBatch(c, live!!, stale)) return@launch
                 val sem = Semaphore(3)
                 kotlinx.coroutines.coroutineScope {
                     for (q in queries) {
@@ -164,8 +204,77 @@ object SportsHub {
                         } }
                     }
                 }
-            } finally { running.value = false }
+            } finally { running.value = false; if (again) { again = false; refresh(c) } }
         }
+    }
+
+    /** One request for several searches (up to 40), through only the guide channels you have. False: an older server
+     *  (no `found` in the reply) or a failure. */
+    private suspend fun searchBatch(c: Context, live: Repo.Live, qs: List<String>): Boolean = try {
+        val ix = kotlinx.coroutines.withContext(Dispatchers.Default) { indexFor(live) }
+        val body = JSONObject().put("urls", JSONArray(live.epgUrls)).put("finds", JSONArray(qs.take(40)))
+            .put("ids", JSONArray(ix.byId.keys)).put("names", JSONArray(ix.byName.keys)).toString()
+        val found = JSONObject(post(Repo.api("guide"), body)).optJSONObject("found")
+        if (found != null) {
+            for (q in qs.take(40)) {
+                val a = found.optJSONArray(q) ?: JSONArray()
+                raw[q] = parse(a); fetchedAt[q] = System.currentTimeMillis()
+                runCatching { file(c, q).writeText(JSONObject().put("matches", a).toString()) }
+            }
+            Log.i(TAG, "sports: ${qs.size} searches in one request, ${qs.sumOf { raw[it]?.size ?: 0 }} matches")
+            true
+        } else false
+    } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; Log.w(TAG, "sports batch failed: ${e.javaClass.simpleName}"); false }
+
+    // ---------- teams you follow ----------
+
+    @Volatile private var followsAt = 0L
+    /** Like the web app's checkFollows: every 3 hours (or at once, [force]: just followed), when nothing is playing,
+     *  search the guide for each followed team and set a reminder for each of its matches on your channels. */
+    fun checkFollows(c: Context, force: Boolean = false) {
+        val f = Repo.follows
+        val now = System.currentTimeMillis()
+        if (f.isEmpty() || Repo.testFollows != null || !force && now - followsAt < 3 * 3600_000L) return
+        followsAt = now
+        scope.launch {
+            try {
+                while (com.wmorgan97.m3uplayer.PlayerActivity.current != null) delay(60_000)   // never while watching
+                val live = Repo.liveChannels()
+                if (live.epgUrls.isEmpty()) return@launch
+                val qs = f.map { it.q }.filter { force || (fetchedAt[it] ?: 0) <= System.currentTimeMillis() - FRESH }
+                if (qs.isNotEmpty()) searchBatch(c, live, qs)
+                val t = System.currentTimeMillis()
+                val items = kotlinx.coroutines.withContext(Dispatchers.Default) { val ix = indexFor(live); f.flatMap { teamMatches(ix, it.q, t) } }.filter { it.p.start > t }
+                val n = Repo.addReminders(items.map { it.c to it.p })
+                Log.i(TAG, "follows: ${f.size} teams, ${items.size} matches, $n new reminders")
+            } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; Log.w(TAG, "follows check failed: ${e.javaClass.simpleName}") }
+        }
+    }
+
+    /** A followed team's matches in the next 3 days on your channels (live first, then soonest): fixtures with the
+     *  team in the title ("Arsenal v Spurs"), not the magazine shows and old matches around them. */
+    private fun teamMatches(ix: Index, q: String, now: Long): List<SportItem> {
+        val want = fastNorm(q); if (want.length < 2) return emptyList()
+        val year = java.util.Calendar.getInstance().apply { timeInMillis = now }.get(java.util.Calendar.YEAR)
+        val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.UK).format(java.util.Date(now))
+        val best = HashMap<String, Pair<SportItem, Int>>()
+        for (m in raw[q].orEmpty()) {
+            if (m.end <= now || m.start >= now + 72 * 3600_000L) continue
+            if (!fastNorm(m.title).contains(want) || !FIXTURE.containsMatchIn(" ${m.title} ") || !real(m.title, m.desc, today, year) || !isLiveEvent(m.title, m.desc)) continue
+            if (Repo.englishOnly && foreign(m.title, m.desc)) continue
+            if (fastNorm(m.title) == fastNorm(m.name) || m.title.contains(" | ")) continue
+            if (MAGAZINE.containsMatchIn(m.title) && !(LIVE_WORD.containsMatchIn(m.title) && FIXTURE_SPLIT.containsMatchIn(m.title))) continue
+            val cands = ix.byId[m.id.lowercase()] ?: ix.byName[fastNorm(m.name)] ?: continue
+            // The competition, when the title names one (so the card can drop it: "Premier League: Arsenal v Spurs").
+            val comp = COMPETITIONS.firstOrNull { cp -> cp.fixtures && (listOf(cp.label) + cp.queries).any { m.title.contains(it, true) } }?.label
+            val k = "${m.title.trim().lowercase()}|${m.start}"
+            for (ch in cands) {
+                if (fastNorm(ch.name) == fastNorm(m.title)) continue
+                val sc = prefer(ch); val prev = best[k]
+                if (prev == null || sc > prev.second) best[k] = SportItem(ch, Programme(m.start, m.end, m.title, m.desc), comp) to sc
+            }
+        }
+        return dedupe(best.values.map { it.first }.sortedBy { it.p.start })
     }
 
     private fun parse(a: JSONArray?): List<Match> = if (a == null) emptyList() else (0 until a.length()).mapNotNull { i ->
@@ -189,14 +298,15 @@ object SportsHub {
     @Volatile private var index: Index? = null
     private fun indexFor(l: Repo.Live): Index = synchronized(this) {
         // Keyed on the list's contents, not the object: a refresh that loads the same playlist again keeps the index.
-        val sig = "${l.channels.size}|${l.channels.firstOrNull()?.url}|${l.channels.lastOrNull()?.url}|${Repo.englishOnly}|${Repo.hiddenGroups.size}|${Repo.hiddenChannels.size}"
+        val sig = "${l.channels.size}|${l.channels.firstOrNull()?.url}|${l.channels.lastOrNull()?.url}|${Repo.englishOnly}|${Repo.sportsAll}|${Repo.hiddenGroups.size}|${Repo.hiddenChannels.size}"
         index?.takeIf { it.sig == sig }?.let { return it }
         val t0 = android.os.SystemClock.uptimeMillis()
         val hid = Repo.hiddenGroups; val hidCh = Repo.hiddenChannels
         val byId = HashMap<String, MutableList<Channel>>(); val byName = HashMap<String, MutableList<Channel>>()
-        val english = Repo.englishOnly
+        val english = Repo.englishOnly; val ukOnly = !Repo.sportsAll
         for (c in l.channels) {
             if (c.group in hid || c.url in hidCh || c.name.trimStart().startsWith("#")) continue
+            if (ukOnly && !isUkChannel(c)) continue
             if (english && (!englishGroup(c.group) || OTHER_LANG.containsMatchIn(c.name) || OTHER_LANG.containsMatchIn(c.group))) continue
             c.tvgId.trim().lowercase().takeIf { it.isNotEmpty() }?.let { byId.getOrPut(it) { ArrayList() } += c }
             val n = fastNorm(c.name)
@@ -254,7 +364,8 @@ object SportsHub {
         val d = DATE.find(title)?.value ?: DATE.find(desc.take(300))?.value ?: return true
         return d >= today
     }
-    data class Page(val live: List<SportItem>, val soon: List<SportItem>, val rows: List<Pair<String, List<SportItem>>>, val channels: List<Pair<Channel, Programme?>>)
+    data class Page(val live: List<SportItem>, val soon: List<SportItem>, val rows: List<Pair<String, List<SportItem>>>, val channels: List<Pair<Channel, Programme?>>,
+                    val teams: List<Pair<String, SportItem?>> = emptyList())
 
     /** Everything the page shows, worked out off the main thread from the searches so far and the loaded guide. */
     fun page(l: Repo.Live, now: Long): Page {
@@ -276,7 +387,7 @@ object SportsHub {
             val best = HashMap<String, Pair<SportItem, Int>>()
             for (q in comp.queries) for (m in raw[q].orEmpty()) {
                 if (m.end <= now || m.start >= now + 72 * 3600_000L) continue
-                if (!real(m.title, m.desc, today, year)) continue
+                if (!real(m.title, m.desc, today, year) || !isLiveEvent(m.title, m.desc)) continue
                 if (Repo.englishOnly && foreign(m.title, m.desc)) continue
                 // A programme named after its channel is a filler block, not an event ("DAZN BOXING TV 1", "Rugby 10: …").
                 if (fastNorm(m.title) == fastNorm(m.name) || m.title.contains(" | ")) continue
@@ -304,7 +415,7 @@ object SportsHub {
         // Live now also takes matches on the sports channels the searches didn't catch ("Live: Arsenal v Spurs").
         val liveKeys = live.mapTo(HashSet()) { matchKey(it) }
         for ((c, p) in chans) {
-            if (p == null || !FIXTURE.containsMatchIn(" ${p.title} ") || MAGAZINE.containsMatchIn(p.title) || !real(p.title, p.desc, today, year)) continue
+            if (p == null || !FIXTURE.containsMatchIn(" ${p.title} ") || MAGAZINE.containsMatchIn(p.title) || !real(p.title, p.desc, today, year) || !isLiveEvent(p.title, p.desc)) continue
             if (Repo.englishOnly && foreign(p.title, p.desc)) continue
             if (fastNorm(p.title) == fastNorm(c.name) || p.title.contains(" | ")) continue
             val it = SportItem(c, p, null)
@@ -316,9 +427,14 @@ object SportsHub {
         // Sports channels: only ones showing a real programme (event channels list their own name all day), your
         // favourites and recent channels first.
         val mine = (Repo.favorites() + Repo.recentChannels()).map { it.optString("url") }.withIndex().associate { (i, u) -> u to i }
-        val showing = chans.filter { (c, p) -> p != null && fastNorm(p.title) != fastNorm(c.name) && !fastNorm(c.name).contains(fastNorm(p.title)) && !p.title.contains(" | ") }
+        // (Only what's live: a channel showing a replay or a studio show is left out.)
+        val showing = chans.filter { (c, p) -> p != null && p.start <= now && p.end > now && isLiveEvent(p.title, p.desc) && real(p.title, p.desc, today, year) && fastNorm(p.title) != fastNorm(c.name) && !fastNorm(c.name).contains(fastNorm(p.title)) && !p.title.contains(" | ") }
             .distinctBy { it.first.url }.sortedBy { mine[it.first.url] ?: Int.MAX_VALUE }
-        return Page(live.distinctBy { it.key }.take(30), soon, rows, showing.take(40))
+        // My teams: each followed team's next match (or the one on now); a team with none in the guide still has its card.
+        val teams = Repo.follows.map { f -> f.q to teamMatches(ix, f.q, now).firstOrNull() }
+        if (test == "groups") { test = null   // adb test hook: which groups the page's channels come from (names only)
+            (live.map { it.c } + rows.flatMap { r -> r.second.map { it.c } } + showing.map { it.first }).map { "${it.group} :: ${it.name}" }.distinct().forEach { Log.i(TAG, "sports channel: $it") } }
+        return Page(live.distinctBy { it.key }.take(30), soon, rows, showing.take(40), teams)
     }
 
     /** One match once: the same fixture on several channels (each guide words it differently: "Fútbol Bundesliga -
@@ -349,11 +465,12 @@ object SportsHub {
     /** The sports groups' channels (English groups when that's on), one per channel name, best copy first. */
     @Volatile private var sportCache: Pair<String, List<Channel>>? = null
     fun sportChannels(l: Repo.Live): List<Channel> {
-        val sig = "${l.channels.size}|${l.channels.firstOrNull()?.url}|${l.channels.lastOrNull()?.url}|${Repo.englishOnly}"
+        val sig = "${l.channels.size}|${l.channels.firstOrNull()?.url}|${l.channels.lastOrNull()?.url}|${Repo.englishOnly}|${Repo.sportsAll}"
         sportCache?.takeIf { it.first == sig }?.let { return it.second }
         val hid = Repo.hiddenGroups; val hidCh = Repo.hiddenChannels
         return l.channels.asSequence().filter { it.group.contains("sport", ignoreCase = true) && it.group !in hid && it.url !in hidCh && !it.name.trimStart().startsWith("#") }
             .filter { !Repo.englishOnly || (englishGroup(it.group) && !OTHER_LANG.containsMatchIn(it.name) && !OTHER_LANG.containsMatchIn(it.group)) }
+            .filter { Repo.sportsAll || isUkChannel(it) }
             .groupBy { liveBase(it.name) }.values.map { g -> g.maxBy { prefer(it) } }
             .take(300).also { sportCache = sig to it }
     }
@@ -391,8 +508,10 @@ fun tidyTitle(t: String, comp: String?): String {
         // "Premier League: Arsenal v Spurs" -> "Arsenal v Spurs"; "Carabao Cup Live: …" -> the match too.
         val rest = s.substring(0, i).replace(name, "", ignoreCase = true).replace(LIVE_ANY, "").trim(' ', '-', '–', '|', ':', '·')
         val after = s.substring(i).trimStart(':', '-', '–', '|', ' ')
-        s = if (rest.length >= 3) "$rest: $after" else after
-        if (rest.length >= 3) break
+        // ("Live EFL Cup: …" under EFL leaves "Cup": a word on its own like that says nothing.)
+        val keep = rest.length >= 3 && !rest.matches(Regex("""(?i)(the )?(cup|trophy|league|shield)"""))
+        s = if (keep) "$rest: $after" else after
+        if (keep) break
     }
     // "Chelsea v Man Utd Premier League Matchweek 9": the competition (and what follows it) goes after the match.
     for (n in names) {
@@ -438,7 +557,9 @@ private val NEXT_H = 116.dp
 @Composable
 fun SportsScreen(act: TvActivity) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    LaunchedEffect(Unit) { SportsHub.refresh(ctx.applicationContext) }
+    // Opening the page, and following a team (on any device): searches whatever is older than 30 minutes, or new.
+    val followKey = Repo.follows.joinToString("|") { it.q.lowercase() }
+    LaunchedEffect(followKey) { SportsHub.refresh(ctx.applicationContext) }
     val live by produceState(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: value }
     var minute by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); minute = System.currentTimeMillis() } }
@@ -456,16 +577,20 @@ fun SportsScreen(act: TvActivity) {
     }
     val reminded = remember(ver) { Repo.reminders.mapTo(HashSet()) { "${it.url}|${it.start}" } }
     var info by remember { mutableStateOf<SportItem?>(null) }
+    var teamInfo by remember { mutableStateOf<String?>(null) }
     val first = remember { FocusRequester() }
     var pageFocused by remember { mutableStateOf(false) }
+    var chipsFocused by remember { mutableStateOf(false) }
+    var landed by remember { mutableStateOf(false) }   // the first card has had the highlight: from then on it's yours to move
+    LaunchedEffect(pageFocused, chipsFocused) { if (pageFocused && !chipsFocused) landed = true }
     val openedAt = remember { System.currentTimeMillis() }
     val p = page
     val loading = SportsHub.busy || p == null
     // The page opens on its first card, even when the first card only arrives after a second or two.
-    val firstKey = p?.let { it.live.firstOrNull()?.key ?: it.soon.firstOrNull()?.key ?: it.rows.firstOrNull()?.second?.firstOrNull()?.key }
+    val firstKey = p?.let { it.teams.firstOrNull()?.first ?: it.live.firstOrNull()?.key ?: it.soon.firstOrNull()?.key ?: it.rows.firstOrNull()?.second?.firstOrNull()?.key }
     LaunchedEffect(firstKey) {
         if (firstKey == null) return@LaunchedEffect
-        repeat(15) { if (pageFocused || System.currentTimeMillis() - openedAt > 30_000) return@LaunchedEffect; delay(100); runCatching { first.requestFocus() } }
+        repeat(15) { if (landed || System.currentTimeMillis() - openedAt > 30_000) return@LaunchedEffect; delay(100); runCatching { first.requestFocus() } }
     }
 
     fun group(c: Channel): List<Channel> = Repo.live?.channels?.filter { it.group == c.group && c.group.isNotEmpty() }?.takeIf { it.contains(c) } ?: listOf(c)
@@ -474,33 +599,64 @@ fun SportsScreen(act: TvActivity) {
     val listState = rememberPageState()
     LazyColumn(Modifier.fillMaxSize().onFocusChanged { pageFocused = it.hasFocus }, state = listState, contentPadding = PaddingValues(bottom = 56.dp)) {
         item(key = "title") {
-            PageTitle("Sports", if (loading && (p == null || p.rows.isEmpty())) "Looking through the TV guide…" else "Live and upcoming on your channels · next 3 days")
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) {
+                    PageTitle("Sports", if (loading && (p == null || p.rows.isEmpty())) "Looking through the TV guide…" else "Live and upcoming on your ${if (Repo.sportsAll) "" else "UK "}channels · next 3 days")
+                }
+                // Which countries' channels: UK by default (the user is in the UK); one press away from Up on the first row.
+                Row(Modifier.padding(end = Tv.margin, top = Tv.topMargin - 8.dp).onFocusChanged { chipsFocused = it.hasFocus }, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SportsChip("UK channels", !Repo.sportsAll) { SportsHub.showAll(ctx.applicationContext, false) }
+                    SportsChip("All countries", Repo.sportsAll) { SportsHub.showAll(ctx.applicationContext, true) }
+                }
+            }
         }
         if (p == null) { repeat(3) { k -> item(key = "sk$k") { Column { if (k > 0) SkeletonTitle() else Spacer(Modifier.height(8.dp)); SkeletonRow(count = 4, width = if (k == 0) LIVE_W else NEXT_W, aspect = if (k == 0) LIVE_W / LIVE_H else NEXT_W / NEXT_H) } } }; return@LazyColumn }
         var firstUsed = false
         fun takeFirst(): Modifier = if (!firstUsed) { firstUsed = true; Modifier.focusRequester(first) } else Modifier
+        // Switching UK / all countries starts each row afresh from its first card (rather than keeping the old first card in place).
+        val scope = if (Repo.sportsAll) ":all" else ""
+        if (p.teams.isNotEmpty()) {
+            val m = takeFirst()
+            item(key = "teams-t") { SportsRowTitle("My teams", first = true) }
+            item(key = "teams") {
+                CardRow(p.teams, { it.first.lowercase() }) { (team, s), i ->
+                    TeamCard(team, s, minute, s != null && s.key in reminded, if (i == 0) m else Modifier, onLong = { teamInfo = team }) {
+                        when { s == null -> teamInfo = team; s.onAir(System.currentTimeMillis()) -> watch(s.c); else -> info = s }
+                    }
+                }
+            }
+        }
+        if (p.live.isEmpty() && !loading) {
+            // Nothing live: say so, and what's next, so a short page reads as meant (not as broken).
+            val next = p.rows.flatMap { it.second }.minByOrNull { it.p.start }
+            item(key = "nolive") {
+                Text("No live sport right now" + (next?.let { "  ·  Next: ${tidyTitle(it.p.title, it.comp)}, ${dayWord(it.p.start, minute)} ${hhmm(it.p.start)}" } ?: ""),
+                    fontSize = Tv.bodySmall, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = Tv.margin, end = Tv.margin, top = if (p.teams.isEmpty()) 0.dp else 8.dp, bottom = 4.dp))
+            }
+        }
         if (p.live.isNotEmpty()) {
             val m = takeFirst()
-            item(key = "live-t") { SportsRowTitle("Live now", count = p.live.size, first = true) }
-            item(key = "live") {
+            item(key = "live-t") { SportsRowTitle("Live now", count = p.live.size, first = p.teams.isEmpty()) }
+            item(key = "live$scope") {
                 CardRow(p.live, { it.key }) { it, i -> LiveSportCard(it, minute, if (i == 0) m else Modifier, reminded = false, onLong = { info = it }) { watch(it.c) } }
             }
         }
         if (p.soon.isNotEmpty()) {
             val m = takeFirst()
-            item(key = "soon-t") { SportsRowTitle("Starting soon", first = p.live.isEmpty()) }
-            item(key = "soon") { CardRow(p.soon, { it.key }) { it, i -> NextSportCard(it, minute, it.key in reminded, showComp = true, modifier = if (i == 0) m else Modifier, row = "soon") { info = it } } }
+            item(key = "soon-t") { SportsRowTitle("Starting soon", first = p.teams.isEmpty() && p.live.isEmpty()) }
+            item(key = "soon$scope") { CardRow(p.soon, { it.key }) { it, i -> NextSportCard(it, minute, it.key in reminded, showComp = true, modifier = if (i == 0) m else Modifier, row = "soon") { info = it } } }
         }
         for ((comp, items) in p.rows) {
             val m = takeFirst()
-            item(key = "t-$comp") { SportsRowTitle(comp, count = items.size, first = p.live.isEmpty() && p.soon.isEmpty() && comp == p.rows.first().first) }
-            item(key = "r-$comp") { CardRow(items, { it.key }) { it, i -> NextSportCard(it, minute, it.key in reminded, showComp = false, modifier = if (i == 0) m else Modifier, row = comp) { info = it } } }
+            item(key = "t-$comp") { SportsRowTitle(comp, count = items.size, first = p.teams.isEmpty() && p.live.isEmpty() && p.soon.isEmpty() && comp == p.rows.first().first) }
+            item(key = "r-$comp$scope") { CardRow(items, { it.key }) { it, i -> NextSportCard(it, minute, it.key in reminded, showComp = false, modifier = if (i == 0) m else Modifier, row = comp) { info = it } } }
         }
         if (loading) item(key = "more") { Column { SkeletonTitle(); SkeletonRow(count = 4, width = NEXT_W, aspect = NEXT_W / NEXT_H) } }
         val chans = p.channels.filter { it.second != null }
         if (chans.isNotEmpty()) {
             item(key = "ch-t") { SportsRowTitle("Sports channels", count = chans.size) }
-            item(key = "ch") {
+            item(key = "ch$scope") {
                 val list = chans.map { it.first }
                 CardRow(chans, { it.first.url }) { (c, now), i ->
                     val prog = now?.let { ((minute - it.start).toFloat() / (it.end - it.start)) }
@@ -510,12 +666,13 @@ fun SportsScreen(act: TvActivity) {
         }
         if (!loading && p.live.isEmpty() && p.rows.isEmpty() && chans.isEmpty()) item(key = "empty") {
             Box(Modifier.fillMaxWidth().padding(top = 90.dp)) {
-                EmptyState(Icons.Default.SportsSoccer, "No sport found in the TV guide", if (Repo.live?.epgUrls.isNullOrEmpty()) "Your playlists have no TV guide linked" else "Nothing from the big competitions in the next 3 days")
+                EmptyState(Icons.Default.SportsSoccer, if (Repo.sportsAll) "No sport found in the TV guide" else "No sport on your UK channels",
+                    if (Repo.live?.epgUrls.isNullOrEmpty()) "Your playlists have no TV guide linked" else if (Repo.sportsAll) "Nothing from the big competitions in the next 3 days" else "Choose All countries above to see other countries' channels")
             }
         }
     }
     LaunchedEffect(p) {
-        val t = SportsHub.test ?: return@LaunchedEffect
+        val t = SportsHub.test?.takeIf { it != "groups" } ?: return@LaunchedEffect
         if (t.startsWith("scroll:")) { if (SportsHub.busy) return@LaunchedEffect; SportsHub.test = null; delay(500); listState.scrollToItem(t.substringAfter(':').toIntOrNull() ?: 0); return@LaunchedEffect }
         val s = p?.rows?.firstOrNull()?.second?.firstOrNull() ?: return@LaunchedEffect
         SportsHub.test = null
@@ -524,7 +681,84 @@ fun SportsScreen(act: TvActivity) {
             kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) { delay(60_000); if (Repo.hasReminder(s.c.url, s.p.start)) Repo.toggleReminder(s.c, s.p) }
         } else info = s
     }
-    info?.let { s -> ProgrammeDialog(act, s.c, s.p, System.currentTimeMillis(), group(s.c)) { info = null } }
+    info?.let { s -> ProgrammeDialog(act, s.c, s.p, System.currentTimeMillis(), group(s.c), teams = teamsIn(s.p.title, s.comp)) { info = null } }
+    teamInfo?.let { t -> TeamDialog(t) { teamInfo = null } }
+}
+
+/** A quiet pill (the Details screen's season pill): grey, the chosen one lighter, the highlight solid white. */
+@Composable
+private fun SportsChip(text: String, selected: Boolean, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(50)
+    Box(Modifier.onFocusChanged { f = it.isFocused }
+        .onKeyEvent { e -> if (e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter)) { onClick(); true } else false }
+        .clearAndSetSemantics { contentDescription = text + if (selected) ", selected" else "" }
+        .focusable()
+        .background(when { f -> Tv.text; selected -> Color(0x40FFFFFF); else -> Color(0x1AFFFFFF) }, shape)
+        .padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Text(text, fontSize = Tv.bodySmall, lineHeight = 18.sp, fontWeight = if (f || selected) FontWeight.SemiBold else FontWeight.Medium,
+            color = when { f -> Tv.bg; selected -> Tv.text; else -> Tv.text2 })
+    }
+}
+
+/** "Arsenal v Spurs" -> [Arsenal, Spurs]: the two sides of a fixture, for "Follow …" in the programme's details. */
+fun teamsIn(title: String, comp: String?): List<String> {
+    val parts = Regex("""\s(?:v|vs|@)\.?\s""", RegexOption.IGNORE_CASE).split(tidyTitle(title, comp), 2)
+    if (parts.size != 2) return emptyList()
+    val home = parts[0].substringAfterLast(": ").substringAfterLast(" - ").substringAfterLast(" | ")
+    val away = parts[1].split(Regex("""\s[-–|:]\s|[:(\[,]""")).first()
+    return listOf(home, away).map { it.replace(Regex("""^(live|en directo)\b\s*""", RegexOption.IGNORE_CASE), "").trim(' ', '-', '–', '·', '.', '•') }
+        .filter { it.length in 3..32 && it.any(Char::isLetter) && !Regex("""^\d""").containsMatchIn(it) }.distinctBy { it.lowercase() }
+}
+
+/** A followed team: its next match (or the one on now), when, and where; a quiet line when there's none. */
+@Composable
+private fun TeamCard(team: String, s: SportItem?, now: Long, reminded: Boolean, modifier: Modifier, onLong: () -> Unit, onClick: () -> Unit) {
+    val live = s?.onAir(now) == true
+    val title = s?.let { tidyTitle(it.p.title, it.comp) }
+    val label = when { s == null -> "$team, no match in the next 3 days"; live -> "$team: $title, live on ${s.c.name}"; else -> "$team: $title, ${dayWord(s.p.start, now)} ${hhmm(s.p.start)} on ${s.c.name}" }
+    FocusCard(modifier.width(NEXT_W).height(NEXT_H), restoreKey = "sp:team:" + team.lowercase(), label = label, onLongClick = onLong, onClick = onClick) {
+        Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface)))) {
+            Column(Modifier.fillMaxSize().padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(team, Modifier.weight(1f), fontSize = Tv.label, color = Tv.accent, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (live) LivePill() else if (reminded) Icon(Icons.Default.NotificationsActive, "Reminder set", tint = Tv.star, modifier = Modifier.size(18.dp))
+                }
+                Spacer(Modifier.weight(1f))
+                if (s == null) {
+                    Text(if (SportsHub.searched(team)) "No match in the next 3 days" else "Searching the TV guide…", fontSize = Tv.bodySmall, color = Tv.muted, maxLines = 2)
+                } else {
+                    Text(title!!, fontSize = Tv.body, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SmallLogo(s.c, 40.dp, 24.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text((if (live) "until ${hhmm(s.p.end)}" else "${dayWord(s.p.start, now)} ${hhmm(s.p.start)}") + "  ·  " + channelLabel(s.c.name),
+                            fontSize = Tv.micro, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            if (live) ProgressLine((now - s!!.p.start).toFloat() / (s.p.end - s.p.start), Modifier.align(Alignment.BottomStart).fillMaxWidth(), 4.dp)
+        }
+    }
+}
+
+/** A followed team's own small dialog: stop following it. */
+@Composable
+private fun TeamDialog(team: String, onDismiss: () -> Unit) {
+    val first = remember { FocusRequester() }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(Modifier.freshOkOnly().width(460.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)) {
+            Text(team, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("Every match on your channels gets a reminder, here and on your other devices.", fontSize = Tv.bodySmall, lineHeight = Tv.bodySmallLine, color = Tv.text2, modifier = Modifier.padding(top = 6.dp))
+            Spacer(Modifier.height(18.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                androidx.tv.material3.OutlinedButton(onClick = { Repo.toggleFollow(team); onDismiss() }, modifier = Modifier.focusRequester(first)) { Text("Stop following", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold) }
+                androidx.tv.material3.OutlinedButton(onClick = onDismiss) { Text("Close", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold) }
+            }
+        }
+        LaunchedEffect(Unit) { delay(50); runCatching { first.requestFocus() } }
+    }
 }
 
 /** The row heading; the first one sits closer to the page title. */

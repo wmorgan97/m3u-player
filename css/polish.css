@@ -1302,3 +1302,9 @@ html:not(.mac) .ts-box kbd { display: none !important; }
 /* Sports: which channels are shown, and the switch */
 .sp-scope { margin: 22px 0 8px; text-align: center; font-size: var(--fs-small, 13px); }
 .sp-scope .link { font-size: inherit; padding: 10px 4px; }
+
+/* Home: Starting soon — the Sports page's row (time, title, why · channel, 44pt bell), at most 4 on a phone, 3 columns on a computer */
+.soon-list { margin-top: 2px; }
+.soon-row .sp-time { width: 60px; }
+.soon-row .sp-time small.soon-in { margin: 3px 0 0; font-size: var(--fs-caption); font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--star); white-space: nowrap; }
+@media (max-width: 899px) { .soon-list .soon-row:nth-child(n+5) { display: none; } }

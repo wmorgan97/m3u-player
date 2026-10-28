@@ -209,7 +209,7 @@ async function syncNow() {
   syncing = (async () => {
     try {
       const res = await fetch(serverApi('sync'), { method: 'POST', cache: 'no-store', body: JSON.stringify({
-        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders() }) });
+        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows() }) });
       if (!res.ok) return;
       const d = await res.json();
       const urls = list => (list || []).map(c => c.url).join('\n');
@@ -222,6 +222,7 @@ async function syncNow() {
       if (d.progress) { state.progress = d.progress; db.set('progress', d.progress).catch(() => {}); }
       if (d.sources) adoptSources(d.sources);
       if (d.reminders) await adoptReminders(d.reminders);
+      if (d.follows) await adoptFollows(d.follows);
       Object.assign(syncMeta, { favAt: d.favAt || syncMeta.favAt, recReset: d.recReset || syncMeta.recReset });
       db.set('syncMeta', syncMeta).catch(() => {});
       // Never redraw Home under a playing channel or while you're typing; keep the scroll position.
@@ -265,6 +266,26 @@ async function adoptReminders(remote) {
   }
   for (const [k, at] of Object.entries(syncMeta.remDel || {})) if (+k.slice(k.lastIndexOf('|') + 1) < now - 6 * 60 * MINUTE) delete syncMeta.remDel[k];
   if (changed) { await db.set('reminders', state.reminders); scheduleReminders(); }
+}
+// Follows too (follow Arsenal on the phone and the TV's Sports page lists them): keyed by the lower-cased name,
+// newest edit wins; an unfollow goes up as a { deleted } marker.
+function localFollows() {
+  const out = {};
+  for (const [k, at] of Object.entries(syncMeta.followDel || {})) out[k] = { deleted: true, at };
+  for (const f of state.follows || []) out[f.q.toLowerCase()] = { q: f.q, at: f.at || 1 };
+  return out;
+}
+async function adoptFollows(remote) {
+  state.follows ||= (await db.get('follows').catch(() => null)) || [];
+  let changed = false;
+  for (const [k, v] of Object.entries(remote)) {
+    const mine = state.follows.find(f => f.q.toLowerCase() === k);
+    if (v.deleted) { if (mine && (mine.at || 1) < v.at) { state.follows = state.follows.filter(f => f !== mine); changed = true; } continue; }
+    if (mine || !v.q || (syncMeta.followDel?.[k] || 0) >= (v.at || 0)) continue;
+    state.follows.push({ q: v.q, at: v.at || Date.now() }); changed = true;
+  }
+  for (const [k, at] of Object.entries(syncMeta.followDel || {})) if (at < Date.now() - 90 * 86400_000) delete syncMeta.followDel[k];
+  if (changed) { await db.set('follows', state.follows); sportsHub.teams.clear(); }
 }
 const syncLater = debounce(syncNow, 20000);   // watch progress ticks every few seconds
 function favoritesChanged() { syncMeta.favAt = Date.now(); syncSoon(); }
@@ -929,20 +950,25 @@ function homeHub(pl) {
       }
     }
   }
-  // On now: channels from your Home groups (else recent channels) with a programme on right now.
+  // On now: your channels first (favourites and recent ones, the ones you watch most and most lately first), then the
+  // groups you chose for Home; each with what's on right now.
   const live = pl.flatMap(p => {
     const k = m3uKinds(p), chans = k ? k.live : p.channels;
     const want = new Set(p.homeGroups || []);
     return want.size ? chans.filter(c => want.has(c.group)).map(c => ({ ...c, src: p.id })) : [];
   });
-  const pool = (live.length ? live : state.recents.filter(isLiveChannel)).slice(0, 80);
-  ensureGuide(pool);
+  const mine = yourChannels();
+  const pool = [...mine, ...live].filter((c, i, a) => a.findIndex(x => x.url === c.url) === i).slice(0, 80);
+  const films = filmChannels(pl, mine);
+  ensureGuide([...pool, ...films]);
   for (const c of pool) {
     const g = guideFor(c), now = g && g.nowNext(c).now;
     if (now) hub.onNow.push({ c, now });
     if (hub.onNow.length >= 24) break;
   }
   shelfItems.set('onnow', hub.onNow);
+  hub.soon = startingSoon(mine, films);
+  shelfItems.set('soon', hub.soon);
   // Featured: a mix of top movies and series, alternating.
   const mix = [];
   const ms = hub.hero.filter(it => it.kind === 'movie'), ss = hub.hero.filter(it => it.kind === 'series');
@@ -1052,6 +1078,120 @@ function homeShelfHtml(sh) {
   if (sh.top10) return `<div class="row-head"><h3>${esc(sh.title)}</h3><span class="muted small">from TMDB</span></div><ul class="shelf-row home-shelf top10">${sh.items.map((it, k) => `<li class="scard t10" data-shelf="${esc(sh.key)}" data-k="${k}"><span class="t10-n">${k + 1}</span>${cardHtml(it, sh.key, k).replace(/^<li[^>]*>|<\/li>$/g, '')}</li>`).join('')}</ul>`;
   return `<div class="row-head"><h3>${esc(sh.title)}</h3></div><ul class="shelf-row home-shelf">${sh.items.map((it, k) => cardHtml(it, sh.key, k)).join('')}</ul>`;
 }
+// ---- Home's live rows: your channels on now, and what starts soon that suits you ----
+// Only guide data already on this device, plus the guide of the few channels Home shows (asked through ensureGuide,
+// which skips channels asked lately). Sport stays on its own Sports page.
+function chanPlays() { try { return JSON.parse(localStorage.getItem('chanPlays') || '{}') || {}; } catch { return {}; } }
+function notePlay(url) {
+  const m = chanPlays(), [n = 0] = m[url] || [];
+  m[url] = [n + 1, Date.now()];
+  const keep = Object.entries(m).sort((a, b) => b[1][1] - a[1][1]).slice(0, 150);   // the channels you've watched lately
+  try { localStorage.setItem('chanPlays', JSON.stringify(Object.fromEntries(keep))); } catch {}
+}
+/** Favourite and recent live channels, ranked: a favourite counts for a little over one viewing yesterday; a channel
+ *  watched every evening outranks both. */
+function yourChannels(now = Date.now()) {
+  const plays = chanPlays(), score = new Map(), byUrl = new Map();
+  const recency = at => (at > 0 ? 4 * 0.5 ** ((now - at) / DAY) : 0);   // halves every day
+  const ok = c => c && c.url && isLiveChannel(c) && byId(srcOf(c)) && !/\/(movie|series)\//.test(c.url);
+  state.favorites.filter(ok).forEach((c, i) => { byUrl.set(c.url, byUrl.get(c.url) || c); score.set(c.url, 2.5 - i * 0.001); });
+  for (const c of state.recents.filter(ok)) { if (!byUrl.has(c.url)) byUrl.set(c.url, c); score.set(c.url, (score.get(c.url) || 0) + recency(c.at)); }
+  for (const [u, [n, last]] of Object.entries(plays)) if (byUrl.has(u)) score.set(u, (score.get(u) || 0) + 1.5 * Math.log2(1 + n) + 0.5 * recency(last));
+  return [...byUrl.values()].sort((a, b) => score.get(b.url) - score.get(a.url));
+}
+const FILM_GROUP = /\b(movies?|films?|cinema|kino)\b/i, FILM_NAME = /\b(cinema|film ?4|films?|movies?|tcm|great!? movies|talking pictures)\b/i;
+const NOT_A_FILM = /\b(preview|review|news|trailers?|showcase|coming soon|behind the|making of|top \d+|teleshopping|close)\b/i;
+const YEAR_TAIL = /\s*\((19|20)\d\d\)\s*$/;
+const SPORTY = /\S\s+(?:v|vs\.?|@)\s+\S|premier league|champions league|formula 1|\bf1\b|grand prix|moto ?gp|snooker|darts|boxing|\bufc\b|golf|tennis|cricket|rugby/i;
+const CLUB_TV = /\b(lfc|mutv|chelsea|club|barca|real madrid|city) ?tv\b/i;
+const filmCache = new WeakMap();
+/** A dozen film channels (Sky Cinema, Film4…): English groups, UK ones and ones you watch first, one copy of each. */
+function filmChannels(pl, mine) {
+  const out = [];
+  for (const p of pl.filter(p => !p.virtual && p.content !== 'vod' && epgUrls(p).length)) {
+    const all = m3uKinds(p)?.live || p.channels;
+    let list = filmCache.get(all);
+    if (!list) {
+      const seen = new Set(); list = [];
+      for (const c of all) {
+        if (!isLiveChannel(c) || isSeparator(c) || !(FILM_GROUP.test(c.group || '') || FILM_NAME.test(c.name || '')) || !isEnglishGroup(c.group || '') || otherLanguage(c)) continue;
+        const k = normName(c.name).replace(/\b(hd|fhd|uhd|4k|sd)\b/g, '').trim();
+        if (seen.has(k)) continue;
+        seen.add(k); list.push(c);
+        if (list.length >= 200) break;
+      }
+      filmCache.set(all, list);
+    }
+    out.push(...list.filter(c => visibleGroup(p, c.group || '')).map(c => ({ ...c, src: p.id })));
+  }
+  const mineUrls = new Set(mine.map(c => c.url)), uk = c => /\b(uk|gb|sky|bbc|itv|channel ?[45]|film ?4)\b/i.test(`${c.name} ${c.group}`);
+  return out.sort((a, b) => (mineUrls.has(a.url) ? 0 : 2) + (uk(a) ? 0 : 1) - ((mineUrls.has(b.url) ? 0 : 2) + (uk(b) ? 0 : 1))).slice(0, 12);
+}
+const foldT = s => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+const isSporty = (c, prog) => foldT(prog[2]) === foldT(c.name) || isSportsChannel(c) || CLUB_TV.test(c.name || '') || SPORTY.test(prog[2] || '');
+/** What starts in the next two hours that suits you: reminders you set, your saved series, films on the film channels. */
+function startingSoon(mine, films, now = Date.now()) {
+  const until = now + 2 * HOUR, out = [];
+  const inWindow = t => t > now + MINUTE && t <= until;
+  const series = state.favorites.filter(f => f.kind === 'series').map(f => foldT(displayTitle(f.name))).filter(t => t.length >= 4);
+  const filmUrls = new Set(films.map(c => c.url));
+  const seen = new Set();
+  for (const c of [...mine, ...films]) {
+    if (seen.has(c.url)) continue;
+    seen.add(c.url);
+    for (const prog of guideFor(c)?.list(c) || []) {
+      if (prog[0] > until) break;
+      if (!inWindow(prog[0])) continue;
+      const film = filmUrls.has(c.url);
+      if (!film && isSporty(c, prog)) continue;   // ("Godzilla vs Kong" on a film channel is a film)
+      const t = foldT(prog[2]);
+      const why = series.some(s => t === s || t.startsWith(`${s} `)) ? 'Your series'
+        : film && prog[1] - prog[0] >= 70 * MINUTE && !NOT_A_FILM.test(prog[2]) && t !== foldT(c.name) ? `Film${(prog[2].match(YEAR_TAIL) || [])[0] ? ` · ${prog[2].match(YEAR_TAIL)[0].trim().slice(1, -1)}` : ''}`
+        : null;
+      if (why) out.push({ channel: c, prog, why });
+    }
+  }
+  // Reminders you set, after the rest: a film you're reminded of still says it's a film (the bell shows the reminder).
+  for (const r of state.reminders || []) {
+    if (!inWindow(r.at) || !r.channel) continue;
+    const c = r.channel, list = guideFor(c)?.list(c) || [];
+    const prog = list.find(x => x[0] === r.at) || [r.at, r.at + HOUR, r.title, ''];
+    if (!isSporty(c, prog)) out.push({ channel: c, prog, why: 'Reminder set' });   // match reminders stay with Sports
+  }
+  const keys = new Set(), titles = new Set();
+  return out.sort((a, b) => a.prog[0] - b.prog[0]).filter(x => {
+    const k = `${x.channel.url}|${x.prog[0]}`, t = foldT(x.prog[2].replace(YEAR_TAIL, ''));
+    if (keys.has(k) || titles.has(t)) return false;   // the first reason found wins; a film on two channels once
+    keys.add(k); titles.add(t); return true;
+  }).slice(0, 6);
+}
+const leftText = end => { const m = Math.max(1, Math.round((end - Date.now()) / MINUTE)); return m < 60 ? `${m} min left` : m < 180 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''} left` : `until ${fmtTime(end)}`; };
+const soonWhen = t => { const m = Math.round((t - Date.now()) / MINUTE); return m < 1 ? 'Starting' : m < 60 ? `In ${m} min` : ''; };
+function soonHtml(x, k) {
+  const on = hasReminder(x.channel, x.prog), when = soonWhen(x.prog[0]);
+  return `<li class="sp-row soon-row" data-soon="${k}" role="button" tabindex="0">
+    <span class="sp-time">${fmtTime(x.prog[0])}${when ? `<small class="soon-in">${when}</small>` : ''}</span>
+    <span class="sp-text"><span class="sp-title">${esc(x.prog[2].replace(YEAR_TAIL, ''))}</span><span class="muted">${esc(`${x.why} · ${channelLabel(x.channel.name)}`)}</span></span>
+    <button type="button" class="icon-btn sp-bell${on ? ' on' : ''}" data-soon-bell="${k}" aria-pressed="${on}" aria-label="${on ? 'Remove reminder' : 'Remind me'}">${icon(on ? 'bell-on' : 'bell')}</button></li>`;
+}
+// Progress lines and "12 min left" / "In 5 min" move on every minute, in place (no Home redraw).
+setInterval(() => {
+  if (document.hidden || state.current || (location.hash && location.hash !== '#/')) return;
+  const now = Date.now();
+  document.querySelectorAll('.onnow-row .onnow').forEach(el => {
+    const x = shelfItems.get('onnow')?.[+el.dataset.k];
+    if (!x) return;
+    if (x.now[1] <= now) { homeRefresh(); return; }   // the programme ended: what's on next
+    el.querySelector('.nc-bar i')?.style.setProperty('width', `${(((now - x.now[0]) / (x.now[1] - x.now[0])) * 100).toFixed(1)}%`);
+    const t = el.querySelector('.nc-left'); if (t) t.textContent = leftText(x.now[1]);
+  });
+  document.querySelectorAll('.soon-row').forEach(el => {
+    const x = shelfItems.get('soon')?.[+el.dataset.soon];
+    if (!x) return;
+    if (x.prog[0] <= now + MINUTE) { homeRefresh(); return; }   // started: off the list
+    const w = el.querySelector('.soon-in'), when = soonWhen(x.prog[0]); if (w) w.textContent = when;
+  });
+}, MINUTE);
 function onNowHtml({ c, now }, k) {
   const pct = ((Date.now() - now[0]) / (now[1] - now[0])) * 100;
   const img = now[4]?.img;
@@ -1059,7 +1199,7 @@ function onNowHtml({ c, now }, k) {
   void img;
   return `<li class="onnow nc" data-k="${k}">
     <span class="nc-logo">${logoHtml(c)}</span>
-    <span class="nc-text"><b>${esc(now[2])}</b><span class="muted">${esc(c.name)}</span><span class="nc-time"><i class="nc-dot"></i>until ${fmtTime(now[1])}</span></span>
+    <span class="nc-text"><b>${esc(now[2])}</b><span class="muted">${esc(c.name)}</span><span class="nc-time"><i class="nc-dot"></i><span class="nc-left">${leftText(now[1])}</span></span></span>
     <span class="bar nc-bar"><i style="width:${pct.toFixed(1)}%"></i></span></li>`;
 }
 let heroTimer = 0;
@@ -1182,6 +1322,8 @@ function showHome() {
         <span class="cw-name">${esc(cwTitle(e.item))}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></div>`).join('')}</div></section>` : ''}
     ${hub.onNow.length ? `<section class="hub-sec"><div class="hub-head"><h2>On now</h2><span class="hub-links">${pl.length ? `<button class="link" data-edit-groups="${esc((liveSource() || pl[0]).id)}">Choose channels</button>` : ''}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>
       <ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul></section>` : ''}
+    ${hub.soon.length ? `<section class="hub-sec home-soon"><div class="hub-head"><h2>Starting soon</h2><span class="hub-links"><a class="link" href="#/tvguide">TV guide</a></span></div>
+      <ul class="sp-list soon-list">${hub.soon.map(soonHtml).join('')}</ul></section>` : ''}
     ${hub.shelves.movies.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Movies</h2><span class="hub-links"><a class="link" href="#/movies">Browse all</a></span></div>${hub.shelves.movies.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading movies…</p>'}${servicesHtml(hub.services)}</section>` : ''}
     ${hub.shelves.series.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Series</h2><span class="hub-links"><a class="link" href="#/series">Browse all</a></span></div>${hub.shelves.series.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading series…</p>'}</section>` : ''}
     ${pl.length && !hub.hero.length && !cw.length && !resumeChannel && !hub.onNow.length && !hub.shelves.movies.length && !hub.shelves.series.length && !hub.loading && !watchlist.length ? `<section class="hub-sec home-browse"><div class="hub-head"><h2>Browse</h2></div>
@@ -1212,6 +1354,15 @@ function showHome() {
       if (s) { pendingTab = s.tab; pendingGroup = s.group; location.hash = `#/p/${s.pid}`; }
       return;
     }
+    const bell = e.target.closest('[data-soon-bell]');
+    if (bell) {
+      e.stopPropagation();
+      const x = shelfItems.get('soon')?.[+bell.dataset.soonBell];
+      if (x) toggleReminder(x.channel, x.prog).then(() => { const on = hasReminder(x.channel, x.prog); bell.classList.toggle('on', on); bell.setAttribute('aria-pressed', on); bell.setAttribute('aria-label', on ? 'Remove reminder' : 'Remind me'); bell.innerHTML = icon(on ? 'bell-on' : 'bell'); });
+      return;
+    }
+    const so = e.target.closest('[data-soon]');
+    if (so) { const x = shelfItems.get('soon')?.[+so.dataset.soon]; if (x) programmeSheet(x.channel, x.prog); return; }
     const on = e.target.closest('.onnow');
     if (on) { const list = (shelfItems.get('onnow') || []).map(x => x.c); return playChannel(list, +on.dataset.k); }
     const sc = e.target.closest('.scard, .hs-row, .hero-slide');
@@ -3063,6 +3214,7 @@ const refreshAfterGuide = debounce(pid => {
     return;
   }
   if (state.current && !$('#guide')) updateRowsInPlace();
+  if (!state.current && (!location.hash || location.hash === '#/')) homeRefresh();   // Home's On now / Starting soon fill in
   const card = !state.current && $('.resume');
   if (card && resumeChannel) card.outerHTML = resumeCardHtml(resumeChannel);   // fill in what's on, in place
 }, 250);
@@ -3283,9 +3435,11 @@ async function remindAll(q, list) {
 const isFollowing = q => (state.follows || []).some(f => f.q.toLowerCase() === q.trim().toLowerCase());
 async function toggleFollow(q) {
   state.follows ||= (await db.get('follows')) || [];
-  if (isFollowing(q)) { state.follows = state.follows.filter(f => f.q.toLowerCase() !== q.trim().toLowerCase()); toast(`Stopped following ${q}`); }
-  else { state.follows.push({ q: q.trim(), at: Date.now() }); toast(`Following ${q}: every upcoming programme gets a reminder`); checkFollows(true); askAlerts(`Reminders for ${q.trim()} arrive as notifications.`); }
+  const k = q.trim().toLowerCase();
+  if (isFollowing(q)) { state.follows = state.follows.filter(f => f.q.toLowerCase() !== k); (syncMeta.followDel ||= {})[k] = Date.now(); toast(`Stopped following ${q}`); }
+  else { if (syncMeta.followDel) delete syncMeta.followDel[k]; state.follows.push({ q: q.trim(), at: Date.now() }); toast(`Following ${q}: every upcoming programme gets a reminder`); checkFollows(true); askAlerts(`Reminders for ${q.trim()} arrive as notifications.`); }
   await db.set('follows', state.follows);
+  db.set('syncMeta', syncMeta).catch(() => {}); syncSoon();
 }
 let followsAt = 0;
 async function checkFollows(force = false) {
@@ -5249,6 +5403,7 @@ function stopPlaying() {
 async function addRecent(c) {
   if (c.kind === 'catchup') return;
   state.recents = [{ ...cloneChannel(c), at: Date.now() }, ...state.recents.filter(r => r.url !== c.url)].slice(0, MAX_RECENTS);
+  if (isLiveChannel(c)) notePlay(c.url);
   await db.set('recents', state.recents);
   syncSoon();
 }

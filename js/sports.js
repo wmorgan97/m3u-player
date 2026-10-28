@@ -88,7 +88,7 @@ const MATCHUP = /\S\s+(?:v|vs\.?|@)\s+\S/i;
 
 /** Actually live, not just on air: the guide tags live events ("Arsenal v Chelsea ᴸᶦᵛᵉ", "Live: …", "… (Live)"),
  *  or the description says it's live coverage. Repeats, "Best of", "Gold" and old finals carry no such tag. */
-const LIVE_MARK = /ᴸᶦᵛᵉ|^\s*live\b|[(\[-–|]\s*live\s*[)\]]?\s*$|\blive\s*[:|]/i;
+const LIVE_MARK = /ᴸᶦᵛᵉ|^\s*live\b|[(\[\-–|]\s*live\s*[)\]]?\s*$|\blive\s*[:|]/i;
 export function isLiveEvent(prog) {
   const title = String(prog[2] || ''), desc = String(prog[3] || '').slice(0, 120);
   if (LIVE_MARK.test(title)) return true;

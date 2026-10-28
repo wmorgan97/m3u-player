@@ -75,6 +75,8 @@ object Repo {
 
     // Settings kept on the TV (the rest live in the web app's Settings)
     var englishOnly: Boolean get() = prefs.getBoolean("englishOnly", true); set(v) { prefs.edit().putBoolean("englishOnly", v).apply(); overviews.clear(); groupCache.clear() }
+    /** Sports: every country's channels, not only UK ones (the default, like the iPhone's "Show all countries"). */
+    var sportsAll: Boolean get() = prefs.getBoolean("sportsAll", false); set(v) { prefs.edit().putBoolean("sportsAll", v).apply(); version++ }
     /** Channel numbers in lists, the guide and the player banner (off by default: provider numbers like 2710 mean little). */
     var showNumbers: Boolean get() = prefs.getBoolean("showNumbers", false); set(v) { prefs.edit().putBoolean("showNumbers", v).apply(); version++ }
     var preview: Boolean get() = prefs.getBoolean("preview", true); set(v) { prefs.edit().putBoolean("preview", v).apply(); version++ }
@@ -144,6 +146,72 @@ object Repo {
             catch (e: Exception) { warn("saving reminder failed", e) }   // sent again with the next sync
         }
     }
+    /** Reminders set by the TV itself (a followed team's matches): added here, sent up in one go. Skips any already
+     *  set, any removed by hand, and a match already reminded on another copy of the channel (same title and start). */
+    fun addReminders(items: List<Pair<Channel, Programme>>): Int {
+        val now = System.currentTimeMillis(); val del = remDel
+        var l = reminders.filter { it.start > now - 3600_000L }; val sent = JSONObject()
+        for ((c, p) in items) {
+            val k = "${c.url}|${p.start}"
+            if (p.start <= now + 120_000 || del.has(k) || l.any { it.url == c.url && it.start == p.start || it.start == p.start && it.title.equals(p.title, true) }) continue
+            val r = Reminder(c.url, c.name, p.title, p.start, now); l = l + r; sent.put(k, remEntry(r))
+        }
+        if (sent.length() == 0) return 0
+        reminders = l
+        guideScope.launch {
+            try { val d = JSONObject(http(api("sync"), JSONObject().put("reminders", sent).toString())); syncData = d; adoptReminders(d) }
+            catch (e: Exception) { warn("saving reminders failed", e) }   // sent again with the next sync
+        }
+        return sent.length()
+    }
+
+    // ---------- follows: teams (and shows) you follow, shared with the phone and the web app through /sync ----------
+    // Keyed by the lower-cased name, newest edit (at) wins; an unfollow goes up as a { deleted } marker.
+    data class Follow(val q: String, val at: Long)
+    /** adb test hook (`--es testFollows "A|B"`): pretend follows for this run only (never saved, synced or reminded). */
+    @Volatile var testFollows: List<Follow>? = null
+    var follows: List<Follow>
+        get() = testFollows ?: runCatching { JSONArray(prefs.getString("follows", "[]")).let { a -> (0 until a.length()).map { val o = a.getJSONObject(it); Follow(o.optString("q"), o.optLong("at")) }.filter { it.q.isNotBlank() } } }.getOrDefault(emptyList())
+        private set(v) { prefs.edit().putString("follows", JSONArray(v.map { JSONObject().put("q", it.q).put("at", it.at) }).toString()).apply(); version++ }
+    private val followDel: JSONObject get() = runCatching { JSONObject(prefs.getString("followDel", "{}") ?: "{}") }.getOrDefault(JSONObject())
+    fun isFollowing(q: String) = follows.any { it.q.equals(q.trim(), true) }
+    private fun localFollows() = JSONObject().also { out ->
+        val del = followDel
+        for (k in del.keys()) out.put(k, JSONObject().put("deleted", true).put("at", del.optLong(k)))
+        for (f in follows) out.put(f.q.lowercase(), JSONObject().put("q", f.q).put("at", maxOf(1L, f.at)))
+    }
+    /** Follows [q] (or stops following it); returns whether it's now followed. */
+    fun toggleFollow(q0: String): Boolean {
+        val q = q0.trim(); val k = q.lowercase(); val now = System.currentTimeMillis(); val del = followDel
+        val on = !isFollowing(q)
+        val entry: JSONObject
+        if (on) { follows = follows + Follow(q, now); del.remove(k); entry = JSONObject().put("q", q).put("at", now) }
+        else { follows = follows.filterNot { it.q.equals(q, true) }; del.put(k, now); entry = JSONObject().put("deleted", true).put("at", now) }
+        prefs.edit().putString("followDel", del.toString()).apply()
+        guideScope.launch {
+            try { val d = JSONObject(http(api("sync"), JSONObject().put("follows", JSONObject().put(k, entry)).toString())); syncData = d; adoptFollows(d) }
+            catch (e: Exception) { warn("saving follow failed", e) }   // sent again with the next sync
+            android.util.Log.i("M3U", "follow sync: $k -> ${syncData.optJSONObject("follows")?.optJSONObject(k)}")
+        }
+        return on
+    }
+    /** Takes in follows added (or removed) on the other devices. */
+    private fun adoptFollows(d: JSONObject) {
+        val r = d.optJSONObject("follows") ?: return
+        val del = followDel; var l = follows; var changed = false
+        for (k in r.keys()) {
+            val v = r.optJSONObject(k) ?: continue
+            val mine = l.firstOrNull { it.q.lowercase() == k }
+            if (v.optBoolean("deleted")) { if (mine != null && mine.at < v.optLong("at")) { l = l - mine; changed = true }; continue }
+            val q = v.optString("q").trim()
+            if (mine != null || q.isEmpty() || del.optLong(k) >= v.optLong("at")) continue
+            l = l + Follow(q, v.optLong("at")); changed = true
+        }
+        val old = del.keys().asSequence().toList().filter { del.optLong(it) < System.currentTimeMillis() - 90 * 86_400_000L }
+        if (old.isNotEmpty()) { old.forEach { del.remove(it) }; prefs.edit().putString("followDel", del.toString()).apply() }
+        if (changed) follows = l
+    }
+
     /** Takes in reminders set (or removed) on the other devices. */
     private fun adoptReminders(d: JSONObject) {
         val r = d.optJSONObject("reminders") ?: return
@@ -262,7 +330,7 @@ object Repo {
 
     @Volatile var syncData: JSONObject = JSONObject()
     suspend fun sync(): JSONObject = withContext(Dispatchers.IO) {
-        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).toString(), timeout = 15_000)) } catch (e: Exception) {
+        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).toString(), timeout = 15_000)) } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             warn("sync failed", e)
             lastSyncErrorState.value = if (e is org.json.JSONException) "Your server's reply couldn't be read." else describe(e, "your server")
@@ -271,6 +339,7 @@ object Repo {
         lastSyncErrorState.value = null
         syncData = d
         adoptReminders(d)
+        adoptFollows(d)
         version++
         File(app.filesDir, "sync.json").writeText(d.toString())
         d
@@ -332,7 +401,19 @@ object Repo {
         syncData.optJSONObject("progress")?.put(url, entry)
         try { syncData = JSONObject(http(api("sync"), JSONObject().put("progress", JSONObject().put(url, entry)).toString())) } catch (e: Exception) { warn("saving progress failed", e) }
     }
+    /** How often, and when last, this TV played each live channel: Home's "Your channels" puts the ones you watch most first. */
+    fun channelPlays(): Map<String, Pair<Int, Long>> = runCatching {
+        val o = JSONObject(prefs.getString("chanPlays", "{}") ?: "{}")
+        o.keys().asSequence().associateWith { k -> o.optJSONArray(k).let { (it?.optInt(0) ?: 0) to (it?.optLong(1) ?: 0L) } }
+    }.getOrDefault(emptyMap())
+    private fun notePlay(url: String) {
+        val m = channelPlays().toMutableMap(); val now = System.currentTimeMillis()
+        m[url] = ((m[url]?.first ?: 0) + 1) to now
+        val keep = m.entries.sortedByDescending { it.value.second }.take(150)   // a bounded list: the channels you've watched lately
+        prefs.edit().putString("chanPlays", JSONObject().also { o -> keep.forEach { (k, v) -> o.put(k, JSONArray().put(v.first).put(v.second)) } }.toString()).apply()
+    }
     suspend fun saveRecent(item: JSONObject) = withContext(Dispatchers.IO) {
+        if (item.optString("kind") == "live" && item.optString("url").isNotEmpty()) runCatching { notePlay(item.optString("url")) }
         try { syncData = JSONObject(http(api("sync"), JSONObject().put("recents", JSONArray().put(JSONObject(item.toString()).put("at", System.currentTimeMillis()))).toString())) } catch (e: Exception) { warn("saving recent failed", e) }
     }
 

@@ -5,6 +5,8 @@
 //   progress    per url, newest wins
 //   reminders   per "<channel url>|<start ms>", newest edit (at) wins; a removed one stays as a
 //               { deleted } marker until the programme has passed, so other devices drop it too
+//   follows     teams and shows followed, per lower-cased name ({ q, at }), newest edit wins; an unfollow stays as a
+//               { deleted } marker (for 90 days) so other devices drop it too
 //
 //   POST /sync?key=<PROXY_KEY>   body: the device's state -> the merged state
 
@@ -70,6 +72,18 @@ export function merge(a, b) {
     for (const [k, v] of Object.entries(b.reminders)) if (v && typeof v === 'object' && (!r[k] || (v.at || 0) > (r[k].at || 0))) r[k] = v;
     for (const [k, v] of Object.entries(r)) if (!(v?.start > old)) delete r[k];
     out.reminders = r;
+  }
+  if (b.follows && typeof b.follows === 'object' && !Array.isArray(b.follows)) {
+    const f = { ...(a.follows || {}) }, old = Date.now() - 90 * 86400_000;
+    for (const [k0, v] of Object.entries(b.follows)) {
+      const k = k0.trim().toLowerCase();
+      if (!k || k.length > 80 || !v || typeof v !== 'object') continue;
+      const e = v.deleted ? { deleted: true, at: +v.at || 0 } : { q: String(v.q || k0).trim().slice(0, 80), at: +v.at || 0 };
+      if (!f[k] || e.at > (f[k].at || 0)) f[k] = e;
+    }
+    for (const [k, v] of Object.entries(f)) if (v.deleted && !(v.at > old)) delete f[k];
+    const keys = Object.keys(f);
+    out.follows = keys.length > 200 ? Object.fromEntries(keys.sort((x, y) => f[y].at - f[x].at).slice(0, 200).map(k => [k, f[k]])) : f;
   }
   return out;
 }

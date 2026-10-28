@@ -43,6 +43,9 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -56,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.tv.material3.*
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -67,24 +71,37 @@ fun HomeScreen(act: TvActivity) {
     val movies by produceState(Repo.cachedOverview("movies"), Repo.version) { if (value == null) value = runCatching { Repo.overview("movies") }.getOrNull() }
     val series by produceState(Repo.cachedOverview("series"), Repo.version) { if (value == null) value = runCatching { Repo.overview("series") }.getOrNull() }
     val cw = remember(refresh) { Repo.continueWatching() }
-    val favs = remember(refresh) { Repo.favorites().filter { it.optString("url").isNotEmpty() } }
-    val recent = remember(refresh) { Repo.recentChannels() }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val live by produceState(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: value }
+    // Your channels: favourites and recent channels in one row, the ones you watch most and most lately first (it
+    // replaces the separate favourites and recents rows: the same logos twice, neither saying what's on).
+    val mine = remember(refresh, live) { yourChannels() }
+    val films = remember(refresh, live) { live?.let { filmChannels(it, mine) } ?: emptyList() }
     val guideTick = Repo.guideVersion
-    LaunchedEffect(favs, recent, Repo.version) {
-        val chans = (favs + recent).map { liveFromSync(it) }
-        if (chans.isNotEmpty()) { if (Repo.live == null) runCatching { Repo.liveChannels() }; Repo.requestGuide(chans) }
+    // Only the guide of what Home shows: your channels and a dozen film channels (the guide cache skips any asked lately).
+    LaunchedEffect(mine, films) { if (mine.isNotEmpty() || films.isNotEmpty()) Repo.requestGuide(mine.take(40) + films) }
+    // The minute ticks for progress lines and "in 5 min": only the cards that show them redraw, not the page.
+    LaunchedEffect(Unit) { while (true) { val t = System.currentTimeMillis(); delay(60_000 - t % 60_000 + 250); HomeClock.now = System.currentTimeMillis() } }
+    var soon by remember { mutableStateOf<List<SoonItem>>(emptyList()) }
+    LaunchedEffect(mine, films) {
+        snapshotFlow { Triple(Repo.guideVersion, HomeClock.now / 60_000, Repo.version) }.conflate().collect {
+            val next = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { startingSoon(mine, films, System.currentTimeMillis()) }
+            if (next.map { it.key + it.why } != soon.map { it.key + it.why }) soon = next
+        }
     }
+    val reminded = remember(refresh) { Repo.reminders.mapTo(HashSet()) { "${it.url}|${it.start}" } }
+    var info by remember { mutableStateOf<Pair<Channel, Programme>?>(null) }
     var menuFor by remember { mutableStateOf<Progress?>(null) }
-    var chanMenu by remember { mutableStateOf<Pair<Channel, String>?>(null) }   // the channel and the row it's in ("fav" / "rec")
+    var chanMenu by remember { mutableStateOf<Channel?>(null) }
     val scope = rememberCoroutineScope()
-    val favChans = remember(favs) { favs.map { liveFromSync(it) }.distinctBy { it.url } }
-    val recentChans = remember(recent) { recent.map { liveFromSync(it) }.distinctBy { it.url } }
+    fun group(c: Channel): List<Channel> = Repo.live?.channels?.filter { it.group == c.group && c.group.isNotEmpty() }?.takeIf { it.contains(c) } ?: listOf(c)
     // A card removed from a row hands the highlight to its neighbour (the next, else the one before); the row's last
     // card hands it to the first card of the row below, so the remote never falls back to the menu.
-    fun firstKeyBelow(row: String): String? = when (row) {
-        "cw" -> favChans.firstOrNull()?.let { "fav:" + it.url } ?: recentChans.firstOrNull()?.let { "rec:" + it.url } ?: firstKeyBelow("rec")
-        "fav" -> recentChans.firstOrNull()?.let { "rec:" + it.url } ?: firstKeyBelow("rec")
-        else -> movies?.trending?.firstOrNull()?.let { "${it.kind}:${it.id}:1:${Tv.poster.value}" }
+    fun firstKeyBelow(row: String): String? {
+        val rows = listOf("yc" to mine.firstOrNull()?.let { "yc:" + it.url }, "cw" to cw.firstOrNull()?.let { "cw:" + it.url },
+            "ss" to soon.firstOrNull()?.let { "ss:" + it.key },
+            "mv" to movies?.trending?.firstOrNull()?.let { "${it.kind}:${it.id}:1:${Tv.poster.value}" })
+        return rows.dropWhile { it.first != row }.drop(1).firstNotNullOfOrNull { it.second }
     }
     fun <T> handOff(list: List<T>, gone: T, row: String, key: (T) -> String) {
         val i = list.indexOf(gone)
@@ -97,9 +114,24 @@ fun HomeScreen(act: TvActivity) {
         // Trending films and series alternate (#1 movie, #1 series, #2 movie, …), each ranked within its own kind.
         item { Hero(act, run { val m = (movies?.trending ?: emptyList()).filter { it.backdrop.isNotEmpty() }.take(4); val sr = (series?.trending ?: emptyList()).filter { it.backdrop.isNotEmpty() }.take(4)
             (0 until maxOf(m.size, sr.size)).flatMap { k -> listOfNotNull(m.getOrNull(k), sr.getOrNull(k)) } }, movies == null && series == null) }
+        // Live first: on the TV, getting back to live TV is the commonest thing to do, and what's on changes by the
+        // minute. Then your films and episodes, then what starts soon, then the catalogue. (Sport stays on its own
+        // Sports page, by choice: Home is for your channels, films and series.)
+        if (mine.isNotEmpty()) {
+            item(key = "yc-t") { RowTitle("Your channels") }
+            item(key = "yc") {
+                // One-line titles: a row of 20+ channels nearly always has one long title, and a whole row sized for it
+                // left a band of empty card under every other title. The full title is in the player's banner.
+                CardRow(mine, { it.url }) { c, i ->
+                    val minute = HomeClock.now / 60_000
+                    val now = remember(guideTick, c, minute) { Repo.nowNext(c).first }
+                    NowCard(c, now, now?.let { shortTitle(it.title) } ?: "No guide information", twoLines = false, restoreKey = "yc:" + c.url, onLong = { chanMenu = c }) { act.playLive(mine, i) }
+                }
+            }
+        }
         if (cw.isNotEmpty()) {
-            item { RowTitle("Continue watching") }
-            item {
+            item(key = "cw-t") { RowTitle("Continue watching") }
+            item(key = "cw") {
                 CardRow(cw, key = { it.url }) { p, _ ->
                     val it = p.item
                     WideCard(it.optString("logo"), progressTitle(it), "${clock((p.d - p.t).toLong())} left", (p.t / p.d).toFloat(), restoreKey = "cw:" + p.url,
@@ -107,13 +139,12 @@ fun HomeScreen(act: TvActivity) {
                 }
             }
         }
-        if (favs.isNotEmpty()) {
-            item { RowTitle("Favourite channels", count = favs.size) }
-            item { ChannelRowCards(act, favChans, guideTick, keyPrefix = "fav:") { chanMenu = it to "fav" } }
-        }
-        if (recent.isNotEmpty()) {
-            item { RowTitle("Recently watched channels") }
-            item { ChannelRowCards(act, recentChans, guideTick, keyPrefix = "rec:") { chanMenu = it to "rec" } }
+        if (soon.isNotEmpty()) {
+            item(key = "ss-t") { RowTitle("Starting soon", "Next 2 hours") }
+            item(key = "ss") {
+                val two = anyTwoLines(remember(soon) { soon.map { it.p.title.replace(Regex("""\s*\((19|20)\d\d\)\s*$"""), "") } })
+                CardRow(soon, { it.key }) { s, _ -> SoonCard(s, s.key in reminded, twoLines = two, restoreKey = "ss:" + s.key) { info = s.c to s.p } }
+            }
         }
         val m = movies; val s = series
         if (m == null) { item { SkeletonTitle() }; item { SkeletonRow() } }
@@ -137,7 +168,9 @@ fun HomeScreen(act: TvActivity) {
             "Remove from Continue watching" to { menuFor = null; handOff(cw, p, "cw") { "cw:" + it.url }; scope.launch { Repo.saveProgress(p.url, p.t, p.d, p.item, hide = true); act.refresh++ } },
         )) { menuFor = null }
     }
-    chanMenu?.let { (c, row) -> ChannelOptions(act, c, onRemove = { what -> if (what == "fav" && row == "fav") handOff(favChans, c, "fav") { "fav:" + it.url } }) { chanMenu = null } }
+    // Removing a favourite (that isn't also a recent channel) or hiding a channel takes it out of the row.
+    chanMenu?.let { c -> ChannelOptions(act, c, onRemove = { what -> if (what == "hide" || Repo.recentChannels().none { it.optString("url") == c.url }) handOff(mine, c, "yc") { "yc:" + it.url } }) { chanMenu = null } }
+    info?.let { (c, p) -> ProgrammeDialog(act, c, p, System.currentTimeMillis(), group(c)) { info = null } }
 }
 
 /** A row of channel cards with what's on now (favourites, recent). */
@@ -762,8 +795,14 @@ private fun EpisodeRow(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>,
 @Composable
 fun SearchScreen(act: TvActivity) {
     var q by rememberSaveable { mutableStateOf("") }
+    // The field's text and caret (Right at the end of the text steps over to the mic).
+    var tf by remember { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(q, androidx.compose.ui.text.TextRange(q.length))) }
     val field = remember { FocusRequester() }
+    val firstResult = remember { FocusRequester() }
+    val mic = remember { FocusRequester() }
     var fieldFocused by remember { mutableStateOf(false) }
+    var micFocused by remember { mutableStateOf(false) }
+    val listState = rememberPageState()
     LaunchedEffect(Unit) { delay(100); runCatching { field.requestFocus() } }
     val live by produceState(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: value }
     val chanIndex by produceState<ChannelIndex?>(null, live) { value = live?.let { ChannelIndex.forLive(it) } }
@@ -801,28 +840,63 @@ fun SearchScreen(act: TvActivity) {
     val focusMgr = androidx.compose.ui.platform.LocalFocusManager.current
     val kb = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     var submits by remember { mutableIntStateOf(0) }
+    var spoken by remember { mutableStateOf<String?>(null) }
     fun submit() { if (query.isNotEmpty()) { debounced = query; submits++ } else kb?.hide() }
     LaunchedEffect(submits) {
         if (submits == 0) return@LaunchedEffect
         kb?.hide()
         val until = System.currentTimeMillis() + 2_500
-        while (chans.isEmpty() && progs.isEmpty() && (vodBusy || vods == null) && System.currentTimeMillis() < until) delay(80)
+        val atMost = System.currentTimeMillis() + 10_000   // just started (a voice search from Home): the channel list is still loading
+        while (System.currentTimeMillis() < atMost && (chanIndex == null || chans.isEmpty() && progs.isEmpty() && (vodBusy || vods == null) && System.currentTimeMillis() < until)) delay(80)
         delay(60)
         if (chans.isEmpty() && progs.isEmpty() && vods?.let { it.first.isEmpty() && it.second.isEmpty() } != false) delay(400)   // films/series still arriving
-        focusMgr.moveFocus(androidx.compose.ui.focus.FocusDirection.Down)
+        // The first result of the first row (not whichever card happens to sit under the field).
+        if (runCatching { firstResult.requestFocus() }.isFailure) focusMgr.moveFocus(androidx.compose.ui.focus.FocusDirection.Down)
     }
-    LazyColumn(Modifier.fillMaxSize(), state = rememberPageState(), contentPadding = PaddingValues(top = Tv.topMargin, bottom = 56.dp)) {
+    // Voice: the mic button, the remote's search key, or "search for …" from the Assistant. What was heard fills the
+    // field and runs at once, like pressing Search on the keyboard.
+    LaunchedEffect(act.voiceTick) {
+        val heard = act.voiceText ?: return@LaunchedEffect
+        act.voiceText = null
+        q = heard; tf = androidx.compose.ui.text.input.TextFieldValue(heard, androidx.compose.ui.text.TextRange(heard.length))
+        submit(); spoken = heard
+        delay(400); kb?.hide()   // (Search opening puts the highlight in the field, which brings the keyboard up)
+    }
+    // After a voice search the highlight goes to the first result as soon as there is one, however long the channel
+    // list takes to load (straight after the app starts it can take ~15 s); typing something else cancels it.
+    LaunchedEffect(spoken, chans, progs, vods, chanIndex) {
+        if (spoken == null || chanIndex == null) return@LaunchedEffect   // (channels first: they head the results)
+        if (query != spoken) { spoken = null; return@LaunchedEffect }
+        if (chans.isEmpty() && progs.isEmpty() && vods?.let { it.first.isEmpty() && it.second.isEmpty() } != false) return@LaunchedEffect
+        delay(120)
+        if (fieldFocused || micFocused) { runCatching { firstResult.requestFocus() }; kb?.hide() }
+        spoken = null
+    }
+    // Back from the results goes to the field (then a second Back leaves Search as usual).
+    var pageFocused by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    androidx.activity.compose.BackHandler(enabled = pageFocused && !fieldFocused && !micFocused && chanMenu == null) {
+        runCatching { field.requestFocus() }
+        scope.launch { listState.scrollToItem(0); delay(60); kb?.hide() }   // the field, without the keyboard over the results (OK opens it)
+    }
+    LazyColumn(Modifier.fillMaxSize().onFocusChanged { pageFocused = it.hasFocus }, state = listState, contentPadding = PaddingValues(top = Tv.topMargin, bottom = 56.dp)) {
         item {
-            Row(Modifier.padding(horizontal = Tv.margin).fillMaxWidth(.66f).background(if (fieldFocused) Tv.surface2 else Tv.surface, RoundedCornerShape(14.dp))
-                .border(2.dp, if (fieldFocused) Tv.focusRing else Color.Transparent, RoundedCornerShape(14.dp)).padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Search, null, tint = Tv.muted, modifier = Modifier.size(22.dp))
-                Spacer(Modifier.width(12.dp))
-                Box(Modifier.weight(1f)) {
-                    if (q.isEmpty()) Text("Search channels, TV programmes, movies and series", color = Tv.muted, fontSize = Tv.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    BasicTextField(q, { q = it }, singleLine = true, textStyle = TextStyle(color = Tv.text, fontSize = Tv.body), cursorBrush = SolidColor(Tv.accent),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { submit() }, onDone = { submit() }, onGo = { submit() }),
-                        modifier = Modifier.fillMaxWidth().focusRequester(field).onFocusChanged { fieldFocused = it.isFocused }.searchFieldKeys { submit() })
+            Row(Modifier.padding(horizontal = Tv.margin).fillMaxWidth(.66f), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.weight(1f).background(if (fieldFocused) Tv.surface2 else Tv.surface, RoundedCornerShape(14.dp))
+                    .border(2.dp, if (fieldFocused) Tv.focusRing else Color.Transparent, RoundedCornerShape(14.dp)).padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Search, null, tint = Tv.muted, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Box(Modifier.weight(1f)) {
+                        if (tf.text.isEmpty()) Text(if (act.listening) "Listening…" else "Search channels, TV programmes, movies and series", color = if (act.listening) Tv.text2 else Tv.muted, fontSize = Tv.body, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        BasicTextField(tf, { tf = it; q = it.text }, singleLine = true, textStyle = TextStyle(color = Tv.text, fontSize = Tv.body), cursorBrush = SolidColor(Tv.accent),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { submit() }, onDone = { submit() }, onGo = { submit() }),
+                            modifier = Modifier.fillMaxWidth().focusRequester(field).onFocusChanged { fieldFocused = it.isFocused }
+                                .onPreviewKeyEvent { e -> if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight && tf.selection.collapsed && tf.selection.end >= tf.text.length) { kb?.hide(); runCatching { mic.requestFocus() }; true } else false }
+                                .searchFieldKeys { submit() })
+                    }
                 }
+                Spacer(Modifier.width(12.dp))
+                MicButton(act.listening, Modifier.focusRequester(mic), onFocus = { micFocused = it }) { act.startVoice() }
             }
         }
         if (query.isEmpty()) {
@@ -831,18 +905,42 @@ fun SearchScreen(act: TvActivity) {
             return@LazyColumn
         }
         val v = vods
-        if (chans.isNotEmpty()) { item(key = "ch-t") { RowTitle("Live channels", count = chans.size) }; item(key = "ch") { ChannelRowCards(act, chans, guideTick) { chanMenu = it } } }
+        // The first row there is takes the "first result" requester: focus entering it lands on its first card.
+        var firstUsed = false
+        fun first(): Modifier = if (firstUsed) Modifier else { firstUsed = true; Modifier.focusRequester(firstResult) }
+        if (chans.isNotEmpty()) { val m = first(); item(key = "ch-t") { RowTitle("Live channels", count = chans.size) }; item(key = "ch") { Box(m) { ChannelRowCards(act, chans, guideTick) { chanMenu = it } } } }
         if (progs.isNotEmpty()) {
+            val m = first()
             item(key = "pg-t") { RowTitle("On TV now and later", extra = "from the TV guide", count = progs.size) }
-            item(key = "pg") { CardRow(progs, { "${it.channel.url}|${it.p.start}" }) { h, _ -> SearchProgrammeCard(act, h) { chanMenu = h.channel } } }
+            item(key = "pg") { Box(m) { CardRow(progs, { "${it.channel.url}|${it.p.start}" }) { h, _ -> SearchProgrammeCard(act, h) { chanMenu = h.channel } } } }
         }
-        if (v != null && v.first.isNotEmpty()) { item(key = "mv-t") { RowTitle("Movies", count = v.first.size) }; item(key = "mv") { CardRow(v.first, { it.id }) { m, _ -> PosterCard(m) { act.go(Screen.Details(m)) } } } }
-        if (v != null && v.second.isNotEmpty()) { item(key = "sr-t") { RowTitle("Series", count = v.second.size) }; item(key = "sr") { CardRow(v.second, { it.id }) { s, _ -> PosterCard(s) { act.go(Screen.Details(s)) } } } }
-        if (vodBusy || !settled) { item(key = "sk-t") { SkeletonTitle() }; item(key = "sk") { SkeletonRow() } }
+        if (v != null && v.first.isNotEmpty()) { val m = first(); item(key = "mv-t") { RowTitle("Movies", count = v.first.size) }; item(key = "mv") { Box(m) { CardRow(v.first, { it.id }) { m, _ -> PosterCard(m) { act.go(Screen.Details(m)) } } } } }
+        if (v != null && v.second.isNotEmpty()) { val m = first(); item(key = "sr-t") { RowTitle("Series", count = v.second.size) }; item(key = "sr") { Box(m) { CardRow(v.second, { it.id }) { s, _ -> PosterCard(s) { act.go(Screen.Details(s)) } } } } }
+        if (vodBusy || !settled || chanIndex == null) { item(key = "sk-t") { SkeletonTitle() }; item(key = "sk") { SkeletonRow() } }
         else if (chans.isEmpty() && progs.isEmpty() && (v == null || (v.first.isEmpty() && v.second.isEmpty())))
             item { Box(Modifier.fillMaxWidth().padding(top = 120.dp)) { EmptyState(Icons.Default.SearchOff, "Nothing matches \"$query\"", "Try a shorter word, a channel number or a programme name") } }
     }
     chanMenu?.let { c -> ChannelOptions(act, c) { chanMenu = null } }
+}
+
+/** The mic beside the search field: a quiet circle, solid white when highlighted; while listening, the accent colour
+ *  with one slow, soft ring (calm, not a flashing light). */
+@Composable
+private fun MicButton(listening: Boolean, modifier: Modifier, onFocus: (Boolean) -> Unit, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    val ring = if (listening) androidx.compose.animation.core.rememberInfiniteTransition(label = "mic").animateFloat(0f, 1f,
+        androidx.compose.animation.core.infiniteRepeatable(androidx.compose.animation.core.tween(1400), androidx.compose.animation.core.RepeatMode.Restart), label = "ring").value else 0f
+    Box(Modifier.size(58.dp), contentAlignment = Alignment.Center) {
+        if (listening) Box(Modifier.size(52.dp).graphicsLayer { scaleX = 1f + ring * .25f; scaleY = 1f + ring * .25f; alpha = (1f - ring) * .5f }.background(Tv.accent, RoundedCornerShape(50)))
+        Box(modifier.size(52.dp).onFocusChanged { f = it.isFocused; onFocus(it.isFocused) }
+            .onKeyEvent { e -> if (e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter)) { onClick(); true } else false }
+            .clearAndSetSemantics { contentDescription = if (listening) "Listening" else "Search by voice" }
+            .focusable()
+            .background(when { f -> Tv.text; listening -> Tv.accent; else -> Tv.surface }, RoundedCornerShape(50)),
+            contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.Mic, null, tint = when { f -> Tv.bg; listening -> Tv.text; else -> Tv.text2 }, modifier = Modifier.size(24.dp))
+        }
+    }
 }
 
 /** A programme from the guide: the channel's logo, the title, and when it's on. OK on one that's on now plays the

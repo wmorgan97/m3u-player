@@ -273,16 +273,23 @@ private fun Cell(title: String, sub: String?, x: Dp, w: Dp, on: Boolean, past: B
 
 /** A programme's details with what you can do: watch, watch from the start / play from the archive, remind me. */
 @Composable
-fun ProgrammeDialog(act: TvActivity, c: Channel, p: Programme, now: Long, chans: List<Channel>, onDismiss: () -> Unit) {
+fun ProgrammeDialog(act: TvActivity, c: Channel, p: Programme, now: Long, chans: List<Channel>, teams: List<String> = emptyList(), onDismiss: () -> Unit) {
     val onAir = p.start <= now && p.end > now
     val archive = Repo.catchupUrl(c, p.start, p.end)
     val first = remember { FocusRequester() }
     var reminded by remember { mutableStateOf(Repo.hasReminder(c.url, p.start)) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val following = remember { mutableStateMapOf<String, Boolean>().apply { teams.forEach { put(it, Repo.isFollowing(it)) } } }
     val actions = buildList<Pair<String, () -> Unit>> {
         if (onAir) add("Watch now" to { onDismiss(); act.playLive(chans, chans.indexOf(c).coerceAtLeast(0)) })
         if (archive != null) add((if (onAir) "Watch from the start" else "Play (catch-up)") to { onDismiss(); act.playCatchup(c, p) })
         if (p.start > now) add((if (reminded) "Cancel reminder" else "Remind me") to { Repo.toggleReminder(c, p); reminded = !reminded })
         if (!onAir) add("Watch the channel now" to { onDismiss(); act.playLive(chans, chans.indexOf(c).coerceAtLeast(0)) })
+        // A match ("Arsenal v Spurs"): follow either side, and every one of its matches gets a reminder (on every device).
+        for (t in teams) add((if (following[t] == true) "Following $t ✓" else "Follow $t") to {
+            val on = Repo.toggleFollow(t); following[t] = on
+            if (on) { if (p.start > now + 120_000 && !reminded) { Repo.toggleReminder(c, p); reminded = true }; SportsHub.checkFollows(ctx.applicationContext, force = true) }
+        })
         add("Close" to onDismiss)
     }
     Dialog(onDismissRequest = onDismiss) {
