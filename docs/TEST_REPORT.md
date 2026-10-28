@@ -36,3 +36,24 @@ gfxinfo numbers are pessimistic.
 | Menu: opens over the page; Back asks "Press Back again to exit" | Verified |
 | Settings two-pane, toggles incl. Show channel numbers | Verified visually |
 | Catch-up, reminders, sleep timer, PIN gate, error panel/retries, Home-button stop | Built, not yet exercised on device |
+
+## Live TV list: Compose vs RecyclerView (A/B on the Shield, 2026-10-28)
+Instrument: `bench.sh` (atrace main-thread `Choreographer#doFrame`, `deliverInputEvent` to the next frame end), same APK
+with an A/B switch, release build AOT-compiled, preview pinned to a public stream, 3 alternating runs each.
+Scenario A: 10 group changes resting 1.2 s each. Scenario B: 60 Down presses in a 151-channel group.
+
+| Group changes (per run of 10) | Compose (1 row/frame) | RecyclerView prototype |
+|---|---|---|
+| frames > 16.7 ms | 17 / 23 / 20 | 10 / 10 / 11 |
+| frames > 33 ms | 1 / 0 / 0 | 5 / 6 / 5 |
+| worst frame | 36 / 29 / 28 ms | 42 / 65 / 47 ms |
+| input -> frame p95 | 22 / 21 / 24 ms | 276 / 20 / 275 ms |
+
+Scrolling within a group (B): both versions 0 frames over 16.7 ms; worst frame 12-18 ms; input -> frame p50 11-14 ms.
+Verdict: the RecyclerView prototype is not a repeatable improvement (fewer late frames but more visible >33 ms jolts,
+because a group change rebinds every visible row and its logo in one frame). The Compose list stays; the prototype is
+kept on branch `rv` only. Earlier steps on the same benchmark: group-change frames >16.7 ms went 41 (2 rows/frame) ->
+17-23 (1 row/frame); worst 83 ms (all rows in the first frame) -> 27-36 ms.
+
+Memory: Java heap after the benchmark 64-77 MB in use (dumpsys meminfo); holding Up/Down through groups previously
+reached 163-188 MB and crashed; 320-press stress test now completes without a crash.
