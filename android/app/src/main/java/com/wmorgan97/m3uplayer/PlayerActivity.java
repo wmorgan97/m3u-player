@@ -361,6 +361,20 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     private void fail(String message, String code) {
+        // The 4K copy won't play: carry on with the normal copy of the same channel instead of showing an error.
+        String fb = item.optString("fallback", "");
+        if (live && !fb.isEmpty()) {
+            JSObject next;
+            try { next = new JSObject(item.toString()); } catch (Exception e) { next = null; }
+            if (next != null) {
+                next.put("url", fb); next.remove("fallback"); next.remove("uhd");
+                Object fh = item.opt("fallbackHeaders"); if (fh != null) next.put("headers", fh);
+                showHud("4K unavailable · playing HD");
+                lastLoadReq = 0;
+                load(next);
+                return;
+            }
+        }
         setState(S_FAILED);
         ui.removeCallbacksAndMessages(RETRY);
         player.stop(); runningUrl = null;   // let go of the provider's one connection
@@ -1188,6 +1202,17 @@ public class PlayerActivity extends AppCompatActivity {
             boolean usable = url != null && (url.startsWith("http://") || url.startsWith("https://")) && !failed.contains(url);
             v.setVisibility(usable ? View.VISIBLE : View.GONE);   // no logo: the name moves up next to the number, no empty box
             if (!usable) return;
+            // Through the app's picture loader and the same shrunk address the channel lists use: a logo seen in a list is
+            // already on the TV (disk cache), so the banner shows it at once instead of downloading it again each time.
+            String small = com.wmorgan97.m3uplayer.tv.Repo.INSTANCE.img(url, 120);
+            if (small != null) {
+                coil.Coil.imageLoader(v.getContext()).enqueue(new coil.request.ImageRequest.Builder(v.getContext())
+                    .data(small).target(v).crossfade(false).allowHardware(true)
+                    .listener(new coil.request.ImageRequest.Listener() {
+                        @Override public void onError(coil.request.ImageRequest r, coil.request.ErrorResult e) { if (url.equals(v.getTag())) v.setVisibility(View.GONE); }
+                    }).build());
+                return;
+            }
             android.graphics.Bitmap hit = cache.get(url);
             if (hit != null) { v.setImageBitmap(hit); return; }
             io.execute(() -> {

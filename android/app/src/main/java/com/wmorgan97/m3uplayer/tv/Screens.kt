@@ -386,6 +386,12 @@ fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onFocus:
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 14.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold, color = if (inPreview) Tv.accent else Color.Unspecified, modifier = Modifier.weight(1f, fill = false))
                     if (fav) { Spacer(Modifier.width(6.dp)); Text("★", fontSize = Tv.label, color = Tv.star) }
+                    // There's a 4K copy and "Prefer 4K" is on: OK plays that copy (the normal one stays as its backup).
+                    if (Repo.fourKFirst && remember(c.url) { Repo.uhdFor(c) != null }) {
+                        Spacer(Modifier.width(8.dp))
+                        Text("4K", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = LocalContentColor.current.copy(alpha = .75f),
+                            modifier = Modifier.border(1.dp, LocalContentColor.current.copy(alpha = .45f), RoundedCornerShape(3.dp)).padding(horizontal = 4.dp))
+                    }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(now?.title ?: "No programme information", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 11.5.sp, lineHeight = 13.sp, color = LocalContentColor.current.copy(alpha = .7f), modifier = Modifier.weight(1f))

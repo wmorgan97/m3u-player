@@ -269,8 +269,12 @@ class TvActivity : ComponentActivity() {
         val c = list[i]
         // Prefer 4K (an O(1) lookup), except for the channel already playing in the preview: that stream carries on as is.
         val inPreview = Preview.channel?.url == c.url && Preview.shown
-        if (Repo.fourKFirst && !inPreview && quality(c.name, c.group) != "4K") Repo.uhdFor(c)?.let { uhd -> list = list.toMutableList().also { it[i] = uhd } }
+        // The picked channel keeps its name, logo and number; only the stream is the 4K copy's, with the normal one as its
+        // backup (the player falls back to it if the 4K stream won't play).
+        val uhd = if (Repo.fourKFirst && !inPreview) Repo.uhdFor(c) else null
+        Repo.prefetchLogos(this, list.subList(maxOf(0, i - 20), minOf(list.size, i + 21)))   // zapping nearby shows logos at once
         val items = list.map { channelItem(it) }
+        if (uhd != null) items[i].put("url", uhd.url).put("headers", JSONObject(uhd.headers)).put("fallback", c.url).put("fallbackHeaders", JSONObject(c.headers)).put("uhd", true)
         liveLists.add(0, items to list); while (liveLists.size > 3) liveLists.removeAt(3)
         val prev = lastLive?.let { (l, k) -> l.getOrNull(k) }
         if (prev != null && prev.optString("url") != items[i].optString("url")) items[i].put("last", prev.optString("title"))

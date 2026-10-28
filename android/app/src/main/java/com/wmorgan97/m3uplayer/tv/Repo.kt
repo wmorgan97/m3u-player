@@ -273,7 +273,7 @@ object Repo {
     // "Prefer 4K": the 4K copy of each channel by normalised name, built once with the channel list (off the main thread).
     // Looking it up by scanning ~19k channels on every channel start froze the screen for ~2 s on the Shield.
     @Volatile private var uhdIndex: Map<String, Channel> = emptyMap()
-    fun uhdFor(c: Channel): Channel? = uhdIndex[normName(c.name)]?.takeIf { it.url != c.url }
+    fun uhdFor(c: Channel): Channel? = if (isUhdName(c.name)) null else uhdIndex[liveBase(c.name)]?.takeIf { it.url != c.url }
 
     data class Live(val channels: List<Channel>, val groups: List<String>, val epgUrls: List<String>) {
         val urls: Set<String> by lazy { channels.mapTo(HashSet()) { it.url } }
@@ -333,7 +333,10 @@ object Repo {
         }
         liveErrorState.value = if (tried > 0 && loaded == 0) (firstError ?: "Your playlists couldn't be loaded.") else null
         val groups = LinkedHashSet<String>(); all.forEach { groups += it.group }
-        Live(all, groups.toList(), epg.distinct()).also { live = it; uhdIndex = all.filter { quality(it.name, it.group) == "4K" }.associateBy { normName(it.name) } }
+        Live(all, groups.toList(), epg.distinct()).also { live = it
+            val m = HashMap<String, Channel>()
+            for (c in all) if (isUhdName(c.name) && !c.name.trimStart().startsWith("#")) liveBase(c.name).takeIf { it.isNotEmpty() }?.let { m.putIfAbsent(it, c) }
+            uhdIndex = m }
     }
 
     // The playlist parser and catch-up links live in Parsing.kt (pure, unit-tested).

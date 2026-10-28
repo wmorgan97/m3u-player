@@ -88,6 +88,16 @@ fun qualityScore(name: String, group: String): Int {
     return res + (if (hdr) 4 else 0) + (if (atmos) 1 else 0) - (if (isEnglishGroup(group)) 0 else 60)
 }
 
+// Live 4K first, the same way as the iPhone/web app (js/app.js liveBase / IS_UHD): "Sky Sports F1" and
+// "Sky Sports F1 ᵁᴴᴰ ᴴᴰᴿ" are the same channel. Only the channel's own name decides it is the 4K copy.
+private val IS_UHD = Regex("""\b(4k|uhd|2160p?|3840p?)\b|ᵁᴴᴰ""", RegexOption.IGNORE_CASE)
+private val SUPERSCRIPTS = Regex("""[ʰ-˿ᴬ-ᵫ⁰-₟]+""")
+private val BRACKETS = Regex("""\[[^\]]*\]|\([^)]*\)""")
+private val QUALITY_WORDS = Regex("""\b(4k|uhd|hdr|fhd|hd|sd|2160p?|3840p?|1080p?|720p?|backup|raw|hevc)\b""", RegexOption.IGNORE_CASE)
+private val NOT_ALNUM = Regex("""[^a-z0-9:]+""")
+fun isUhdName(name: String) = IS_UHD.containsMatchIn(name)
+fun liveBase(name: String): String = name.replace(SUPERSCRIPTS, " ").replace(BRACKETS, " ").replace(QUALITY_WORDS, " ").lowercase().replace(NOT_ALNUM, "")
+
 fun quality(name: String, group: String): String? {
     val t = "$name $group"
     return when {
