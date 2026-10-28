@@ -169,7 +169,7 @@ fun ChannelCard(name: String, logo: String?, now: String, progress: Float? = nul
         FocusCard(Modifier.width(Tv.channel).aspectRatio(16f / 9f), label = name, onLongClick = onLong, onClick = onClick) {
             Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
                 if (logo.isNullOrBlank()) Text(initials(name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
-                else Picture(Repo.img(logo, 200), Modifier.fillMaxSize().padding(16.dp).background(Color.Transparent), ContentScale.Fit) {
+                else Picture(Repo.logo(logo), Modifier.fillMaxSize().padding(16.dp).background(Color.Transparent), ContentScale.Fit) {
                     Text(initials(name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
                 }
                 if (progress != null) ProgressLine(progress, Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
@@ -184,7 +184,7 @@ fun ChannelCard(name: String, logo: String?, now: String, progress: Float? = nul
 fun LogoTile(c: Channel, modifier: Modifier = Modifier) {
     Box(modifier.background(Tv.surface2, RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
         if (c.logo.isBlank()) Text(initials(c.name), fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Bold)
-        else Picture(Repo.img(c.logo, 120), Modifier.fillMaxSize().padding(4.dp).background(Color.Transparent), ContentScale.Fit, fade = false) {
+        else Picture(Repo.logo(c.logo), Modifier.fillMaxSize().padding(4.dp).background(Color.Transparent), ContentScale.Fit, fade = false) {
             Text(initials(c.name), fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Bold)
         }
     }

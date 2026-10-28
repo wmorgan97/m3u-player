@@ -80,7 +80,7 @@ class TvActivity : ComponentActivity() {
         Repo.cachedSync()
         testHook(intent)   // (adb test hook: on create and on new intents only, never again on resume)
         lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
-        lifecycleScope.launch { runCatching { Repo.liveChannels() } }   // channels ready before Live TV is opened
+        lifecycleScope.launch { runCatching { Repo.liveChannels() }; delay(4000); Repo.warmAllLogos(applicationContext) }   // channels ready before Live TV is opened
         lifecycleScope.launch { delay(1500); runCatching { Repo.overview("movies") }; runCatching { Repo.overview("series") } }   // rows ready before Movies / Series are opened
         lifecycleScope.launch { delay(2500); com.wmorgan97.m3uplayer.PlayerHolder.warm(this@TvActivity) }   // a player ready before play is pressed
         Repo.loadSavedGuide()

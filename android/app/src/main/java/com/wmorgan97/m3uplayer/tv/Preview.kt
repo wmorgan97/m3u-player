@@ -125,7 +125,12 @@ fun PreviewBox(channel: Channel?, resumeTick: Int, modifier: Modifier = Modifier
     }
     DisposableEffect(Unit) { onDispose { Preview.stop(); Preview.shown = false; Preview.resetZoom() } }
     LaunchedEffect(playing) { Preview.shown = playing }
-    LaunchedEffect(Preview.current, view) { view?.player = Preview.current }   // the window follows the current player
+    // The window follows the current player, but never lets go of one first: handing the player on (to full screen) leaves
+    // it drawing here until the full-screen surface takes it over; a player coming back is pointed at this window again.
+    LaunchedEffect(Preview.current, view) {
+        val p = Preview.current ?: return@LaunchedEffect; val v = view ?: return@LaunchedEffect
+        if (v.player === p) (v.videoSurfaceView as? android.view.TextureView)?.let { p.setVideoTextureView(it) } else v.player = p
+    }
     // Grow-to-full-screen: scale and move the window from where it sits to the whole screen, corners straightening out.
     val root = androidx.compose.ui.platform.LocalView.current
     var bounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }

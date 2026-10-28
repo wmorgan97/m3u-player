@@ -265,7 +265,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     LaunchedEffect(list) { while (shownRows < list.size && shownRows < 30) { androidx.compose.runtime.withFrameNanos { }; shownRows += 1 }; shownRows = Int.MAX_VALUE }
     // The group's logos are fetched in the background as soon as its list is known, so rows appear with them in place.
     val ctxImg = androidx.compose.ui.platform.LocalContext.current
-    LaunchedEffect(list) { Repo.prefetchLogos(ctxImg, list.take(80)) }
+    LaunchedEffect(list) { Repo.prefetchLogos(ctxImg, list.take(150)) }
     // Guide data stays current while the screen is open: asked again every 30 min (each channel re-downloads at most every 3 h).
     LaunchedEffect(list) { while (true) { delay(30 * 60_000L); if (list.isNotEmpty()) Repo.requestGuide(list.take(300)) } }
     var shownGroup by remember { mutableStateOf<String?>(null) }   // back to the top only when the list is a new group's
@@ -662,7 +662,7 @@ private fun SearchProgrammeCard(act: TvActivity, h: ProgrammeHit, onLong: () -> 
         FocusCard(Modifier.width(Tv.channel).aspectRatio(16f / 9f), label = "${p.title}, $sub", onLongClick = onLong, onClick = { if (onAir) act.playLive(listOf(c), 0) }) {
             Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
                 if (c.logo.isBlank()) Text(initials(c.name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
-                else Picture(Repo.img(c.logo, 200), Modifier.fillMaxSize().padding(16.dp).background(Color.Transparent), ContentScale.Fit) {
+                else Picture(Repo.logo(c.logo), Modifier.fillMaxSize().padding(16.dp).background(Color.Transparent), ContentScale.Fit) {
                     Text(initials(c.name), fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Tv.muted)
                 }
                 Box(Modifier.align(Alignment.TopStart).padding(6.dp)) { Tag(if (onAir) "LIVE" else "$day${hhmm(p.start)}".trim(), bg = if (onAir) Tv.accentDeep else Color(0xB3000000), color = Tv.text, size = 11.sp) }
@@ -679,7 +679,7 @@ private fun SearchProgrammeCard(act: TvActivity, h: ProgrammeHit, onLong: () -> 
 fun Options(title: String, options: List<Pair<String, () -> Unit>>, onDismiss: () -> Unit) {
     val first = remember { FocusRequester() }
     Dialog(onDismissRequest = onDismiss) {
-        Column(Modifier.width(440.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.freshOkOnly().width(440.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(title, fontSize = Tv.body, fontWeight = FontWeight.SemiBold, color = Tv.text, modifier = Modifier.padding(start = 4.dp, bottom = 10.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
             options.forEachIndexed { i, (label, fn) ->
                 ListItem(selected = false, onClick = fn, headlineContent = { Text(label, fontSize = Tv.bodySmall, color = if (label.startsWith("Remove")) Tv.danger else Color.Unspecified) },

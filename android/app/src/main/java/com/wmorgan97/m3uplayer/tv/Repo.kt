@@ -155,12 +155,36 @@ object Repo {
     fun api(path: String) = "$server/$path?key=${enc(key)}"
     /** The original picture address behind one of our server's /img links (null if it isn't one). */
     fun imgOriginal(url: String?): String? = url?.takeIf { it.startsWith("$server/img?") }?.substringAfter("&u=", "")?.substringBefore('&')?.ifEmpty { null }?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+    /** Background logo warm-up, once per channel list: favourites' and recents' groups first, then the first 60 channels of
+     *  every group. Each distinct logo is fetched once into the on-TV cache (low priority, paused while watching full
+     *  screen), so a group shows its logos instantly even the first time it is opened. */
+    @Volatile private var warmedFor: Live? = null
+    fun warmAllLogos(c: Context) {
+        val l = live ?: return
+        if (warmedFor === l) return; warmedFor = l
+        guideScope.launch {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            val mine = (favorites() + recentChannels()).mapNotNull { channelByUrl(it.optString("url"))?.group }.toSet()
+            val byGroup = l.channels.groupBy { it.group }
+            val order = mine.mapNotNull { byGroup[it] } + byGroup.filterKeys { it !in mine && it !in hiddenGroups }.values.map { it.take(60) }
+            val urls = LinkedHashSet<String>(); order.forEach { g -> g.forEach { ch -> logo(ch.logo)?.let { urls += it } } }
+            val loader = coil.Coil.imageLoader(c)
+            for (u in urls) {
+                while (com.wmorgan97.m3uplayer.PlayerActivity.current != null) kotlinx.coroutines.delay(5_000)
+                runCatching { loader.execute(coil.request.ImageRequest.Builder(c).data(u).size(120, 72).memoryCachePolicy(coil.request.CachePolicy.DISABLED).build()) }
+            }
+        }
+    }
+
     /** Warms the picture caches with these channels' logos (same address and size the rows use). */
     fun prefetchLogos(c: Context, chans: List<Channel>) {
         if (com.wmorgan97.m3uplayer.PlayerActivity.current != null) return   // never while watching full screen
         val loader = coil.Coil.imageLoader(c)
-        for (ch in chans) img(ch.logo, 120)?.let { loader.enqueue(coil.request.ImageRequest.Builder(c).data(it).size(120, 72).build()) }
+        for (ch in chans) logo(ch.logo)?.let { loader.enqueue(coil.request.ImageRequest.Builder(c).data(it).size(120, 72).build()) }
     }
+    /** A channel logo's own file (cached on the TV like every picture). Not the server's shrunk copy: that one is a JPEG,
+     *  and logos drawn on a transparent background came out as white blocks or plain coloured rectangles. */
+    fun logo(url: String?): String? = url?.takeIf { it.startsWith("http") }
     fun img(url: String?, w: Int = 300): String? = if (url.isNullOrBlank()) null else if (!url.startsWith("http")) url else "$server/img?key=${enc(key)}&w=$w&u=${enc(url)}"
 
     private fun http(url: String, body: String? = null, timeout: Int = 30_000): String {

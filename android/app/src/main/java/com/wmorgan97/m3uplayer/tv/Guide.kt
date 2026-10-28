@@ -284,7 +284,7 @@ fun ProgrammeDialog(act: TvActivity, c: Channel, p: Programme, now: Long, chans:
         add("Close" to onDismiss)
     }
     Dialog(onDismissRequest = onDismiss) {
-        Column(Modifier.width(600.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)) {
+        Column(Modifier.freshOkOnly().width(600.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)) {
             Text(c.name, fontSize = Tv.label, color = Tv.muted, fontWeight = FontWeight.SemiBold)
             Text(p.title, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 2, modifier = Modifier.padding(top = 2.dp))
             Text("${dayLabel(p.start, now)}${hhmm(p.start)}–${hhmm(p.end)}  ·  ${(p.end - p.start) / 60_000} min" + (if (onAir) "  ·  On now" else if (p.end <= now) "  ·  Finished" else "") + (if (reminded) "  ·  Reminder set" else ""),
@@ -317,7 +317,7 @@ fun PinDialog(title: String, verify: ((String) -> Boolean)? = null, onResult: (S
         if (wrong >= 5) onResult(null)
     }
     Dialog(onDismissRequest = { onResult(null) }) {
-        Column(Modifier.width(360.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)
+        Column(Modifier.freshOkOnly().width(360.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)
             .onPreviewKeyEvent { e ->
                 val n = e.nativeKeyEvent.keyCode - android.view.KeyEvent.KEYCODE_0
                 if (e.type == KeyEventType.KeyDown && n in 0..9) { press("$n"); true } else false

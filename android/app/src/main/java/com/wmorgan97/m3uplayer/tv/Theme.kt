@@ -153,6 +153,18 @@ fun Modifier.holdOk(onHold: () -> Unit): Modifier {
     }
 }
 
+/** For pop-ups: OK only counts once it has been pressed afresh inside it. A menu opened by holding OK otherwise received
+ *  that same press (its repeats and its release) and ran its first entry, usually "Watch". */
+@Composable
+fun Modifier.freshOkOnly(): Modifier {
+    var armed by remember { mutableStateOf(false) }
+    return this.onPreviewKeyEvent { e ->
+        val ok = e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter
+        if (!ok || armed) return@onPreviewKeyEvent false
+        if (e.type == KeyEventType.KeyDown && e.nativeKeyEvent.repeatCount == 0) { armed = true; false } else true
+    }
+}
+
 /** Section heading above a row: a title, an optional quiet caption, and a count on the right. */
 @Composable
 fun RowTitle(text: String, extra: String? = null, count: Int? = null) = traced("RowTitle") {

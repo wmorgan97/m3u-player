@@ -138,7 +138,7 @@ public class PlayerActivity extends AppCompatActivity {
         buildUi();
         player = PlayerHolder.take(this);   // built ahead of time while you browse, so the player screen opens with it ready
         runningUrl = PlayerHolder.takeHandedUrl();   // or the preview's player, already playing this channel
-        playerView.setPlayer(player);
+        if (runningUrl != null) attachWhenSurfaceReady(); else playerView.setPlayer(player);
         player.addListener(listener = new Player.Listener() {
             @Override public void onRenderedFirstFrame() {
                 if (loadAt > 0) { android.util.Log.i("M3U", "picture in " + (System.currentTimeMillis() - loadAt) + "ms"); loadAt = 0; }
@@ -169,7 +169,22 @@ public class PlayerActivity extends AppCompatActivity {
 
     // ---------- stream ----------
 
-    private String runningUrl;   // the stream the player is connected to right now (null when stopped)
+    private String runningUrl;
+
+    /** A player handed over from the preview is still drawing into the preview window. It moves to this screen's surface
+     *  only once that surface exists: never a moment with no surface, which made the decoder restart and wait for the next
+     *  keyframe (the 1-3 s freeze when going full screen). */
+    private void attachWhenSurfaceReady() {
+        View v = playerView.getVideoSurfaceView();
+        if (!(v instanceof android.view.SurfaceView)) { playerView.setPlayer(player); return; }
+        android.view.SurfaceHolder h = ((android.view.SurfaceView) v).getHolder();
+        if (h.getSurface() != null && h.getSurface().isValid()) { playerView.setPlayer(player); return; }
+        h.addCallback(new android.view.SurfaceHolder.Callback() {
+            @Override public void surfaceCreated(android.view.SurfaceHolder holder) { h.removeCallback(this); if (player != null) playerView.setPlayer(player); }
+            @Override public void surfaceChanged(android.view.SurfaceHolder holder, int f, int w, int hh) {}
+            @Override public void surfaceDestroyed(android.view.SurfaceHolder holder) {}
+        });
+    }   // the stream the player is connected to right now (null when stopped)
 
     public void load(JSObject next) {
         if (player == null) return;   // destroyed
@@ -1204,7 +1219,7 @@ public class PlayerActivity extends AppCompatActivity {
             if (!usable) return;
             // Through the app's picture loader and the same shrunk address the channel lists use: a logo seen in a list is
             // already on the TV (disk cache), so the banner shows it at once instead of downloading it again each time.
-            String small = com.wmorgan97.m3uplayer.tv.Repo.INSTANCE.img(url, 120);
+            String small = com.wmorgan97.m3uplayer.tv.Repo.INSTANCE.logo(url);   // the logo's own file (transparency intact), cached on the TV
             if (small != null) {
                 coil.Coil.imageLoader(v.getContext()).enqueue(new coil.request.ImageRequest.Builder(v.getContext())
                     .data(small).target(v).crossfade(false).allowHardware(true)
