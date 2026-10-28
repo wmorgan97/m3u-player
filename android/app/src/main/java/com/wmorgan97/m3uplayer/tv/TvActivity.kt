@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -69,13 +70,31 @@ class TvActivity : ComponentActivity() {
             startActivity(Intent(this, MainActivity::class.java).putExtra("setup", true))
             finish(); return
         }
+        // Pictures (logos, posters) rarely change: keep them on the device whatever cache headers the original hosts send
+        // (many logo hosts say "don't cache", so logos were downloaded again every time a list came up).
+        coil.Coil.setImageLoader(coil.ImageLoader.Builder(applicationContext)
+            .respectCacheHeaders(false)
+            .memoryCache { coil.memory.MemoryCache.Builder(applicationContext).maxSizePercent(0.20).build() }
+            .diskCache { coil.disk.DiskCache.Builder().directory(cacheDir.resolve("pictures")).maxSizeBytes(300L * 1024 * 1024).build() }
+            .build())
         Repo.cachedSync()
+        testHook(intent)   // (adb test hook: on create and on new intents only, never again on resume)
         lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
         lifecycleScope.launch { runCatching { Repo.liveChannels() } }   // channels ready before Live TV is opened
         lifecycleScope.launch { delay(1500); runCatching { Repo.overview("movies") }; runCatching { Repo.overview("series") } }   // rows ready before Movies / Series are opened
         lifecycleScope.launch { delay(2500); com.wmorgan97.m3uplayer.PlayerHolder.warm(this@TvActivity) }   // a player ready before play is pressed
         Repo.loadSavedGuide()
         lifecycleScope.launch { while (true) { checkReminders(); delay(15_000) } }
+        // Guide auto-refresh for the channels you use most (favourites, recents, the preview's group): every 30 min it asks
+        // again, and each channel actually re-downloads at most every 3 h. The server re-reads the guide source every 6 h.
+        lifecycleScope.launch {
+            while (true) {
+                delay(30 * 60_000L)
+                if (PlayerActivity.current != null) continue   // watching: leave the connection to the picture
+                val mine = (Repo.favorites() + Repo.recentChannels()).map { liveFromSync(it) } + Preview.list.take(200)
+                if (mine.isNotEmpty()) Repo.requestGuide(mine.distinctBy { it.url })
+            }
+        }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Tv.accent, background = Tv.bg, surface = Tv.surface, onSurface = Tv.text, onBackground = Tv.text, surfaceVariant = Tv.surface2)) {
                 CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides QuickBringIntoView) { App() }
@@ -86,8 +105,12 @@ class TvActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (Repo.hasKey()) lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
+        // Back from full screen on a live channel: the preview window takes the player back and shrinks into place.
+        val pc = Preview.channel; val scr = stack.last()
+        val back = if (pc != null && Repo.preview && (scr is Screen.Live || scr is Screen.Guide)) com.wmorgan97.m3uplayer.PlayerHolder.takeReturned(pc.url) else null
+        Preview.resetZoom()
+        if (back != null && pc != null) Preview.adopt(back, pc.url) else com.wmorgan97.m3uplayer.PlayerHolder.dropReturned()
         resumeTick++
-        testHook(intent)
     }
     override fun onStop() { super.onStop(); Preview.stop() }   // Home / the player: the preview's stream closes
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); testHook(intent) }
@@ -96,6 +119,7 @@ class TvActivity : ComponentActivity() {
      *  player's channel panel, last-channel entry and zapping can be checked without touching the provider. */
     private fun testHook(i: Intent?) {
         i?.getStringExtra("testPreview")?.let { Preview.testUrl = it.ifEmpty { null }; i.removeExtra("testPreview") }
+        i?.getStringExtra("testScreen")?.let { sc -> i.removeExtra("testScreen"); when (sc) { "live" -> root(Screen.Live()); "guide" -> root(Screen.Guide()); "home" -> root(Screen.Home) } }
         val url = i?.getStringExtra("testStream") ?: return
         i.removeExtra("testStream")
         val names = listOf("Sky Sports Main Event", "Sky Sports F1", "BBC One HD", "BBC Two HD", "ITV1 HD", "Channel 4 HD", "Channel 5 HD", "Sky Atlantic")
@@ -156,7 +180,9 @@ class TvActivity : ComponentActivity() {
             drawerState = drawer,
             drawerContent = {
                 val current = remember { FocusRequester() }   // moving into the menu lands on the section you're in
-                Column(Modifier.fillMaxHeight().background(Tv.rail).onSizeChanged { if (drawer.currentValue == DrawerValue.Closed && it.width > 0) railPx = it.width }
+                // Hidden during the preview's grow/shrink. Read in the layer (drawing only): reading it here in composition
+                // re-composed the whole screen on the first frame of the zoom (~55 ms).
+                Column(Modifier.fillMaxHeight().graphicsLayer { alpha = if (Preview.zooming || Preview.unzooming) 0f else 1f }.background(Tv.rail).onSizeChanged { if (drawer.currentValue == DrawerValue.Closed && it.width > 0) railPx = it.width }
                     .padding(horizontal = 12.dp, vertical = 24.dp).focusProperties { enter = { current } }.focusGroup(),
                     verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     val item: @Composable (String, ImageVector, Boolean, () -> Unit) -> Unit = { label, icon, selected, onClick ->
@@ -200,7 +226,7 @@ class TvActivity : ComponentActivity() {
                     }
                 } }
                 // The clock sits on a small dark pill so it stays readable over posters scrolled up beneath it.
-                if (screen !is Screen.Details) Row(Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = Tv.margin).background(Tv.bg.copy(alpha = .85f), RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (screen !is Screen.Details) Row(Modifier.align(Alignment.TopEnd).graphicsLayer { alpha = if (Preview.zooming || Preview.unzooming) 0f else 1f }.padding(top = 4.dp, end = Tv.margin).background(Tv.bg.copy(alpha = .85f), RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (!Repo.online) { Text("Offline · showing saved data", fontSize = Tv.label, color = Tv.muted); Spacer(Modifier.width(14.dp)) }
                     Clock()
                 }
@@ -230,13 +256,13 @@ class TvActivity : ComponentActivity() {
         // Parental lock: every way into a channel (favourites, home rows, search, number zap, guide) comes through here.
         chans.getOrNull(index)?.let { c -> if (Repo.isChannelLocked(c)) { pinGate = { Repo.unlocked += c.group; playLive(chans, index) }; return } }
         var list = chans; var i = index
-        if (Repo.fourKFirst) {
-            val c = chans[index]
-            if (quality(c.name, c.group) != "4K") {
-                val base = normName(c.name)
-                Repo.live?.channels?.firstOrNull { quality(it.name, it.group) == "4K" && normName(it.name) == base }?.let { uhd -> list = chans.toMutableList().also { it[index] = uhd }; i = index }
-            }
-        }
+        // Only the channels around this one go to the player (its channel panel shows ±150; zapping wraps within them):
+        // building player entries for all ~19k of "All channels" on the main thread cost seconds.
+        if (list.size > 400) { val from = maxOf(0, minOf(i - 200, list.size - 400)); list = list.subList(from, from + 400); i -= from }
+        val c = list[i]
+        // Prefer 4K (an O(1) lookup), except for the channel already playing in the preview: that stream carries on as is.
+        val inPreview = Preview.channel?.url == c.url && Preview.shown
+        if (Repo.fourKFirst && !inPreview && quality(c.name, c.group) != "4K") Repo.uhdFor(c)?.let { uhd -> list = list.toMutableList().also { it[i] = uhd } }
         val items = list.map { channelItem(it) }
         liveLists.add(0, items to list); while (liveLists.size > 3) liveLists.removeAt(3)
         val prev = lastLive?.let { (l, k) -> l.getOrNull(k) }
@@ -275,6 +301,16 @@ class TvActivity : ComponentActivity() {
 
     /** Plays one of a list (channels of a group, episodes of a season) in the TV player. */
     fun play(items: List<JSONObject>, index: Int) {
+        // Going full screen on the channel already in the preview: the window grows to fill the screen first, then the
+        // player screen takes over its running stream (no reload, no cut).
+        val first = items.getOrNull(index)
+        if (PlayerActivity.current == null && first?.optBoolean("live") == true && Preview.channel?.url == first.optString("url") && Preview.shown && !Preview.zooming) {
+            Preview.zoomThen { playNow(items, index) }; return
+        }
+        playNow(items, index)
+    }
+
+    private fun playNow(items: List<JSONObject>, index: Int) {
         playList = items; playIndex = index
         // One stream at a time. Going full screen on the channel already in the preview hands its player (and connection)
         // over, so the picture carries on; anything else closes the preview first.
@@ -288,6 +324,7 @@ class TvActivity : ComponentActivity() {
         if (sync.optString("url").isNotEmpty() && sync.optString("group") != "Test") lifecycleScope.launch { Repo.saveRecent(sync) }   // (catch-up has no sync entry)   // (test-hook channels stay out of your history)
         PlayerActivity.current?.let { p -> p.load(com.getcapacitor.JSObject(it.toString())); return }
         startActivity(Intent(this, PlayerActivity::class.java).putExtra("item", it.toString()))
+        if (handed != null) overridePendingTransition(com.wmorgan97.m3uplayer.R.anim.m3u_fade_in, com.wmorgan97.m3uplayer.R.anim.m3u_hold)   // the grown preview stays put while the player fades in over it
     }
 
     /** The player's item: the entry itself plus the list around it (for the channel panel / episodes). */

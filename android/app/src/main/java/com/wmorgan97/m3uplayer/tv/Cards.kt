@@ -89,7 +89,7 @@ fun cardScale(s: Float = 1.07f) = CardDefaults.scale(focusedScale = s)
  *  (Plain AsyncImage with a colour placeholder: one layout node per picture and no animation while loading, which is
  *  what keeps a row of 30 posters smooth to scroll.) */
 @Composable
-fun Picture(url: String?, modifier: Modifier = Modifier, scale: ContentScale = ContentScale.Crop, fallback: @Composable BoxScope.() -> Unit = {}) = traced("Picture") {
+fun Picture(url: String?, modifier: Modifier = Modifier, scale: ContentScale = ContentScale.Crop, fade: Boolean = true, fallback: @Composable BoxScope.() -> Unit = {}) = traced("Picture") {
     // If the server's resized copy fails (server away), the picture is fetched from where it really lives.
     var tries by remember(url) { mutableIntStateOf(0) }
     val src = remember(url, tries) { if (tries == 1) Repo.imgOriginal(url) else url }
@@ -97,7 +97,7 @@ fun Picture(url: String?, modifier: Modifier = Modifier, scale: ContentScale = C
     val ctx = LocalContext.current
     Box(modifier.background(Tv.surface2)) {
         if (src.isNullOrBlank() || failed) fallback()
-        else AsyncImage(remember(src) { ImageRequest.Builder(ctx).data(src).crossfade(150).build() }, null, contentScale = scale, modifier = Modifier.fillMaxSize(),
+        else AsyncImage(remember(src) { ImageRequest.Builder(ctx).data(src).crossfade(if (fade) 150 else 0).build() }, null, contentScale = scale, modifier = Modifier.fillMaxSize(),
             placeholder = ColorPainter(Tv.surface2), error = ColorPainter(Color.Transparent), onError = { tries = if (tries == 0 && Repo.imgOriginal(url) != null) 1 else 2 })
     }
 }
@@ -184,7 +184,7 @@ fun ChannelCard(name: String, logo: String?, now: String, progress: Float? = nul
 fun LogoTile(c: Channel, modifier: Modifier = Modifier) {
     Box(modifier.background(Tv.surface2, RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
         if (c.logo.isBlank()) Text(initials(c.name), fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Bold)
-        else Picture(Repo.img(c.logo, 120), Modifier.fillMaxSize().padding(4.dp).background(Color.Transparent), ContentScale.Fit) {
+        else Picture(Repo.img(c.logo, 120), Modifier.fillMaxSize().padding(4.dp).background(Color.Transparent), ContentScale.Fit, fade = false) {
             Text(initials(c.name), fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Bold)
         }
     }

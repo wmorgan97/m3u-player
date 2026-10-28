@@ -25,6 +25,21 @@ public final class PlayerHolder {
         if (handed != null && handed != p) { try { handed.release(); } catch (Exception ignored) { /* stale hand-off; nothing to save */ } }
         handed = p; handedUrl = url;
     }
+    // Back from full screen on a live channel: the player (still playing) goes back to the preview window, which shrinks
+    // from full screen into its corner. Not picked up by a preview -> stopped and kept as the spare as usual.
+    private static ExoPlayer returned;
+    private static String returnedUrl;
+    public static synchronized void returnPlayer(ExoPlayer p, String url) {
+        if (returned != null && returned != p) { ExoPlayer old = returned; returned = null; giveBack(old); }
+        returned = p; returnedUrl = url;
+    }
+    /** The returned player if it is playing [url]; null otherwise. */
+    public static synchronized ExoPlayer takeReturned(String url) {
+        if (returned == null || url == null || !url.equals(returnedUrl)) return null;
+        ExoPlayer p = returned; returned = null; returnedUrl = null; return p;
+    }
+    public static synchronized void dropReturned() { if (returned != null) { ExoPlayer p = returned; returned = null; returnedUrl = null; giveBack(p); } }
+
     /** The channel the player just taken is already playing (null if it was a fresh player). Read once. */
     static synchronized String takeHandedUrl() { String u = handedUrl; handedUrl = null; return u; }
 

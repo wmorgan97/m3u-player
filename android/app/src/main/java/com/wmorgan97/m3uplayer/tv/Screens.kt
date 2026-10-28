@@ -24,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -208,6 +209,8 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     val live by produceState<Repo.Live?>(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: Repo.Live(emptyList(), emptyList(), emptyList()) }
     val l = live
     if (l == null) { LiveSkeleton(); return }
+    // Before the first sync arrives there are no playlists yet: that's loading, not "no channels".
+    if (l.channels.isEmpty() && Repo.syncData.optJSONObject("sources") == null && Repo.lastSyncError == null) { LiveSkeleton(); return }
     if (l.channels.isEmpty()) { Repo.liveError?.let { EmptyState(Icons.Default.CloudOff, "Couldn't load your channels", "$it Check the playlist in Settings, or try again later.") } ?: EmptyState(Icons.Default.LiveTv, "No live channels", "Add a playlist with live TV in Settings"); return }
     val refresh = act.refresh + Repo.version
     val favUrls = remember(refresh) { Repo.favorites().map { it.optString("url") }.toSet() }
@@ -236,6 +239,11 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     // alone runs a frame late, and that frame built all nine: an 83 ms hitch).
     var shownRows by remember(list) { mutableIntStateOf(1) }
     LaunchedEffect(list) { while (shownRows < list.size && shownRows < 30) { androidx.compose.runtime.withFrameNanos { }; shownRows += 1 }; shownRows = Int.MAX_VALUE }
+    // The group's logos are fetched in the background as soon as its list is known, so rows appear with them in place.
+    val ctxImg = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(list) { Repo.prefetchLogos(ctxImg, list.take(80)) }
+    // Guide data stays current while the screen is open: asked again every 30 min (each channel re-downloads at most every 3 h).
+    LaunchedEffect(list) { while (true) { delay(30 * 60_000L); if (list.isNotEmpty()) Repo.requestGuide(list.take(300)) } }
     var shownGroup by remember { mutableStateOf<String?>(null) }   // back to the top only when the list is a new group's
     LaunchedEffect(list) { if (list.isEmpty()) return@LaunchedEffect; if (shownGroup != group) { shownGroup = group; listState.scrollToItem(0) }; Repo.requestGuide(list.take(300)) }
     LaunchedEffect(Unit) { while (true) { delay(60_000); minute++ } }
@@ -250,9 +258,9 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     Column(Modifier.fillMaxSize()) {
         LaunchedEffect(l) { Preview.current() }   // (falls back to the last channel watched; not during drawing)
         val pc = Preview.channel
-        if (Repo.preview && !locked) Row(Modifier.fillMaxWidth().height(186.dp).padding(bottom = 12.dp)) {
+        if (Repo.preview && !locked) Row(Modifier.fillMaxWidth().height(186.dp).padding(bottom = 12.dp).zIndex(1f)) {   // (above the lists, for the grow-to-full-screen)
             // TiviMate-style top: the preview (last channel, or the one picked with OK) and what's on the highlighted channel.
-            PreviewBox(pc, act.resumeTick, Modifier.padding(start = Tv.margin, top = Tv.topMargin - 8.dp).fillMaxHeight().aspectRatio(16 / 9f))
+            PreviewBox(pc, act.resumeTick, Modifier.zIndex(1f).padding(start = Tv.margin, top = Tv.topMargin - 8.dp).fillMaxHeight().aspectRatio(16 / 9f))
             val fc = focusedChan ?: pc
             Column(Modifier.weight(1f).padding(start = 24.dp, end = Tv.margin + 80.dp, top = Tv.topMargin).clearAndSetSemantics { }) {
                 if (fc != null) {

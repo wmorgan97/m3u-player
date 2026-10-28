@@ -17,6 +17,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -50,6 +51,7 @@ private fun at(l: List<Programme>, t: Long): Programme? { val i = l.indexOfLast 
 fun GuideScreen(act: TvActivity, startGroup: String?) {
     val live by produceState<Repo.Live?>(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: Repo.Live(emptyList(), emptyList(), emptyList()) }
     val l = live ?: run { Box(Modifier.fillMaxSize()) { PageTitle("TV Guide", "Loading channels…") }; return }
+    if (l.channels.isEmpty() && Repo.syncData.optJSONObject("sources") == null && Repo.lastSyncError == null) { Box(Modifier.fillMaxSize()) { PageTitle("TV Guide", "Loading channels…") }; return }
     if (l.channels.isEmpty()) { Repo.liveError?.let { EmptyState(Icons.Default.CloudOff, "Couldn't load your channels", "$it Check the playlist in Settings, or try again later.") } ?: EmptyState(Icons.Default.CalendarViewWeek, "No live channels", "Add a playlist with live TV in Settings"); return }
     LaunchedEffect(Unit) { Repo.loadSavedGuide() }
     val v = Repo.version
@@ -64,6 +66,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
 
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = System.currentTimeMillis() } }
+    LaunchedEffect(chans) { while (true) { delay(30 * 60_000L); if (chans.isNotEmpty()) Repo.requestGuide(chans.take(300)) } }   // keeps the guide current while it's open
     val tick = Repo.guideVersion
 
     // Where the highlight is: a row, and a moment in time (the programme under it is the one picked).
@@ -141,8 +144,8 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
         val selP = remember(row, cursor, tick, chans) { at(progs(row), cursor) }
         LaunchedEffect(l) { Preview.current() }
         val pc = Preview.channel
-        Row(Modifier.fillMaxWidth().height(150.dp)) {
-        if (!locked && Repo.preview) PreviewBox(pc, act.resumeTick, Modifier.padding(start = Tv.margin, top = Tv.topMargin - 8.dp, bottom = 10.dp).fillMaxHeight().aspectRatio(16 / 9f))
+        Row(Modifier.fillMaxWidth().height(150.dp).zIndex(1f)) {
+        if (!locked && Repo.preview) PreviewBox(pc, act.resumeTick, Modifier.zIndex(1f).padding(start = Tv.margin, top = Tv.topMargin - 8.dp, bottom = 10.dp).fillMaxHeight().aspectRatio(16 / 9f))
         Column(Modifier.weight(1f).fillMaxHeight().padding(start = if (Repo.preview) 24.dp else Tv.margin, end = Tv.margin + 80.dp, top = Tv.topMargin).clearAndSetSemantics { }) {
             if (locked || selC == null) {
                 Text("TV Guide", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)

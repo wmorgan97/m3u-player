@@ -9,6 +9,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -38,6 +41,25 @@ object Preview {
     var channel by mutableStateOf<Channel?>(null); private set
     var list: List<Channel> = emptyList(); private set
     fun select(c: Channel, l: List<Channel>) { channel = c; list = l }
+
+    // Going full screen from the preview: the window grows to fill the screen first, then the player screen takes over
+    // the same stream (TiviMate's transition), instead of cutting straight to it.
+    var zooming by mutableStateOf(false); private set
+    @Volatile var shown = false   // a preview window is on screen (and playing) to grow from
+    private var zoomDone: (() -> Unit)? = null
+    fun zoomThen(go: () -> Unit) { if (!shown || player == null || zooming) { go(); return }; zoomDone = go; zooming = true }
+    internal fun finishZoom() { val g = zoomDone; zoomDone = null; g?.invoke() }
+    fun resetZoom() { zoomDone = null; zooming = false }
+    /** Back from full screen: the window starts full size and shrinks into its corner. */
+    var unzooming by mutableStateOf(false); private set
+    /** Takes back the full-screen player (still playing [chUrl]) for the preview window. */
+    fun adopt(p: ExoPlayer, chUrl: String) {
+        if (player != null && player !== p) runCatching { player?.release() }
+        player = p; url = testUrl ?: chUrl; unzooming = true
+    }
+    internal fun unzoomDone() { unzooming = false }
+    /** Already showing a picture of this channel (so the window needn't show its name card first). */
+    fun isShowing(ch: Channel?) = ch != null && url == (testUrl ?: ch.url) && player?.let { it.playbackState == Player.STATE_READY && it.videoSize.width > 0 } == true
     /** The preview's channel, falling back to the last channel watched (once the channel list is loaded). */
     fun current(): Channel? = channel ?: Repo.lastChannelUrl?.let { Repo.channelByUrl(it) }?.also { c -> select(c, Repo.live?.channels?.filter { it.group == c.group }?.takeIf { c in it } ?: listOf(c)) }
     private var player: ExoPlayer? = null
@@ -83,7 +105,7 @@ fun PreviewBox(channel: Channel?, resumeTick: Int, modifier: Modifier = Modifier
     var failed by remember { mutableStateOf(false) }
     var view by remember { mutableStateOf<PlayerView?>(null) }
     LaunchedEffect(channel?.url, resumeTick) {
-        playing = false; failed = false
+        playing = Preview.isShowing(channel); failed = false
         if (channel == null) { Preview.stop(); return@LaunchedEffect }
         delay(150)
         Preview.play(ctx, channel)
@@ -93,12 +115,39 @@ fun PreviewBox(channel: Channel?, resumeTick: Int, modifier: Modifier = Modifier
         repeat(150) { if (p.playbackState == Player.STATE_READY && p.videoSize.width > 0) { playing = true; return@LaunchedEffect }; if (p.playerError != null) { failed = true; Preview.stop(); return@LaunchedEffect }; delay(100) }
         failed = true; Preview.stop()
     }
-    DisposableEffect(Unit) { onDispose { Preview.stop() } }
-    Box(modifier.clip(RoundedCornerShape(10.dp)).background(Tv.surface)) {
+    DisposableEffect(Unit) { onDispose { Preview.stop(); Preview.shown = false; Preview.resetZoom() } }
+    LaunchedEffect(playing) { Preview.shown = playing }
+    // Grow-to-full-screen: scale and move the window from where it sits to the whole screen, corners straightening out.
+    val root = androidx.compose.ui.platform.LocalView.current
+    var bounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+    val grow = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(Preview.zooming, Preview.unzooming) {
+        when {
+            Preview.unzooming -> {   // starts full size (it still is, from going full screen); shrinks once the player screen has faded
+                view?.player = Preview.player(ctx)   // the live picture at once (not the window's last frame from before)
+                grow.snapTo(1f); kotlinx.coroutines.delay(140)
+                grow.animateTo(0f, androidx.compose.animation.core.tween(450, easing = androidx.compose.animation.core.CubicBezierEasing(0.4f, 0f, 0.2f, 1f))); Preview.unzoomDone()
+            }
+            Preview.zooming -> { grow.animateTo(1f, androidx.compose.animation.core.tween(450, easing = androidx.compose.animation.core.CubicBezierEasing(0.4f, 0f, 0.2f, 1f))); Preview.finishZoom() }   // graceful, not snappy
+            else -> grow.snapTo(0f)
+        }
+    }
+    val corner = with(androidx.compose.ui.platform.LocalDensity.current) { 10.dp.toPx() }
+    Box(modifier.onGloballyPositioned { bounds = it.boundsInRoot() }.graphicsLayer {
+        val p = grow.value; val b = bounds
+        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+        if (p > 0f && b != null && b.width > 0f) {
+            scaleX = 1f + (root.width / b.width - 1f) * p; scaleY = 1f + (root.height / b.height - 1f) * p
+            translationX = -b.left * p; translationY = -b.top * p
+        } else {
+            // Always drawn very slightly scaled (invisible): the GPU then compiles its "scaled video" shader while the window
+            // just sits there, not at the moment it grows (that compile took ~85 ms and swallowed the start of the zoom).
+            scaleX = 1.0001f; scaleY = 1.0001f
+        }
+        shape = RoundedCornerShape(corner * (1f - p)); clip = true
+    }.background(Tv.surface)) {
         AndroidView(factory = { c ->
-            PlayerView(c).apply {
-                useController = false; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                setShutterBackgroundColor(android.graphics.Color.BLACK); setKeepContentOnPlayerReset(false)
+            (android.view.LayoutInflater.from(c).inflate(com.wmorgan97.m3uplayer.R.layout.m3u_preview_player, null) as PlayerView).apply {
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                 player = Preview.player(c)
             }.also { view = it }

@@ -155,6 +155,12 @@ object Repo {
     fun api(path: String) = "$server/$path?key=${enc(key)}"
     /** The original picture address behind one of our server's /img links (null if it isn't one). */
     fun imgOriginal(url: String?): String? = url?.takeIf { it.startsWith("$server/img?") }?.substringAfter("&u=", "")?.substringBefore('&')?.ifEmpty { null }?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+    /** Warms the picture caches with these channels' logos (same address and size the rows use). */
+    fun prefetchLogos(c: Context, chans: List<Channel>) {
+        if (com.wmorgan97.m3uplayer.PlayerActivity.current != null) return   // never while watching full screen
+        val loader = coil.Coil.imageLoader(c)
+        for (ch in chans) img(ch.logo, 120)?.let { loader.enqueue(coil.request.ImageRequest.Builder(c).data(it).size(120, 72).build()) }
+    }
     fun img(url: String?, w: Int = 300): String? = if (url.isNullOrBlank()) null else if (!url.startsWith("http")) url else "$server/img?key=${enc(key)}&w=$w&u=${enc(url)}"
 
     private fun http(url: String, body: String? = null, timeout: Int = 30_000): String {
@@ -264,6 +270,11 @@ object Repo {
 
     // ---------- live channels ----------
 
+    // "Prefer 4K": the 4K copy of each channel by normalised name, built once with the channel list (off the main thread).
+    // Looking it up by scanning ~19k channels on every channel start froze the screen for ~2 s on the Shield.
+    @Volatile private var uhdIndex: Map<String, Channel> = emptyMap()
+    fun uhdFor(c: Channel): Channel? = uhdIndex[normName(c.name)]?.takeIf { it.url != c.url }
+
     data class Live(val channels: List<Channel>, val groups: List<String>, val epgUrls: List<String>) {
         val urls: Set<String> by lazy { channels.mapTo(HashSet()) { it.url } }
     }
@@ -322,7 +333,7 @@ object Repo {
         }
         liveErrorState.value = if (tried > 0 && loaded == 0) (firstError ?: "Your playlists couldn't be loaded.") else null
         val groups = LinkedHashSet<String>(); all.forEach { groups += it.group }
-        Live(all, groups.toList(), epg.distinct()).also { live = it }
+        Live(all, groups.toList(), epg.distinct()).also { live = it; uhdIndex = all.filter { quality(it.name, it.group) == "4K" }.associateBy { normName(it.name) } }
     }
 
     // The playlist parser and catch-up links live in Parsing.kt (pure, unit-tested).
@@ -405,6 +416,10 @@ object Repo {
             guidePending.clear(); guidePending += merged.values.take(600)
             if (guideWorker?.isActive == true) return
             guideWorker = guideScope.launch {
+                // Background work: low CPU priority, and it waits while a channel is playing full screen so it never takes
+                // bandwidth or CPU from the picture (the guide catches up the moment you come back).
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                while (com.wmorgan97.m3uplayer.PlayerActivity.current != null) kotlinx.coroutines.delay(5_000)
                 while (true) {
                     val next = synchronized(guidePending) { if (guidePending.isEmpty()) { guideWorker = null; null } else guidePending.toList().also { guidePending.clear() } } ?: break
                     if (loadGuide(next)) guideState.intValue++

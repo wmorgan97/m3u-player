@@ -839,8 +839,17 @@ public class PlayerActivity extends AppCompatActivity {
             double d = player.getDuration() > 0 ? player.getDuration() / 1000.0 : 0;
             event("closed", Math.max(0, player.getCurrentPosition()) / 1000.0, d);
         }
+        // Live and playing: the stream carries on in the preview window, which shrinks back into its corner (the reverse of
+        // going full screen). This screen fades out over it instead of cutting away.
+        int ps = player == null ? Player.STATE_IDLE : player.getPlaybackState();
+        boolean toPreview = live && player != null && runningUrl != null && state != S_FAILED && (ps == Player.STATE_READY || ps == Player.STATE_BUFFERING);
+        if (toPreview) { handedBack = true; PlayerHolder.returnPlayer(player, runningUrl); }
+        // A closing player screen is no longer "the" player: the next channel must start a new one, not be sent here.
+        if (current == this) current = null;
         super.finish();
+        if (toPreview) overridePendingTransition(R.anim.m3u_hold, R.anim.m3u_fade_out);
     }
+    private boolean handedBack;
 
     @Override
     protected void onDestroy() {
@@ -855,8 +864,8 @@ public class PlayerActivity extends AppCompatActivity {
             player = null;   // first, so nothing that runs from here on can reach a player that's been handed back
             if (listener != null) p.removeListener(listener);
             listener = null;
-            playerView.setPlayer(null);
-            PlayerHolder.giveBack(p);
+            playerView.setPlayer(null);   // (the preview has already put its own surface on a handed-back player)
+            if (!handedBack) PlayerHolder.giveBack(p);
         }
         if (current == this) current = null;
         super.onDestroy();
