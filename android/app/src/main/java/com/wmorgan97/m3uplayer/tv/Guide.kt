@@ -216,7 +216,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     info?.let { (c, p) ->
         ProgrammeDialog(act, c, p, now, chans) { info = null }
     }
-    pinFor?.let { g -> PinDialog("Enter PIN to open ${prettyGroup(g)}") { pin -> pinFor = null; if (pin != null && Repo.checkPin(pin)) { Repo.unlocked += g; unlockTick++ } } }
+    pinFor?.let { g -> PinDialog("Enter PIN to open ${prettyGroup(g)}", verify = Repo::checkPin) { pin -> pinFor = null; if (pin != null) { Repo.unlocked += g; unlockTick++ } } }
 }
 
 private fun dayLabel(t: Long, now: Long): String {
@@ -301,17 +301,26 @@ fun ProgrammeDialog(act: TvActivity, c: Channel, p: Programme, now: Long, chans:
 
 /** Four-digit PIN pad (the Shield remote has no number keys, so it's on screen; number keys work too). null = cancelled. */
 @Composable
-fun PinDialog(title: String, onResult: (String?) -> Unit) {
+fun PinDialog(title: String, verify: ((String) -> Boolean)? = null, onResult: (String?) -> Unit) {
     var pin by remember { mutableStateOf("") }
+    var wrong by remember { mutableIntStateOf(0) }   // with [verify]: a wrong PIN says so and clears; 5 wrong tries closes
     val first = remember { FocusRequester() }
-    fun press(d: String) { if (pin.length < 4) pin += d; if (pin.length == 4) onResult(pin) }
+    fun press(d: String) {
+        if (pin.length < 4) pin += d
+        if (pin.length < 4) return
+        val v = verify
+        if (v == null || v(pin)) { onResult(pin); return }
+        wrong++; pin = ""
+        if (wrong >= 5) onResult(null)
+    }
     Dialog(onDismissRequest = { onResult(null) }) {
         Column(Modifier.width(360.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)
             .onPreviewKeyEvent { e ->
                 val n = e.nativeKeyEvent.keyCode - android.view.KeyEvent.KEYCODE_0
                 if (e.type == KeyEventType.KeyDown && n in 0..9) { press("$n"); true } else false
             }, horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(title, fontSize = Tv.body, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 2)
+            Text(if (wrong > 0) "Wrong PIN, try again" else title, fontSize = Tv.body, fontWeight = FontWeight.SemiBold, color = if (wrong > 0) Tv.danger else Tv.text, maxLines = 2)
+            if (wrong > 0) Text("${5 - wrong} tries left", fontSize = Tv.label, color = Tv.muted, modifier = Modifier.padding(top = 2.dp))
             Spacer(Modifier.height(14.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) { repeat(4) { k -> Box(Modifier.size(16.dp).background(if (k < pin.length) Tv.text else Tv.surface3, RoundedCornerShape(8.dp))) } }
             Spacer(Modifier.height(18.dp))

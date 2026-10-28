@@ -322,7 +322,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     }
     pinFor?.let { (title, then) ->
         val choosing = Repo.pin.isEmpty()
-        PinDialog(title) { pin -> pinFor = null; if (pin != null && (choosing || Repo.checkPin(pin))) then(pin) }
+        PinDialog(title, verify = if (choosing) null else Repo::checkPin) { pin -> pinFor = null; if (pin != null) then(pin) }
     }
 }
 

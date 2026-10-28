@@ -199,11 +199,12 @@ class TvActivity : ComponentActivity() {
                         Screen.Settings -> SettingsScreen(this@TvActivity)
                     }
                 } }
-                if (screen !is Screen.Details) Row(Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = Tv.margin), verticalAlignment = Alignment.CenterVertically) {
+                // The clock sits on a small dark pill so it stays readable over posters scrolled up beneath it.
+                if (screen !is Screen.Details) Row(Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = Tv.margin).background(Tv.bg.copy(alpha = .85f), RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (!Repo.online) { Text("Offline · showing saved data", fontSize = Tv.label, color = Tv.muted); Spacer(Modifier.width(14.dp)) }
                     Clock()
                 }
-                pinGate?.let { go -> PinDialog("Enter PIN to watch this channel") { pin -> pinGate = null; if (pin != null && Repo.checkPin(pin)) go() } }
+                pinGate?.let { go -> PinDialog("Enter PIN to watch this channel", verify = Repo::checkPin) { pin -> pinGate = null; if (pin != null) go() } }
                 due?.let { r ->
                     Options("Starting now on ${r.channel}: ${r.title}", listOf("Watch now" to { due = null; watchReminder(r) })) { due = null }
                 }
