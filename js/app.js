@@ -7,7 +7,7 @@ import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from 
 import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
-import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, otherLanguage, buildSports, groupByDay, bySport } from './sports.js';
+import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport } from './sports.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -3559,7 +3559,13 @@ async function loadTeams() {
   await Promise.all(state.follows.map(async f => {
     const l = await findOnTv(f.q).catch(() => []);
     const en = state.settings.vodLanguage !== 'all';
-    sportsHub.teams.set(f.q.toLowerCase(), l.filter(x => x.prog[1] > Date.now() && !isNoise(x.prog, x.channel) && sportsLangOk(x.channel) && isWomens(x.prog[2], x.prog[3]) === wantsWomens(f.q) && /\S\s+(?:v|vs\.?|@)\s+\S/i.test(x.prog[2])));   // a match, not "Made In Chelsea"
+    // Real games only: marked live by the guide (not a replay or highlights), a match not "Made In Chelsea", the men's
+    // team unless you follow "… Women", and each game once (its first live airing).
+    const seen = new Set();
+    sportsHub.teams.set(f.q.toLowerCase(), l.filter(x => x.prog[1] > Date.now() && !isNoise(x.prog, x.channel) && isLiveEvent(x.prog) && sportsLangOk(x.channel)
+      && isWomens(x.prog[2], x.prog[3]) === wantsWomens(f.q) && /\S\s+(?:v|vs\.?|@)\s+\S/i.test(x.prog[2]))
+      .sort((a, b) => a.prog[0] - b.prog[0])
+      .filter(x => { const k = cleanTitle(x.prog[2]).toLowerCase().replace(/\bvs?\.?\b/g, 'v').replace(/[^a-z0-9]+/g, ''); return !seen.has(k) && seen.add(k); }));
   }));
   renderSportsSoon();
 }
@@ -3748,7 +3754,7 @@ function teamSheet(f) {
   const list = (live.length ? `<div class="section-title sp-sheet-day">Live now</div><ul class="sp-list">${live.map(liveRow).join('')}</ul>` : '')
     + days.map(d => `<div class="section-title sp-sheet-day">${esc(d.label)} · ${esc(d.date)}</div><ul class="sp-list">${d.items.map(it => spRow(it, teamSheetItems.indexOf(it), 'data-tm')).join('')}</ul>`).join('');
   sheet(`<div class="sheet-title">${esc(f.q)}</div>
-    <p class="muted sheet-intro">${teamSheetItems.length ? 'On your channels in the next three days. Each one gets a reminder.' : 'Nothing on your channels in the next three days. New matches get a reminder as soon as they’re in the guide.'}</p>
+    <p class="muted sheet-intro">${teamSheetItems.length ? 'Live games on your channels in the next three days. Tap the bell for a reminder.' : 'No live games on your channels in the next three days.'}</p>
     ${list ? `<div class="sp-sheet-list">${list}</div>` : ''}
     <div class="form-actions"><button type="button" class="btn" data-unfollow>Unfollow ${esc(f.q)}</button></div>`, {
     onMount: el => {
