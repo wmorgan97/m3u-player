@@ -1308,3 +1308,13 @@ html:not(.mac) .ts-box kbd { display: none !important; }
 .soon-row .sp-time { width: 60px; }
 .soon-row .sp-time small.soon-in { margin: 3px 0 0; font-size: var(--fs-caption); font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--star); white-space: nowrap; }
 @media (max-width: 899px) { .soon-list .soon-row:nth-child(n+5) { display: none; } }
+
+/* ================= Home: films & series ================= */
+/* Top 10: the poster and its number only (the title line showed beside the poster on phones) */
+.home-shelf .t10 > .poster-name, .home-shelf .t10 > .muted { display: none; }
+/* Live TV: the shortcuts that used to sit on Home (Favorites, Sports, History, Multi-view, other playlists) */
+.live-quick { margin-bottom: 4px; }
+.live-quick[hidden] { display: none; }
+.live-quick .pl-chip.on { background: var(--surface-2); border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+@media (max-width: 899px) { .live-quick { margin-top: 4px; margin-bottom: 8px; } }
+@media (min-width: 900px) { .live-quick { margin: 0 0 12px; } html:not(.tv) .live-quick [data-go="#/sports"] { display: none; } }   /* the top bar has Sports */

@@ -12,3 +12,6 @@ out.txt
 
 # synced favourites/recents (personal data)
 data/
+
+# this install's own server address, bundled into the native apps (never committed)
+server.local.json

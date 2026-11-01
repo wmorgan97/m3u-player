@@ -113,6 +113,11 @@ async function init() {
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !state.playing && !init.reloaded) { init.reloaded = true; location.reload(); } });
     navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
   }
+  // The native app ships with this install's server address (server.local.json, bundled at build time and never
+  // committed), so connecting only asks for the key.
+  if (isNative && !state.settings.serverUrl) {
+    try { const u = (await (await fetch('server.local.json', { cache: 'no-store' })).json()).url; if (u) { state.settings.serverUrl = String(u).replace(/\/+$/, ''); await db.set('settings', state.settings); } } catch {}
+  }
   await detectServerProxy();
   detectedServer = true;
   serverKnown();
@@ -326,7 +331,8 @@ async function tmdbInfo(it) {
   const kind = it.kind === 'series' ? 'tv' : 'movie';
   const name = displayTitle(it.name), year = Number(it.year) || vodMeta(it.name).year || '';
   const k = `${kind}|${name}|${year}`;
-  if (!tmdbInfoCache.has(k)) tmdbInfoCache.set(k, fetch(`${serverApi('tmdb/info')}&kind=${kind}&name=${encodeURIComponent(name)}&year=${year}`).then(r => r.ok ? r.json() : null).then(d => (d?.tid ? d : null)).catch(() => null));
+  const base = serverApi('tmdb/info');   // "?key=…" only when the server has a key
+  if (!tmdbInfoCache.has(k)) tmdbInfoCache.set(k, fetch(`${base}${base.includes('?') ? '&' : '?'}kind=${kind}&name=${encodeURIComponent(name)}&year=${year}`).then(r => r.ok ? r.json() : null).then(d => (d?.tid ? d : null)).catch(() => null));
   return tmdbInfoCache.get(k);
 }
 // Fill gaps in the provider's own details with TMDB's (the provider's stay when it has them).
@@ -343,12 +349,13 @@ async function enterServerKey() {
   const v = await formSheet({
     title: isNative ? 'Your server' : 'Server key',
     fields: [
-      isNative && { name: 'url', label: 'Server address (for TV guide, sync, movies & downloads)', value: state.settings.serverUrl || '', required: true, type: 'url', placeholder: 'https://your-server.ts.net:8443' },
+      isNative && !state.settings.serverUrl && { name: 'url', label: 'Server address (for TV guide, sync, movies & downloads)', value: '', required: true, type: 'url', placeholder: 'https://your-server.ts.net:8443' },
       { name: 'key', label: 'Server key (shown at the end of the server install)', value: state.settings.serverKey || '', required: true },
     ].filter(Boolean),
     submit: 'Connect',
   });
   if (!v) return;
+  v.url ||= state.settings.serverUrl;
   const info = await checkServerProxy(v.key, v.url).catch(() => null);
   if (!info?.keyValid) { toast(isNative ? 'Couldn’t connect with that address and key.' : 'That key didn’t work. Check it and try again.'); return; }
   if (isNative) { state.settings.serverUrl = v.url.replace(/\/+$/, ''); Object.assign(serverProxy, { available: true, base: info.base }); }
@@ -910,82 +917,184 @@ async function homeSearch(q, box = $('#home-results')) {
 }
 
 // ---------- Home hub ----------
-// Everything worth watching in one place: a featured carousel, what's on live now, new and top-rated
-// movies and series, and "Because you watched…". Catalogues load in the background and Home refreshes.
+// Home is for finding a film or series to watch: a featured carousel, then rows in a deliberate order — what you were
+// watching, what's big this week, more like the last thing you watched, what's new, a few genres (three a day, they
+// rotate), the best rated, your list, streaming services. Live channels, sport and the guide live on Live TV.
+// Every row comes from the small catalogue overview or a TMDB list of ≤160 titles (fetched once, kept on this device),
+// never from the full 30k-title catalogue, so Home stays cheap to rebuild.
 let detectedServer = false, serverKnown = null;
 const serverReady = new Promise(r => { serverKnown = r; });
 const homeRefresh = debounce(() => { if (!state.current && (!location.hash || location.hash === '#/')) { const y = scrollY; showHome(); scrollTo(0, y); } }, 500);
+// [row title, TMDB film list, TMDB series list, provider groups when TMDB isn't connected]
+const HOME_GENRES = [
+  ['Action', 'genre:28', 'genre:10759', /\baction\b/i],
+  ['Comedy', 'genre:35', 'genre:35', /\bcomed/i],
+  ['Thrillers', 'genre:53', 'genre:80', /thriller|crime/i],
+  ['Sci-fi', 'genre:878', 'genre:10765', /sci-?fi|science/i],
+  ['Drama', 'genre:18', 'genre:18', /\bdrama/i],
+  ['Family', 'genre:10751', 'genre:10751', /family|kids/i],
+];
+// TMDB genre names (as tmdbInfo gives them) -> the server's genre lists. Drama is last resort: it covers half of everything.
+const TMDB_GENRE_IDS = {
+  movie: { Action: 28, Adventure: 12, Animation: 16, Comedy: 35, Crime: 80, Documentary: 99, Family: 10751, Fantasy: 14, History: 36, Horror: 27,
+    Music: 10402, Mystery: 9648, Romance: 10749, 'Science Fiction': 878, Thriller: 53, War: 10752, Western: 37, Drama: 18 },
+  tv: { 'Action & Adventure': 10759, Animation: 16, Comedy: 35, Crime: 80, Documentary: 99, Family: 10751, Kids: 10762, Mystery: 9648,
+    Reality: 10764, 'Sci-Fi & Fantasy': 10765, 'War & Politics': 10768, Western: 37, Drama: 18 },
+};
+const titleKeyOf = it => `${it.kind === 'series' ? 's' : 'm'}|${foldT(displayTitle(it.name))}`;
+const homeAsked = new Set();   // groups Home has asked for this session (once each: a failing list never loops)
+/** A list's titles: loaded ones, else the copy saved on this device; asks for it (once) when it isn't loaded. */
+function homeList(p, tab, e, name) {
+  if (!name || !(e.groupList.some(g => g.name === name) || (e.moreGroups || []).some(g => g.name === name))) return [];
+  if (e.groups.has(name)) return e.groups.get(name);
+  const tag = `${vodKey(p, tab)}|${name}`;
+  if (!homeAsked.has(tag)) { homeAsked.add(tag); requestVod(p, tab, { group: name, quiet: true }); }
+  return shelfPrev.get(vodKey(p, tab))?.get(name) || [];
+}
+/** Films and series in one row: two films, then a series, without repeats. */
+function mixKinds(films, series, max = 20) {
+  const out = [], seen = new Set();
+  const put = it => { if (!it) return; const k = titleKeyOf(it); if (!seen.has(k)) { seen.add(k); out.push(it); } };
+  for (let i = 0, j = 0; out.length < max && (i < films.length || j < series.length);) {
+    put(films[i++]); if (out.length < max) put(films[i++]);
+    if (out.length < max) put(series[j++]);
+  }
+  return out.slice(0, max);
+}
+// Backdrops for Continue watching (16:9 cards): from TMDB, kept on this device so the card never swaps on a cold start.
+let cwArt = {};
+try { cwArt = JSON.parse(localStorage.getItem('cwArt') || '{}') || {}; } catch {}
+const cwArtAsked = new Set();
+function cwBackdrop(item) {
+  if (cwArt[item.url] !== undefined) return cwArt[item.url];
+  if (!cwArtAsked.has(item.url) && canSync()) {
+    cwArtAsked.add(item.url);
+    const m = vodMeta(item.name), it = item.kind === 'episode' ? { kind: 'series', name: displayTitle(item.name), year: m.year } : item;
+    // Only once the server says TMDB is on: asked before the server is found, the answer would be "no art" for good.
+    tmdbStatus().then(on => (on ? tmdbInfo(it) : undefined)).then(t => {
+      if (t === undefined) { cwArtAsked.delete(item.url); return; }   // not connected yet: ask again on the next redraw
+      cwArt[item.url] = t?.backdrop || '';
+      const keep = Object.entries(cwArt).slice(-60);   // the cards you've had lately
+      try { localStorage.setItem('cwArt', JSON.stringify(Object.fromEntries(keep))); } catch {}
+      if (t?.backdrop) homeRefresh();
+    }).catch(() => {});
+  }
+  return '';
+}
+// "Because you watched": the TMDB genres of the last film or series you watched (asked once, kept for the session).
+const becauseInfo = new Map();
 function homeHub(pl) {
-  const hub = { hero: [], onNow: [], shelves: { movies: [], series: [] }, vodLink: {} };
+  const hub = { hero: [], rows: [], services: [], loading: false };
+  // The first catalogue with films / series that the server has summarised (others load in the background).
+  const src = {};
   for (const p of pl.filter(p => p.kind === 'xtream' && p.content !== 'live')) {
     for (const tab of ['movies', 'series']) {
       const e = vodCache.get(vodKey(p, tab));
       // Only through your server (the provider's own catalogue is 50-70MB); it may still be connecting.
       // The catalogue saved on this device shows at once; only with nothing saved does Home wait for the server.
       if (!e || (Array.isArray(e) && canSync())) { if (e) vodCache.delete(vodKey(p, tab)); hub.loading = true; loadVod(p, tab).then(homeRefresh).catch(() => {}); continue; }
-      if (Array.isArray(e)) continue;
-      hub.vodLink[tab] ||= `#/p/${p.id}`;
-      const what = tab === 'movies' ? 'movies' : 'series';
-      const withArt = l => (l || []).filter(it => it.logo);
-      if (e.trending?.length >= 5) hub.shelves[tab].push({ title: `Top 10 ${what} this week`, key: `h-trend-${tab}`, items: e.trending.slice(0, 10), top10: true });
-      if (e.trending?.length) hub.hero.push(...e.trending.filter(it => it.tm?.backdrop).slice(0, 4).map(it => ({ ...it, heroLabel: `#${e.trending.indexOf(it) + 1} trending ${tab === 'series' ? 'series' : 'movie'}` })));
-      if (e.top?.length) hub.shelves[tab].push({ title: 'Popular now', key: `h-top-${tab}`, items: withArt(e.top).slice(0, 30) });
-      const fresh = withArt(e.fresh).length >= 8 ? withArt(e.fresh) : withArt(e.recent);
-      if (fresh.length) hub.shelves[tab].push({ title: withArt(e.fresh).length >= 8 ? 'New releases' : `Recently added ${what}`, key: `h-new-${tab}`, items: fresh.slice(0, 30) });
-      if (!e.trending?.length) hub.hero.push(...withArt(e.top).slice(0, 4));
+      if (Array.isArray(e) || src[tab]) continue;
+      src[tab] = { p, e };
     }
   }
-  // Because you watched: the newest film or episode with progress, then more from its group.
+  const M = src.movies, S = src.series;
+  const art = l => (l || []).filter(it => it.logo);
+  const list = (s, tab, name) => (s ? homeList(s.p, tab, s.e, name) : []);
+  const tmdb = (s, tab, id) => list(s, tab, `tmdb:${tab === 'series' ? 'tv' : 'mv'}:${id}`);
+  const tmdbOnHere = !!(M?.e.trending?.length || S?.e.trending?.length || M?.e.groupList.some(g => g.name.startsWith('tmdb:')));
+  const rows = hub.rows;
+  const row = (key, title, items, extra = {}) => { if (items.length >= (extra.min || 4)) rows.push({ key, title, items, ...extra }); };
+
+  // Featured: this week's trending films and series with a backdrop, alternating; without TMDB, the most popular.
+  const heroOf = (s, what) => {
+    if (!s) return [];
+    const t = s.e.trending || [];
+    return t.some(it => it.tm?.backdrop) ? t.filter(it => it.tm?.backdrop).slice(0, 4).map(it => ({ ...it, heroRank: t.indexOf(it) + 1, heroWhat: what })) : art(s.e.top).slice(0, 3);
+  };
+  const hm = heroOf(M, 'film'), hs = heroOf(S, 'series');
+  for (let i = 0; hub.hero.length < 6 && (i < hm.length || i < hs.length); i++) { if (hm[i]) hub.hero.push(hm[i]); if (hs[i] && hub.hero.length < 6) hub.hero.push(hs[i]); }
+
+  // Top 10 this week (TMDB), films and series apart: ranked lists read best on their own.
+  const t10 = (s, what) => (s?.e.trending?.length >= 5 ? s.e.trending.slice(0, 10) : []);
+  const topFilms = t10(M), topSeries = t10(S);
+  row('h-t10-movies', 'Top 10 movies this week', topFilms, { top10: true, min: 5 });
+
+  // Because you watched…: the newest film or series in your history, then titles that share its genres.
   const last = Object.values(state.progress).filter(x => x.item && (x.item.kind === 'movie' || x.item.kind === 'episode')).sort((a, b) => b.at - a.at)[0];
+  let becauseGenre = null;
   if (last) {
-    const p = byId(last.item.src), tab = last.item.kind === 'movie' ? 'movies' : 'series';
-    const e = p && vodCache.get(vodKey(p, tab));
-    const group = last.item.kind === 'movie' ? last.item.group : null;
-    if (e && !Array.isArray(e) && group) {
-      const items = e.groups.get(group);
-      if (!items) requestVod(p, tab, { group });
-      else {
-        const more = items.filter(it => it.url !== last.item.url).slice(0, 30);
-        if (more.length) hub.shelves.movies.unshift({ title: `Because you watched ${vodMeta(last.item.name).title || last.item.name}`, key: 'h-because', items: more });
-      }
+    const it = last.item, series = it.kind === 'episode', s = series ? S : M, tab = series ? 'series' : 'movies';
+    const title = displayTitle(it.name), year = vodMeta(it.name).year;
+    const key = `${series ? 'tv' : 'movie'}|${foldT(title)}|${year || ''}`;
+    if (!becauseInfo.has(key) && tmdbOnHere) {
+      becauseInfo.set(key, null);
+      tmdbStatus().then(on => (on ? tmdbInfo(series ? { kind: 'series', name: title, year } : it) : undefined))
+        .then(t => { if (t === undefined) becauseInfo.delete(key); else { becauseInfo.set(key, t || false); if (t) homeRefresh(); } }).catch(() => becauseInfo.delete(key));
     }
-  }
-  // On now: your channels first (favourites and recent ones, the ones you watch most and most lately first), then the
-  // groups you chose for Home; each with what's on right now.
-  const live = pl.flatMap(p => {
-    const k = m3uKinds(p), chans = k ? k.live : p.channels;
-    const want = new Set(p.homeGroups || []);
-    return want.size ? chans.filter(c => want.has(c.group)).map(c => ({ ...c, src: p.id })) : [];
-  });
-  const mine = yourChannels();
-  const pool = [...mine, ...live].filter((c, i, a) => a.findIndex(x => x.url === c.url) === i).slice(0, 80);
-  const films = filmChannels(pl, mine);
-  ensureGuide([...pool, ...films]);
-  for (const c of pool) {
-    const g = guideFor(c), now = g && g.nowNext(c).now;
-    if (now) hub.onNow.push({ c, now });
-    if (hub.onNow.length >= 24) break;
-  }
-  shelfItems.set('onnow', hub.onNow);
-  hub.soon = startingSoon(mine, films);
-  shelfItems.set('soon', hub.soon);
-  // Featured: a mix of top movies and series, alternating.
-  const mix = [];
-  const ms = hub.hero.filter(it => it.kind === 'movie'), ss = hub.hero.filter(it => it.kind === 'series');
-  for (let i = 0; mix.length < 6 && (i < ms.length || i < ss.length); i++) { if (ms[i]) mix.push(ms[i]); if (ss[i]) mix.push(ss[i]); }
-  hub.hero = mix.slice(0, 6);
-  shelfItems.set('hero', hub.hero);
-  for (const tab of ['movies', 'series']) for (const sh of hub.shelves[tab]) shelfItems.set(sh.key, sh.items);
-  // Streaming services: the provider's per-platform groups (Netflix, Disney+…) as one row of tiles.
-  hub.services = [];
-  for (const p of pl.filter(p => p.kind === 'xtream' && p.content !== 'live')) {
-    for (const tab of ['movies', 'series']) {
-      const e = vodCache.get(vodKey(p, tab));
-      if (!e || Array.isArray(e)) continue;
-      for (const [name, re, c1, c2] of SERVICES) {
-        const g = e.groupList.find(g => re.test(g.name) && !/kids|anime/i.test(g.name));
-        if (g && !hub.services.some(s => s.name === name && s.tab === tab)) hub.services.push({ name, c1, c2, tab, pid: p.id, group: g.name, count: g.count });
+    const info = becauseInfo.get(key);
+    const own = foldT(title);
+    let items = [];
+    if (s && info?.genres?.length) {
+      const ids = TMDB_GENRE_IDS[series ? 'tv' : 'movie'];
+      const names = info.genres.filter(g => ids[g]);
+      // The most telling genre first (Drama only when it's all there is), as long as this catalogue has that list.
+      const pick = [...names.filter(g => g !== 'Drama'), ...names.filter(g => g === 'Drama')].find(g => s.e.groupList.some(x => x.name === `tmdb:${series ? 'tv' : 'mv'}:genre:${ids[g]}`));
+      if (pick) {
+        becauseGenre = pick;
+        const want = new Set(info.genres);
+        const pool = tmdb(s, tab, `genre:${ids[pick]}`).filter(x => foldT(displayTitle(x.name)) !== own);
+        // Most genres in common first (a sci-fi drama → other sci-fi dramas), TMDB's popularity order within.
+        items = pool.map((x, i) => [x, (x.tm?.genres || []).filter(g => want.has(g)).length, i]).sort((a, b) => b[1] - a[1] || a[2] - b[2]).map(x => x[0]);
       }
+    } else if (s && !series && it.group && !tmdbOnHere) {
+      items = list(s, tab, it.group).filter(x => foldT(displayTitle(x.name)) !== own);   // no TMDB: more from its group
+    }
+    row('h-because', `Because you watched ${title}`, art(items).slice(0, 20));
+  }
+  row('h-t10-series', 'Top 10 series this week', topSeries, { top10: true, min: 5 });
+
+  // New on your playlist: this year's and last year's titles, newest added first.
+  const fresh = s => (art(s?.e.fresh).length >= 8 ? art(s.e.fresh) : art(s?.e.recent));
+  row('h-new', 'New on your playlist', mixKinds(fresh(M), fresh(S)), { see: M ? { p: M.p, tab: 'movies', group: null } : null });
+
+  // Genres: three a day, in turn (the one "Because you watched" already covers sits out).
+  const day = Math.floor((Date.now() - new Date().getTimezoneOffset() * MINUTE) / DAY);
+  const becauseLabel = becauseGenre && HOME_GENRES.find(([, mv, tv]) => [mv, tv].includes(`genre:${TMDB_GENRE_IDS[last.item.kind === 'episode' ? 'tv' : 'movie'][becauseGenre]}`))?.[0];
+  const genres = [...HOME_GENRES.slice(day % 6), ...HOME_GENRES.slice(0, day % 6)].filter(g => g[0] !== becauseLabel).slice(0, 3);
+  const genreRow = ([label, mv, tv, re]) => {
+    const films = tmdbOnHere ? tmdb(M, 'movies', mv) : list(M, 'movies', M?.e.groupList.find(g => re.test(g.name))?.name);
+    const series = tmdbOnHere ? tmdb(S, 'series', tv) : list(S, 'series', S?.e.groupList.find(g => re.test(g.name))?.name);
+    const group = tmdbOnHere ? `tmdb:mv:${mv}` : M?.e.groupList.find(g => re.test(g.name))?.name;
+    row(`h-g-${label}`, label, mixKinds(art(films), art(series)), { see: M && group ? { p: M.p, tab: 'movies', group } : null });
+  };
+  genreRow(genres[0]); genreRow(genres[1]);
+  // Highly rated: TMDB's top rated that this provider has, 7.5 and up with enough votes to mean it.
+  const good = l => art(l).filter(it => it.rating >= 7.5 && (it.tm?.votes || 0) >= 300);
+  row('h-rated', 'Highly rated', mixKinds(good(tmdb(M, 'movies', 'list:top')), good(tmdb(S, 'series', 'list:top'))), { rated: true, see: M && tmdbOnHere ? { p: M.p, tab: 'movies', group: 'tmdb:mv:list:top' } : null });
+  if (genres[2]) genreRow(genres[2]);
+  // My List: the films and series you saved, newest first.
+  row('home-watch', 'My List', state.favorites.filter(f => f.kind === 'movie' || f.kind === 'series').slice(-20).reverse(), { min: 1 });
+
+  // No title twice in neighbouring rows, and none leading two rows: later rows move a repeat out of the way.
+  const early = new Set();
+  rows.forEach((r, i) => {
+    if (!r.top10 && r.key !== 'home-watch') {
+      const prev = new Set((rows[i - 1]?.items || []).map(titleKeyOf));
+      const kept = r.items.filter(it => !prev.has(titleKeyOf(it)));
+      r.items = [...kept.filter(it => !early.has(titleKeyOf(it))), ...kept.filter(it => early.has(titleKeyOf(it)))];
+    }
+    r.items.slice(0, 4).forEach(it => early.add(titleKeyOf(it)));
+  });
+  for (let i = rows.length - 1; i >= 0; i--) if (rows[i].items.length < (rows[i].top10 ? 5 : rows[i].key === 'home-watch' ? 1 : 4)) rows.splice(i, 1);
+
+  shelfItems.set('hero', hub.hero);
+  for (const r of rows) shelfItems.set(r.key, r.items);
+  // Streaming services: the provider's per-platform groups (Netflix, Disney+…) as one row of tiles.
+  for (const [tab, s] of [['movies', M], ['series', S]]) {
+    if (!s) continue;
+    for (const [name, re, c1, c2] of SERVICES) {
+      const g = s.e.groupList.find(g => re.test(g.name) && !/kids|anime/i.test(g.name));
+      if (g && !hub.services.some(x => x.name === name && x.tab === tab)) hub.services.push({ name, c1, c2, tab, pid: s.p.id, group: g.name, count: g.count });
     }
   }
   return hub;
@@ -1074,13 +1183,7 @@ function bindTopSearch() {
   });
   document.addEventListener('click', e => { if (!e.target.closest('#topsearch')) close(); });
 }
-function homeShelfHtml(sh) {
-  if (sh.top10) return `<div class="row-head"><h3>${esc(sh.title)}</h3><span class="muted small">from TMDB</span></div><ul class="shelf-row home-shelf top10">${sh.items.map((it, k) => `<li class="scard t10" data-shelf="${esc(sh.key)}" data-k="${k}"><span class="t10-n">${k + 1}</span>${cardHtml(it, sh.key, k).replace(/^<li[^>]*>|<\/li>$/g, '')}</li>`).join('')}</ul>`;
-  return `<div class="row-head"><h3>${esc(sh.title)}</h3></div><ul class="shelf-row home-shelf">${sh.items.map((it, k) => cardHtml(it, sh.key, k)).join('')}</ul>`;
-}
-// ---- Home's live rows: your channels on now, and what starts soon that suits you ----
-// Only guide data already on this device, plus the guide of the few channels Home shows (asked through ensureGuide,
-// which skips channels asked lately). Sport stays on its own Sports page.
+// ---- Your channels: which live channels you watch most (kept for Live TV; Home no longer shows channels) ----
 function chanPlays() { try { return JSON.parse(localStorage.getItem('chanPlays') || '{}') || {}; } catch { return {}; } }
 function notePlay(url) {
   const m = chanPlays(), [n = 0] = m[url] || [];
@@ -1100,152 +1203,67 @@ function yourChannels(now = Date.now()) {
   for (const [u, [n, last]] of Object.entries(plays)) if (byUrl.has(u)) score.set(u, (score.get(u) || 0) + 1.5 * Math.log2(1 + n) + 0.5 * recency(last));
   return [...byUrl.values()].sort((a, b) => score.get(b.url) - score.get(a.url));
 }
-const FILM_GROUP = /\b(movies?|films?|cinema|kino)\b/i, FILM_NAME = /\b(cinema|film ?4|films?|movies?|tcm|great!? movies|talking pictures)\b/i;
-const NOT_A_FILM = /\b(preview|review|news|trailers?|showcase|coming soon|behind the|making of|top \d+|teleshopping|close)\b/i;
-const YEAR_TAIL = /\s*\((19|20)\d\d\)\s*$/;
-const SPORTY = /\S\s+(?:v|vs\.?|@)\s+\S|premier league|champions league|formula 1|\bf1\b|grand prix|moto ?gp|snooker|darts|boxing|\bufc\b|golf|tennis|cricket|rugby/i;
 const CLUB_TV = /\b(lfc|mutv|chelsea|club|barca|real madrid|city) ?tv\b/i;
-const filmCache = new WeakMap();
-/** A dozen film channels (Sky Cinema, Film4…): English groups, UK ones and ones you watch first, one copy of each. */
-function filmChannels(pl, mine) {
-  const out = [];
-  for (const p of pl.filter(p => !p.virtual && p.content !== 'vod' && epgUrls(p).length)) {
-    const all = m3uKinds(p)?.live || p.channels;
-    let list = filmCache.get(all);
-    if (!list) {
-      const seen = new Set(); list = [];
-      for (const c of all) {
-        if (!isLiveChannel(c) || isSeparator(c) || !(FILM_GROUP.test(c.group || '') || FILM_NAME.test(c.name || '')) || !isEnglishGroup(c.group || '') || otherLanguage(c)) continue;
-        const k = normName(c.name).replace(/\b(hd|fhd|uhd|4k|sd)\b/g, '').trim();
-        if (seen.has(k)) continue;
-        seen.add(k); list.push(c);
-        if (list.length >= 200) break;
-      }
-      filmCache.set(all, list);
-    }
-    out.push(...list.filter(c => visibleGroup(p, c.group || '')).map(c => ({ ...c, src: p.id })));
-  }
-  const mineUrls = new Set(mine.map(c => c.url)), uk = c => /\b(uk|gb|sky|bbc|itv|channel ?[45]|film ?4)\b/i.test(`${c.name} ${c.group}`);
-  return out.sort((a, b) => (mineUrls.has(a.url) ? 0 : 2) + (uk(a) ? 0 : 1) - ((mineUrls.has(b.url) ? 0 : 2) + (uk(b) ? 0 : 1))).slice(0, 12);
-}
 const foldT = s => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-const isSporty = (c, prog) => foldT(prog[2]) === foldT(c.name) || isSportsChannel(c) || CLUB_TV.test(c.name || '') || SPORTY.test(prog[2] || '');
-/** What starts in the next two hours that suits you: reminders you set, your saved series, films on the film channels. */
-function startingSoon(mine, films, now = Date.now()) {
-  const until = now + 2 * HOUR, out = [];
-  const inWindow = t => t > now + MINUTE && t <= until;
-  const series = state.favorites.filter(f => f.kind === 'series').map(f => foldT(displayTitle(f.name))).filter(t => t.length >= 4);
-  const filmUrls = new Set(films.map(c => c.url));
-  const seen = new Set();
-  for (const c of [...mine, ...films]) {
-    if (seen.has(c.url)) continue;
-    seen.add(c.url);
-    for (const prog of guideFor(c)?.list(c) || []) {
-      if (prog[0] > until) break;
-      if (!inWindow(prog[0])) continue;
-      const film = filmUrls.has(c.url);
-      if (!film && isSporty(c, prog)) continue;   // ("Godzilla vs Kong" on a film channel is a film)
-      const t = foldT(prog[2]);
-      const why = series.some(s => t === s || t.startsWith(`${s} `)) ? 'Your series'
-        : film && prog[1] - prog[0] >= 70 * MINUTE && !NOT_A_FILM.test(prog[2]) && t !== foldT(c.name) ? `Film${(prog[2].match(YEAR_TAIL) || [])[0] ? ` · ${prog[2].match(YEAR_TAIL)[0].trim().slice(1, -1)}` : ''}`
-        : null;
-      if (why) out.push({ channel: c, prog, why });
-    }
-  }
-  // Reminders you set, after the rest: a film you're reminded of still says it's a film (the bell shows the reminder).
-  for (const r of state.reminders || []) {
-    if (!inWindow(r.at) || !r.channel) continue;
-    const c = r.channel, list = guideFor(c)?.list(c) || [];
-    const prog = list.find(x => x[0] === r.at) || [r.at, r.at + HOUR, r.title, ''];
-    if (!isSporty(c, prog)) out.push({ channel: c, prog, why: 'Reminder set' });   // match reminders stay with Sports
-  }
-  const keys = new Set(), titles = new Set();
-  return out.sort((a, b) => a.prog[0] - b.prog[0]).filter(x => {
-    const k = `${x.channel.url}|${x.prog[0]}`, t = foldT(x.prog[2].replace(YEAR_TAIL, ''));
-    if (keys.has(k) || titles.has(t)) return false;   // the first reason found wins; a film on two channels once
-    keys.add(k); titles.add(t); return true;
-  }).slice(0, 6);
+// One row of Home: a title (tappable when there's more to see) and a side-scrolling row of posters.
+function homeRowHtml(r) {
+  const head = `<div class="row-head"><h3>${esc(r.title)}</h3>${r.top10 ? '<span class="muted small">from TMDB</span>' : r.see ? `<button type="button" class="link see-all" data-home-see="${esc(r.key)}">See all</button>` : ''}</div>`;
+  const cards = r.top10
+    ? r.items.map((it, k) => `<li class="scard t10" data-shelf="${esc(r.key)}" data-k="${k}"><span class="t10-n" aria-hidden="true">${k + 1}</span>${cardHtml(it, r.key, k).replace(/^<li[^>]*>|<\/li>$/g, '')}</li>`).join('')
+    : r.items.map((it, k) => cardHtml(it, r.key, k, { kindTag: true })).join('');
+  return `<section class="hub-sec hrow">${head}<ul class="shelf-row home-shelf${r.top10 ? ' top10' : ''}">${cards}</ul></section>`;
 }
-const leftText = end => { const m = Math.max(1, Math.round((end - Date.now()) / MINUTE)); return m < 60 ? `${m} min left` : m < 180 ? `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''} left` : `until ${fmtTime(end)}`; };
-const soonWhen = t => { const m = Math.round((t - Date.now()) / MINUTE); return m < 1 ? 'Starting' : m < 60 ? `In ${m} min` : ''; };
-function soonHtml(x, k) {
-  const on = hasReminder(x.channel, x.prog), when = soonWhen(x.prog[0]);
-  return `<li class="sp-row soon-row" data-soon="${k}" role="button" tabindex="0">
-    <span class="sp-time">${fmtTime(x.prog[0])}${when ? `<small class="soon-in">${when}</small>` : ''}</span>
-    <span class="sp-text"><span class="sp-title">${esc(x.prog[2].replace(YEAR_TAIL, ''))}</span><span class="muted">${esc(`${x.why} · ${channelLabel(x.channel.name)}`)}</span></span>
-    <button type="button" class="icon-btn sp-bell${on ? ' on' : ''}" data-soon-bell="${k}" aria-pressed="${on}" aria-label="${on ? 'Remove reminder' : 'Remind me'}">${icon(on ? 'bell-on' : 'bell')}</button></li>`;
-}
-// Progress lines and "12 min left" / "In 5 min" move on every minute, in place (no Home redraw).
-setInterval(() => {
-  if (document.hidden || state.current || (location.hash && location.hash !== '#/')) return;
-  const now = Date.now();
-  document.querySelectorAll('.onnow-row .onnow').forEach(el => {
-    const x = shelfItems.get('onnow')?.[+el.dataset.k];
-    if (!x) return;
-    if (x.now[1] <= now) { homeRefresh(); return; }   // the programme ended: what's on next
-    el.querySelector('.nc-bar i')?.style.setProperty('width', `${(((now - x.now[0]) / (x.now[1] - x.now[0])) * 100).toFixed(1)}%`);
-    const t = el.querySelector('.nc-left'); if (t) t.textContent = leftText(x.now[1]);
-  });
-  document.querySelectorAll('.soon-row').forEach(el => {
-    const x = shelfItems.get('soon')?.[+el.dataset.soon];
-    if (!x) return;
-    if (x.prog[0] <= now + MINUTE) { homeRefresh(); return; }   // started: off the list
-    const w = el.querySelector('.soon-in'), when = soonWhen(x.prog[0]); if (w) w.textContent = when;
-  });
-}, MINUTE);
-function onNowHtml({ c, now }, k) {
-  const pct = ((Date.now() - now[0]) / (now[1] - now[0])) * 100;
-  const img = now[4]?.img;
-  // Compact and calm: the channel's logo whole (never cropped into a picture), what's on, until when.
-  void img;
-  return `<li class="onnow nc" data-k="${k}">
-    <span class="nc-logo">${logoHtml(c)}</span>
-    <span class="nc-text"><b>${esc(now[2])}</b><span class="muted">${esc(c.name)}</span><span class="nc-time"><i class="nc-dot"></i><span class="nc-left">${leftText(now[1])}</span></span></span>
-    <span class="bar nc-bar"><i style="width:${pct.toFixed(1)}%"></i></span></li>`;
-}
-let heroTimer = 0;
+// First sentence of a plot: the hero's one-line hook.
+const hookOf = s => { s = String(s || '').replace(/\s+/g, ' ').trim(); const m = s.match(/^.{24,}?[.!?](?=\s|$)/); return m ? m[0] : s; };
+let heroTimer = 0, heroHold = 0;
 function heroHtml(items) {
   clearInterval(heroTimer);
-  const go = (car, i) => {
-    const n = car.querySelectorAll('.hero-slide').length;
-    car.scrollTo({ left: ((i + n) % n) * car.clientWidth, behavior: 'smooth' });
-  };
-  heroTimer = setInterval(() => {
-    const car = $('.hero-car');
-    if (!car) return clearInterval(heroTimer);
-    if (car.matches(':hover')) return;
-    go(car, Math.round(car.scrollLeft / car.clientWidth) + 1);
-  }, 8000);
+  const go = (car, i) => { const n = car.children.length; car.scrollTo({ left: ((i + n) % n) * car.clientWidth, behavior: 'smooth' }); };
   queueMicrotask(() => {
     const car = $('.hero-car'), dots = $('.hero-dots');
-    if (!car || !dots || car.dataset.bound) return;   // a kept carousel already has its handlers
+    if (!car || car.dataset.bound) return;   // a kept carousel already has its handlers
     car.dataset.bound = '1';
-    const mark = () => { const i = Math.round(car.scrollLeft / car.clientWidth); dots.querySelectorAll('button').forEach((d, k) => d.classList.toggle('on', k === i)); };
+    const mark = () => { const i = Math.round(car.scrollLeft / car.clientWidth); dots?.querySelectorAll('button').forEach((d, k) => { d.classList.toggle('on', k === i); d.setAttribute('aria-current', k === i); }); };
     car.addEventListener('scroll', debounce(mark, 60), { passive: true });
-    dots.addEventListener('click', e => { const d = e.target.closest('[data-dot]'); if (d) { e.stopPropagation(); go(car, +d.dataset.dot); } });
+    dots?.addEventListener('click', e => { const d = e.target.closest('[data-dot]'); if (d) { e.stopPropagation(); heroHold = Date.now() + 20000; go(car, +d.dataset.dot); } });
+    // Calm autoplay: a slide every 8 s, only while the carousel is on screen and untouched (a swipe pauses it 20 s);
+    // none at all with Reduce Motion.
+    if (items.length < 2 || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const hold = () => { heroHold = Date.now() + 20000; };
+    ['pointerdown', 'touchstart', 'wheel', 'keydown', 'focusin'].forEach(t => car.addEventListener(t, hold, { passive: true }));
+    let visible = true;
+    new IntersectionObserver(([en]) => { visible = en.intersectionRatio > 0.6; }, { threshold: [0, 0.6, 1] }).observe(car);
+    heroTimer = setInterval(() => {
+      if (!car.isConnected) return clearInterval(heroTimer);
+      if (!visible || document.hidden || Date.now() < heroHold || car.matches(':hover') || !$('#sheet').hidden) return;
+      go(car, Math.round(car.scrollLeft / car.clientWidth) + 1);
+    }, 8000);
   });
-  return `<div class="hero-wrap"><div class="hero-car">${items.map((it, k) => `<div class="hero-slide" data-shelf="hero" data-k="${k}" style="--hue:${hueOf(it.name)}">
-      ${it.tm?.backdrop ? `<img class="hero-bg sharp" src="${esc(it.tm.backdrop)}" alt="" onerror="this.remove()">` : `<img class="hero-bg" src="${esc(thumb(it.logo, 300))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`}
+  return `<div class="hero-wrap"><div class="hero-car" aria-roledescription="carousel">${items.map((it, k) => {
+    const series = it.kind === 'series', bd = it.tm?.backdrop;
+    const genres = it.tm?.genres?.length ? it.tm.genres.slice(0, 2) : [it.genre?.split(',')[0]?.trim() || ''];
+    const meta = [it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : '', ...genres].filter(Boolean);
+    const kicker = it.heroRank ? `#${it.heroRank} trending ${series ? 'series' : 'movie'}` : it.heroLabel || `Popular ${series ? 'series' : 'movie'}`;
+    const plot = hookOf(it.tm?.overview || it.plot);
+    return `<div class="hero-slide${bd ? ' has-bd' : ''}" data-shelf="hero" data-k="${k}" style="--hue:${hueOf(it.name)}" role="group" aria-label="${k + 1} of ${items.length}">
+      ${bd ? `<img class="hero-bg sharp" src="${esc(bd)}" alt=""${k ? '' : ' fetchpriority="high"'} onerror="this.remove()">` : `<img class="hero-bg" src="${esc(thumb(it.logo, 300))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">`}
       <div class="hero-body">
         <div class="hero-text">
-          <span class="hero-kicker">${icon(it.kind === 'series' ? 'grid' : 'film')} ${esc(it.heroLabel || `Popular ${it.kind === 'series' ? 'series' : 'movie'}`)}</span>
+          <span class="hero-kicker">${icon(series ? 'grid' : 'film')} ${esc(kicker)}</span>
           <div class="hero-title">${esc(displayTitle(it.name))}</div>
-          <div class="hero-meta">${[it.year, it.rating ? `★ ${it.rating.toFixed(1)}` : '', ...(it.tm?.genres?.length ? it.tm.genres.slice(0, 2) : [it.genre || groupLabel(it.group)])].filter(Boolean).map(x => `<span>${esc(x)}</span>`).join('')}</div>
-          ${it.tm?.overview || it.plot ? `<p class="hero-plot">${esc(it.tm?.overview || it.plot)}</p>` : ''}
-          <div class="hero-actions"><button class="btn primary" data-hero-play="${k}">${icon('play')} ${it.kind === 'series' ? 'Episodes' : 'Play'}</button><button class="btn">More info</button></div>
+          <div class="hero-meta">${meta.map(x => `<span>${esc(x)}</span>`).join('')}</div>
+          ${plot ? `<p class="hero-plot">${esc(plot)}</p>` : ''}
+          <div class="hero-actions"><button type="button" class="btn primary" data-hero-play="${k}">${icon('play')} Play</button><button type="button" class="btn">More info</button></div>
         </div>
-        ${it.tm?.backdrop ? '' : `<span class="poster-img hero-poster"><img src="${esc(thumb(it.logo, 500))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>`}
-      </div></div>`).join('')}</div>
-    ${items.length > 1 ? `<div class="hero-dots">${items.map((_, k) => `<button data-dot="${k}" class="${k ? '' : 'on'}" aria-label="Slide ${k + 1}"></button>`).join('')}</div>` : ''}</div>`;
+        ${bd ? '' : `<span class="poster-img hero-poster"><img src="${esc(thumb(it.logo, 500))}" alt="" referrerpolicy="no-referrer" onerror="this.remove()"></span>`}
+      </div></div>`;
+  }).join('')}</div>
+    ${items.length > 1 ? `<div class="hero-dots" role="tablist">${items.map((_, k) => `<button type="button" data-dot="${k}" class="${k ? '' : 'on'}" aria-label="Show ${k + 1} of ${items.length}"></button>`).join('')}</div>` : ''}</div>`;
 }
-
-// Home tiles fill top-to-bottom, then the next column (1 top-left, 2 under it). At most 4 rows, so the
-// block stays a fixed height: more groups add columns that scroll sideways instead of lengthening the page.
-const browseRows = n => (n <= 2 ? n : Math.min(4, Math.ceil(n / 2)));
 
 // Home updates without flicker: each top-level section is compared with what is on screen and only sections that
 // changed are replaced. Unchanged ones (their images, scroll position, carousel) stay exactly as they are.
-const blockKey = el => `${el.tagName}.${el.className}|${el.id}|${el.querySelector('h2, .hero-title')?.textContent || ''}`;
+const blockKey = el => `${el.tagName}.${el.className}|${el.id}|${el.querySelector('h2, h3, .hero-title')?.textContent || ''}`;
 function patchView(root, html) {
   const t = document.createElement('template');
   t.innerHTML = html;
@@ -1260,6 +1278,8 @@ function patchView(root, html) {
   const next = fresh.map(el => {
     const html = el.outerHTML, prev = byKey.get(blockKey(el));
     if (prev && prev._html === html) { byKey.delete(blockKey(el)); return prev; }   // unchanged: keep the live one
+    // Same row with new titles: keep its scroll position (a row refreshing mustn't jump back to its start).
+    if (prev) { const sx = prev.querySelector('.shelf-row, .cont-row')?.scrollLeft; if (sx) requestAnimationFrame(() => { const r = el.querySelector('.shelf-row, .cont-row'); if (r) r.scrollLeft = sx; }); }
     el._html = html;
     return el;
   });
@@ -1269,33 +1289,31 @@ function patchView(root, html) {
 }
 function showHome() {
   state.current = null;
+  const downloads = Object.keys(state.downloads || {}).length;
   setTopbar({
     title: 'M3U Player',
     actions: [
+      downloads && { icon: 'download', label: `Downloads (${downloads})`, fn: () => { location.hash = '#/downloads'; } },
       { icon: 'sliders', label: 'Settings', fn: settingsSheet },
       { icon: 'plus', label: 'Add playlist', fn: addPlaylistSheet },
-    ],
+    ].filter(Boolean),
   });
   let dismissed = false;
   try { dismissed = localStorage.getItem('install-tip') === 'off'; } catch {}
   const pl = state.playlists;
-  const cw = continueWatching();
-  // Watchlist = saved films and series; New this week = the newest titles from each Xtream catalogue (loaded on demand).
-  const watchlist = state.favorites.filter(f => f.kind === 'movie' || f.kind === 'series').slice(-30).reverse();
-  shelfItems.set('home-watch', watchlist);
+  // Continue watching: films and episodes only (a live channel isn't something you "continue"; Live TV has History).
+  const cw = continueWatching().filter(e => e.item.kind === 'movie' || e.item.kind === 'episode');
   const hub = homeHub(pl);
-  resumeCardHtml(state.recents[0]);   // sets resumeChannel when the last thing watched was a live channel
-  resumeChannel = null;   // Home's Continue watching is films and episodes only (the last channel isn't pushed at you)
-  const resumeLive = resumeChannel ? (() => {
-    const c = resumeChannel, g = guideFor(c), now = g && g.nowNext(c).now;
-    const pct = now ? ((Date.now() - now[0]) / (now[1] - now[0])) * 100 : 0;
-    return `<div class="cw cw-live" data-resume role="button" tabindex="0" style="--hue:${hueOf(c.name)}"><button type="button" class="cw-x" data-cw-x="live" aria-label="Remove from Continue watching">${icon('close')}</button><span class="cw-img">${now?.[4]?.img ? `<img src="${esc(now[4].img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${logoHtml(c)}<span class="live-badge">LIVE</span><span class="cw-play">${icon('play')}</span>${now ? `<span class="bar"><i style="width:${pct.toFixed(1)}%"></i></span>` : ''}</span>
-      <span class="cw-name">${esc(c.name)}</span><span class="muted">${now ? esc(now[2]) : 'Live channel'}</span></div>`;
-  })() : '';
-  // Snapshot: playing a channel moves it to the front of state.recents, so tiles must keep their own channel.
-  const recentStrip = state.recents.filter(isLiveChannel).slice(0, 14);
-  // Browse: the groups the user pinned to Home (in their order); until they pin any, the biggest live groups.
-  // (Home no longer shows group tiles: no grouping of every channel at each Home render.)
+  const seeOf = new Map(hub.rows.map(r => [r.key, r.see]));
+  const cwCard = (e, i) => {
+    const bd = cwBackdrop(e.item);
+    const img = bd ? `<img class="cw-bd" src="${esc(thumb(bd, 780))}" alt="" loading="lazy" decoding="async" onerror="this.remove()">`
+      : e.item.logo ? `<img src="${esc(thumb(e.item.logo, 500))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film');
+    return `<div class="cw" data-cw="${i}" role="button" tabindex="0"><button type="button" class="cw-x" data-cw-x="${i}" aria-label="Remove from Continue watching">${icon('close')}</button>
+      <span class="cw-img${bd ? '' : ' cw-poster'}">${img}<span class="cw-play">${icon('play')}</span><span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
+      <span class="cw-name">${esc(cwTitle(e.item))}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></div>`;
+  };
+  const nothing = !hub.hero.length && !cw.length && !hub.rows.length && !hub.loading;
   patchView(view, `
     ${isIOS && !isStandalone && !dismissed ? `<div class="banner">
       ${icon('share')}<span><b>Install on your iPhone:</b> tap Share, then “Add to Home Screen”. It opens full-screen and iOS keeps your playlists safe.</span>
@@ -1306,30 +1324,13 @@ function showHome() {
     ${serverProxy.needsKey ? `<div class="banner">
       ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
-    ${pl.length ? `<div class="home-top">
-      <label class="search home-search">${icon('search')}<input id="home-q" type="search" placeholder="Search channels, movies and series" autocomplete="off" autocorrect="off" spellcheck="false"></label>
-      <ul class="lib-row quick">
-        <li class="lib" data-go="#/fav">${icon('star')}<span>Favorites</span><b>${state.favorites.length}</b></li>
-        ${pl.some(p => p.content !== 'vod') ? `<li class="lib" data-go="#/sports">${icon('trophy')}<span>Sports</span></li>` : ''}
-        <li class="lib" data-go="#/recent">${icon('clock')}<span>History</span></li>
-        <li class="lib" data-go="#/multi">${icon('grid')}<span>Multi-view</span></li>
-        ${Object.keys(state.downloads || {}).length ? `<li class="lib" data-go="#/downloads">${icon('film')}<span>Downloads</span><b>${Object.keys(state.downloads).length}</b>${dlActive ? '<i class="lib-dot"></i>' : ''}</li>` : ''}
-        ${pl.map(p => `<li class="lib pl-chip" data-go="#/p/${esc(p.id)}">${icon(p.kind === 'xtream' ? 'tv' : 'list')}<span>${esc(playlistTitle(p))}</span><button class="pl-more" data-menu="${esc(p.id)}" aria-label="Playlist options">${icon('more')}</button></li>`).join('')}
-      </ul></div><div id="home-results" class="home-results" hidden></div>` : ''}
     ${hub.hero.length ? heroHtml(hub.hero) : ''}
-    ${resumeChannel || cw.length ? `<section class="hub-sec"><div class="hub-head"><h2>Continue watching</h2></div>
-      <div class="cont-row">${resumeLive}${cw.map((e, i) => `<div class="cw" data-cw="${i}" role="button" tabindex="0"><button type="button" class="cw-x" data-cw-x="${i}" aria-label="Remove from Continue watching">${icon('close')}</button>
-        <span class="cw-img">${e.item.logo ? `<img src="${esc(thumb(e.item.logo, 500))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('film')}<span class="cw-play">${icon('play')}</span><span class="bar"><i style="width:${Math.min(100, (e.t / e.d) * 100).toFixed(1)}%"></i></span></span>
-        <span class="cw-name">${esc(cwTitle(e.item))}</span><span class="muted">${fmtDur(e.d - e.t)} left</span></div>`).join('')}</div></section>` : ''}
-    ${hub.onNow.length ? `<section class="hub-sec"><div class="hub-head"><h2>On now</h2><span class="hub-links">${pl.length ? `<button class="link" data-edit-groups="${esc((liveSource() || pl[0]).id)}">Choose channels</button>` : ''}<a class="link" href="#/tvguide">TV guide</a><a class="link" href="#/live">All channels</a></span></div>
-      <ul class="shelf-row home-shelf onnow-row">${hub.onNow.map((x, k) => onNowHtml(x, k)).join('')}</ul></section>` : ''}
-    ${hub.soon.length ? `<section class="hub-sec home-soon"><div class="hub-head"><h2>Starting soon</h2><span class="hub-links"><a class="link" href="#/tvguide">TV guide</a></span></div>
-      <ul class="sp-list soon-list">${hub.soon.map(soonHtml).join('')}</ul></section>` : ''}
-    ${hub.shelves.movies.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Movies</h2><span class="hub-links"><a class="link" href="#/movies">Browse all</a></span></div>${hub.shelves.movies.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading movies…</p>'}${servicesHtml(hub.services)}</section>` : ''}
-    ${hub.shelves.series.length || hub.loading ? `<section class="hub-sec"><div class="hub-head"><h2>Series</h2><span class="hub-links"><a class="link" href="#/series">Browse all</a></span></div>${hub.shelves.series.map(homeShelfHtml).join('') || '<p class="muted hub-loading">Loading series…</p>'}</section>` : ''}
-    ${pl.length && !hub.hero.length && !cw.length && !resumeChannel && !hub.onNow.length && !hub.shelves.movies.length && !hub.shelves.series.length && !hub.loading && !watchlist.length ? `<section class="hub-sec home-browse"><div class="hub-head"><h2>Browse</h2></div>
+    ${cw.length ? `<section class="hub-sec hrow"><div class="row-head"><h3>Continue watching</h3></div><div class="cont-row">${cw.map(cwCard).join('')}</div></section>` : ''}
+    ${hub.rows.map(homeRowHtml).join('')}
+    ${hub.loading && !hub.rows.length ? '<p class="muted hub-loading">Loading films and series…</p>' : ''}
+    ${servicesHtml(hub.services) ? `<section class="hub-sec hrow">${servicesHtml(hub.services)}</section>` : ''}
+    ${pl.length && nothing ? `<section class="hub-sec home-browse"><div class="hub-head"><h2>Browse</h2></div>
       <ul class="cards">${card('#/live', 'list', 'Live TV', 'Channels and what’s on')}${card('#/movies', 'film', 'Movies', 'Films from your playlists')}${card('#/series', 'grid', 'Series', 'Shows and episodes')}${card('#/tvguide', 'guide', 'TV guide', 'What’s on now and next')}</ul></section>` : ''}
-    ${watchlist.length ? `<section class="hub-sec"><div class="hub-head"><h2>Watchlist</h2></div><ul class="shelf-row home-shelf">${watchlist.map((it, k) => cardHtml(it, 'home-watch', k)).join('')}</ul></section>` : ''}
     ${pl.length ? '' : `<div class="empty">${icon('tv', 'big')}<p><b>No playlists yet</b></p>
           <p class="muted">Add an Xtream login, an M3U / M3U8 link, or a playlist file.</p>
           <button class="btn primary" id="add-first">Add playlist</button></div>`}`);
@@ -1341,13 +1342,9 @@ function showHome() {
     try { localStorage.setItem('install-tip', 'off'); } catch {}
     $('.banner').remove();
   });
-  if ($('#home-q')) $('#home-q').onkeydown = (e => {
-    if (e.key === 'Enter' && e.target.value.trim()) { e.preventDefault(); homeSearch(e.target.value.trim()); e.target.blur(); }   // keep the mixed results; just put the keyboard away
-  });
-  if ($('#home-q') && !$('#home-q').oninput) $('#home-q').oninput = debounce(e => homeSearch(e.target.value.trim()), 250);
   view.onclick = e => {
     const hp = e.target.closest('[data-hero-play]');
-    if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playBestVersion(it); }
+    if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it, { play: true }) : playBestVersion(it); }
     const sv = e.target.closest('[data-svc]');
     if (sv) {
       const all = hub.services, tiles = all.filter(s => s.tab === 'movies').concat(all.filter(s => s.tab === 'series' && !all.some(m => m.tab === 'movies' && m.name === s.name)));
@@ -1355,37 +1352,26 @@ function showHome() {
       if (s) { pendingTab = s.tab; pendingGroup = s.group; location.hash = `#/p/${s.pid}`; }
       return;
     }
-    const bell = e.target.closest('[data-soon-bell]');
-    if (bell) {
-      e.stopPropagation();
-      const x = shelfItems.get('soon')?.[+bell.dataset.soonBell];
-      if (x) toggleReminder(x.channel, x.prog).then(() => { const on = hasReminder(x.channel, x.prog); bell.classList.toggle('on', on); bell.setAttribute('aria-pressed', on); bell.setAttribute('aria-label', on ? 'Remove reminder' : 'Remind me'); bell.innerHTML = icon(on ? 'bell-on' : 'bell'); });
+    const see = e.target.closest('[data-home-see]');
+    if (see) {
+      const s = seeOf.get(see.dataset.homeSee);
+      if (s) { pendingTab = s.tab; pendingGroup = s.group; location.hash = `#/p/${s.p.id}`; }
       return;
     }
-    const so = e.target.closest('[data-soon]');
-    if (so) { const x = shelfItems.get('soon')?.[+so.dataset.soon]; if (x) programmeSheet(x.channel, x.prog); return; }
-    const on = e.target.closest('.onnow');
-    if (on) { const list = (shelfItems.get('onnow') || []).map(x => x.c); return playChannel(list, +on.dataset.k); }
-    const sc = e.target.closest('.scard, .hs-row, .hero-slide');
+    const sc = e.target.closest('.scard, .hero-slide');
     if (sc) {
       const it = shelfItems.get(sc.dataset.shelf)?.[+sc.dataset.k];
       if (!it) return;
-      if (sc.dataset.shelf === 'hs-tv') return programmeSheet(it.channel, it.prog);
       if (it.kind === 'series') return seriesSheet(it);
       if (it.kind === 'movie') return movieSheet(it);
       return playChannel([it], 0);
     }
-    const m = e.target.closest('[data-menu]');
-    if (m) return playlistMenu(byId(m.dataset.menu));
     const x = e.target.closest('[data-cw-x]');
     if (x) {
       e.stopPropagation();
-      if (x.dataset.cwX === 'live') { cwLiveHidden = resumeChannel?.url || ''; db.set('cwLiveHidden', cwLiveHidden).catch(() => {}); }
-      else {
-        const entry = cw[+x.dataset.cwX];
-        // Hidden, not forgotten: the resume point stays, and playing it again brings it back. Syncs to your other devices.
-        if (entry) { state.progress[entry.item.url] = { ...state.progress[entry.item.url], hidden: true, at: Date.now() }; db.set('progress', state.progress).catch(() => {}); syncSoon(); }
-      }
+      const entry = cw[+x.dataset.cwX];
+      // Hidden, not forgotten: the resume point stays, and playing it again brings it back. Syncs to your other devices.
+      if (entry) { state.progress[entry.item.url] = { ...state.progress[entry.item.url], hidden: true, at: Date.now() }; db.set('progress', state.progress).catch(() => {}); syncSoon(); }
       toast('Removed from Continue watching');
       // Take just this card out (no redraw: the other cards and their buttons stay exactly as they are).
       const card = x.closest('.cw'), row = card?.parentNode;
@@ -1395,13 +1381,6 @@ function showHome() {
     }
     const c = e.target.closest('[data-cw]');
     if (c) { const entry = cw[+c.dataset.cw]; return playChannel([entry.item], 0); }
-    if (e.target.closest('[data-resume]')) return playChannel(recentStrip, 0);
-    const r = e.target.closest('[data-recent]');
-    if (r) return playChannel(recentStrip, +r.dataset.recent);
-    const b = e.target.closest('[data-browse]');
-    if (b) { pendingGroup = b.dataset.group; location.hash = `#/p/${b.dataset.browse}`; return; }
-    const eg = e.target.closest('[data-edit-groups]');
-    if (eg) return groupsSheet(byId(eg.dataset.editGroups), 'live');
     const go = e.target.closest('[data-go]');
     if (go) location.hash = go.dataset.go;
   };
@@ -1444,10 +1423,10 @@ function noVodSheet(kind) {
 }
 function updateNav() {
   const hash = location.hash || '#/';
-  // Favorites / History are reached from Home, so Home stays lit (not Live TV).
-  // Sports has its own tab in the computer's top bar; on a phone it's reached from Home, so Home stays lit.
+  // Favorites, History, Multi-view and (on a phone) Sports are reached from Live TV's shortcuts, so Live TV stays lit.
+  // Sports has its own tab in the computer's top bar. Downloads opens from Home's top bar.
   const sports = hash === '#/sports' && matchMedia('(min-width: 900px)').matches && !isTV;
-  const on = sports ? 'sports' : hash === '#/' || state.current?.virtual || hash === '#/multi' || hash === '#/downloads' || hash === '#/sports' ? 'home' : hash.startsWith('#/guide') ? 'guide' : state.current ? (state.tab === 'live' ? 'live' : state.tab) : '';
+  const on = sports ? 'sports' : hash === '#/' || hash === '#/downloads' ? 'home' : state.current?.virtual || hash === '#/multi' || hash === '#/sports' ? 'live' : hash.startsWith('#/guide') ? 'guide' : state.current ? (state.tab === 'live' ? 'live' : state.tab) : '';
   document.querySelectorAll('#mainnav [data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === on));
 }
 
@@ -1564,6 +1543,7 @@ function showPlaylist(p) {
   view.innerHTML = `
     ${showTabs ? `<div class="seg${navCovers ? ' nav-covers' : ''}" id="seg">
       ${(p.kind === 'xtream' || !liveEmpty) ? tabBtn('live', 'Live TV') : ''}${(p.kind === 'xtream' || k?.movies.length) ? tabBtn('movies', 'Movies') : ''}${(p.kind === 'xtream' || k?.series.length) ? tabBtn('series', 'Series') : ''}</div>` : ''}
+    ${p.virtual ? '' : liveShortcutsHtml(p)}
     <div class="filters">
       <label class="search">${icon('search')}<input id="q" type="search" placeholder="Search" autocomplete="off" autocorrect="off" spellcheck="false" value="${esc(pendingQuery)}"></label>
       <div class="chips" id="chips"></div>
@@ -1572,6 +1552,12 @@ function showPlaylist(p) {
     <div id="sentinel" class="sentinel"></div>
     <div class="selbar" id="selbar" hidden></div>`;
   pendingQuery = '';
+  $('#lq')?.addEventListener('click', e => {
+    const m = e.target.closest('[data-menu]');
+    if (m) { e.stopPropagation(); return playlistMenu(byId(m.dataset.menu)); }
+    const go = e.target.closest('[data-go]');
+    if (go && go.dataset.go !== location.hash) location.hash = go.dataset.go;
+  });
   $('#q').oninput = debounce(e => { state.query = e.target.value.trim().toLowerCase(); requestAnimationFrame(() => { applyFilter(); toListTop(); }); }, 120);
   $('#chips').onclick = async e => {
     if (e.target.closest('[data-more-groups]')) { state.allGroups = !state.allGroups; renderChips(); return; }
@@ -1611,6 +1597,19 @@ function showPlaylist(p) {
   if (!p.virtual) maybeUpdateGuide(p);
 }
 
+// Live TV's shortcuts (they were on Home until Home became films & series only): your favourites, history, Sports,
+// Multi-view, and the other playlists when there's more than one (this one's options are in the ⋯ menu).
+function liveShortcutsHtml(p) {
+  const pl = state.playlists, live = pl.some(x => x.content !== 'vod');
+  return `<ul class="lib-row quick live-quick" id="lq"${state.tab === 'live' ? '' : ' hidden'}>
+    <li class="lib" data-go="#/fav">${icon('star')}<span>Favorites</span><b>${state.favorites.length}</b></li>
+    ${live ? `<li class="lib" data-go="#/sports">${icon('trophy')}<span>Sports</span></li>` : ''}
+    <li class="lib" data-go="#/recent">${icon('clock')}<span>History</span></li>
+    ${isTV ? '' : `<li class="lib" data-go="#/multi">${icon('grid')}<span>Multi-view</span></li>`}
+    ${pl.length > 1 ? pl.map(x => `<li class="lib pl-chip${x === p ? ' on' : ''}" data-go="#/p/${esc(x.id)}">${icon(x.kind === 'xtream' ? 'tv' : 'list')}<span>${esc(playlistTitle(x))}</span><button class="pl-more" data-menu="${esc(x.id)}" aria-label="Playlist options">${icon('more')}</button></li>`).join('') : ''}
+  </ul>`;
+}
+
 // New results (another group, a search) start at their first row, not wherever the old list was scrolled.
 function toListTop() {
   const list = $('#list');
@@ -1618,6 +1617,7 @@ function toListTop() {
 }
 
 function refreshPlaylistView({ keep = false } = {}) {
+  $('#lq')?.toggleAttribute('hidden', state.tab !== 'live');   // the Live TV shortcuts don't belong on Movies / Series
   updateTopbar();
   renderChips();
   applyFilter({ keep });
@@ -1631,7 +1631,7 @@ function updateTopbar() {
     title: p.virtual ? playlistTitle(p) : ({ movies: 'Movies', series: 'Series', live: 'Live TV' })[state.tab] || playlistTitle(p),
     // Movies / Series: Back from a group ("See all", a service, a genre chip) or a search returns to the front page,
     // not all the way Home.
-    back: live || p.virtual ? '#/' : () => {
+    back: p.virtual ? '#/live' : live ? '#/' : () => {
       if (state.current !== p || (state.group === null && !state.query)) { location.hash = '#/'; return; }
       state.query = '';
       const q = $('#q'); if (q) q.value = '';
@@ -1750,7 +1750,7 @@ function rememberShelf(key, group, items) {
 }
 const sameShelf = (a, b) => !!a && !!b && a.length === b.length && a.every((it, i) => it.url === b[i].url && it.logo === b[i].logo && it.name === b[i].name);
 
-async function requestVod(p, tab, { group, q }) {
+async function requestVod(p, tab, { group, q, quiet = false }) {
   const key = vodKey(p, tab), entry = vodCache.get(key);
   const tag = `${key}|${q !== undefined ? 'q:' + q : 'g:' + group}`;
   if (!entry || Array.isArray(entry) || vodPending.has(tag)) return;
@@ -1773,7 +1773,7 @@ async function requestVod(p, tab, { group, q }) {
     }
   } catch (err) {
     console.warn('row load failed', group ?? q, err.message);
-    if (q !== undefined || !shelfPrev.get(key)?.has(group)) toast(err.message);   // a row already showing its saved titles fails quietly
+    if (!quiet && (q !== undefined || !shelfPrev.get(key)?.has(group))) toast(err.message);   // a row already showing its saved titles fails quietly
   } finally {
     vodPending.delete(tag);
     if (state.current === p && state.tab === tab) {
@@ -1897,11 +1897,11 @@ const discoverMode = () => {
   const e = vodCache.get(vodKey(p, state.tab));
   return !!e && !Array.isArray(e);
 };
-function cardHtml(it, key, k) {
+function cardHtml(it, key, k, { kindTag = false } = {}) {
   return `<li class="scard" data-shelf="${esc(key)}" data-k="${k}">
     <span class="poster-img${it.logo ? '' : ' no-img'}" data-initials="${initials(displayTitle(it.name))}" data-title="${esc(displayTitle(it.name))}" style="--hue:${hueOf(it.name)}">${it.logo ? `<img src="${esc(thumb(it.logo, 300))}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.scard')?.classList.add('noart');this.parentNode?.classList.add('no-img');this.remove()">` : ''}
       ${it.rating && it.rating < 9.5 ? `<span class="badge">★ ${it.rating.toFixed(1)}</span>` : ''}${progressBar(it)}</span>
-    <span class="poster-name">${esc(it.kind === 'movie' || it.kind === 'series' ? displayTitle(it.name) : it.name)}</span>${it.year ? `<span class="muted">${esc(it.year)}</span>` : ''}</li>`;
+    <span class="poster-name">${esc(it.kind === 'movie' || it.kind === 'series' ? displayTitle(it.name) : it.name)}</span>${it.year || (kindTag && it.kind === 'series') ? `<span class="muted">${esc([it.year, kindTag && it.kind === 'series' ? 'Series' : ''].filter(Boolean).join(' · '))}</span>` : ''}</li>`;
 }
 function shelfHtml(title, key, items, { total = 0, group = null, pending = false } = {}) {
   shelfItems.set(key, items);
@@ -2434,7 +2434,7 @@ function onListClick(e) {
   const see = e.target.closest('[data-see]');
   if (see) { state.group = see.dataset.see; updateTopbar(); renderChips(); applyFilter(); toListTop(); return; }
   const hp = e.target.closest('[data-hero-play]');
-  if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it) : playBestVersion(it); }
+  if (hp) { const it = shelfItems.get('hero')?.[+hp.dataset.heroPlay]; if (it) return it.kind === 'series' ? seriesSheet(it, { play: true }) : playBestVersion(it); }
   const card = e.target.closest('.scard, .hero, .hero-slide');
   if (card) {
     const it = shelfItems.get(card.dataset.shelf)?.[+card.dataset.k];
@@ -2985,7 +2985,7 @@ async function movieSheet(m) {
   } catch {}
 }
 
-async function seriesSheet(s) {
+async function seriesSheet(s, { play = false } = {}) {
   const p = playlistOf(s);
   const x = xtOf(p);
   sheet(`<div class="detail" data-id="${esc(s.id)}"><div class="detail-title">${esc(s.name)}</div><p class="muted">Loading episodes…</p></div>`);
@@ -3037,6 +3037,8 @@ async function seriesSheet(s) {
   // "Continue": the most recently watched unfinished episode, else the first unwatched one.
   const allEps = seasons.flatMap(se => episodesOf(se));
   const continueEp = (last && !state.progress[last.item.url]?.done ? allEps.find(e => e.url === last.item.url) : null) || allEps.find(e => !state.progress[e.url]?.done) || allEps[0];
+  // Play (Home's featured series): straight into the episode you're on, or the first one.
+  if (play && continueEp) { const se = seasons.find(x => episodesOf(x).some(y => y.url === continueEp.url)); const l = episodesOf(se); closeSheet(); return playChannel(l, l.findIndex(y => y.url === continueEp.url)); }
   const render = (keepScroll = false) => {
     const list = episodesOf(season);
     loadTmdbEps(season);
@@ -3581,7 +3583,7 @@ function sportsNow() {
 
 function showSports() {
   state.current = null;
-  setTopbar({ title: 'Sports', back: '#/' });
+  setTopbar({ title: 'Sports', back: matchMedia('(min-width: 900px)').matches && !isTV ? '#/' : '#/live' });
   view.innerHTML = '<div class="sports"><div class="chips sp-chips" id="sp-chips" hidden></div><div id="sp-body"></div></div>';
   view.onclick = sportsClick;
   renderSports();
@@ -4002,7 +4004,7 @@ function showMulti() {
   stopPlaying();
   state.current = null;
   multiActive = true;
-  setTopbar({ title: 'Multi-view', back: '#/', actions: [
+  setTopbar({ title: 'Multi-view', back: '#/live', actions: [
     { icon: 'grid', label: 'Layout', fn: () => menu('Layout', [
       { label: '2 channels', fn: () => { multi.layout = 2; showMulti(); } },
       { label: '4 channels', fn: () => { multi.layout = 4; showMulti(); } },
