@@ -4637,9 +4637,17 @@ function keepFresh() {
 
 async function backgroundRefresh() {
   // Once: earlier refreshes kept one copy per link and emptied groups that re-list channels; refresh to restore them.
-  if ((state.settings.refreshFix || 0) < 1) {
-    state.settings.refreshFix = 1; await db.set('settings', state.settings);
-    for (const p of state.playlists) if (!p.virtual && (p.kind === 'xtream' || p.sourceUrl)) p.refreshedAt = 0;
+  // (Done whatever the playlist's auto-refresh setting, and marked done only once it worked.)
+  if ((state.settings.refreshFix || 0) < 2) {
+    let ok = true;
+    for (const p of state.playlists) {
+      if (p.virtual || !(p.kind === 'xtream' || p.sourceUrl)) continue;
+      const n = p.channels.length;
+      await refreshSource(p, { silent: true });
+      if (p.channels.length < n) ok = false;
+      console.info('[refresh-fix]', playlistTitle(p), n, '->', p.channels.length);
+    }
+    if (ok) { state.settings.refreshFix = 2; await db.set('settings', state.settings); }
   }
   for (const p of state.playlists) {
     // Playlist links refresh daily unless you turned that off for one (Xtream logins always do).
