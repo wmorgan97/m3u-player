@@ -7,7 +7,7 @@ import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from 
 import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
-import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, otherLanguage, buildSports, groupByDay, bySport } from './sports.js';
+import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, otherLanguage, buildSports, groupByDay, bySport } from './sports.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -3559,7 +3559,7 @@ async function loadTeams() {
   await Promise.all(state.follows.map(async f => {
     const l = await findOnTv(f.q).catch(() => []);
     const en = state.settings.vodLanguage !== 'all';
-    sportsHub.teams.set(f.q.toLowerCase(), l.filter(x => x.prog[1] > Date.now() && !isNoise(x.prog, x.channel) && sportsLangOk(x.channel)));
+    sportsHub.teams.set(f.q.toLowerCase(), l.filter(x => x.prog[1] > Date.now() && !isNoise(x.prog, x.channel) && sportsLangOk(x.channel) && isWomens(x.prog[2], x.prog[3]) === wantsWomens(f.q) && /\S\s+(?:v|vs\.?|@)\s+\S/i.test(x.prog[2])));   // a match, not "Made In Chelsea"
   }));
   renderSportsSoon();
 }

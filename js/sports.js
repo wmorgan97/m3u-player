@@ -202,10 +202,16 @@ export function groupByDay(items, now = Date.now()) {
 export const bySport = (items, sport) => (sport === 'all' ? items : items.filter(it => it.sport === sport));
 
 /** A followed team's matches out of the hub's items (title mentions every word). */
+/** Women's football: follow "Chelsea" and you get the men's team; follow "Chelsea Women" to get theirs. */
+const WOMENS = /\b(women'?s?|ladies|wsl|uwcl|femenino|feminine|f[ée]minine|frauen|girls)\b|\(w\)|\bw\s+v\b|\bv\s+[^|]*\bw\b(?=\s|$)/i;
+export const isWomens = (title, desc = '') => WOMENS.test(String(title || '').normalize('NFD').replace(/[̀-ͯ]/g, '')) || /^\s*(?:women'?s|wsl|barclays women)/i.test(String(desc || ''));
+export const wantsWomens = q => /\b(women|womens|ladies|wsl|w)\b/i.test(String(q || ''));
 export function teamItems(q, items) {
   const words = String(q || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').split(/[^a-z0-9]+/).filter(w => w.length > 1);
   if (!words.length) return [];
-  return items.filter(it => { const t = ` ${String(it.prog[2]).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ')} `; return words.every(w => t.includes(` ${w} `)); });
+  const women = wantsWomens(q);
+  return items.filter(it => {
+    if (isWomens(it.prog[2], it.prog[3]) !== women) return false; const t = ` ${String(it.prog[2]).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ')} `; return words.every(w => t.includes(` ${w} `)); });
 }
 
 export function _selfTest() {
