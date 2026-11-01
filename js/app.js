@@ -129,7 +129,8 @@ async function init() {
   if (resumeChannel) ensureGuide([resumeChannel]);
   syncNow();
   if (state.playlists.length) setTimeout(() => { if (!state.playing && $('#sheet').hidden) askAlerts(); }, 6000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); checkFollows(); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); checkFollows(); keepFresh(); } });
+  setInterval(() => { if (!document.hidden) keepFresh(); }, 30 * MINUTE);   // open for a while: the guide and lists stay current
   setTimeout(() => { checkNewEpisodes(); checkFollows(); }, 20_000);   // after start-up, quietly
   // The saved guides load once the first screen is up and the remote is responsive, not during it.
   await new Promise(r => setTimeout(r, 600));
@@ -3384,7 +3385,7 @@ function announceEpisodes(series, added) {
   }
   if (!document.hidden) toast(`${title} — ${body}`, { action: 'Open', fn: () => seriesSheet(series) });
 }
-globalThis.__bgCheck = () => Promise.all([syncNow().catch(() => 0), checkNewEpisodes(true).catch(() => 0), checkFollows(true).catch(() => 0)]);   // iOS background refresh (see AppDelegate)
+globalThis.__bgCheck = () => Promise.all([syncNow().catch(() => 0), Promise.resolve(keepFresh()), checkNewEpisodes(true).catch(() => 0), checkFollows(true).catch(() => 0)]);   // iOS background refresh (see AppDelegate)
 
 // ---------- reminders ----------
 // Fire a few minutes before a programme starts: a phone notification when the installed app has
@@ -3906,13 +3907,16 @@ function showGuide(p) {
     };
     return;
   }
-  const groups = groupsOf(channels);
+  // Group chips come from every live channel (not just the first few thousand with guide data loaded), so a group
+  // like "TV Guide (UK)" lists all 153 of its channels; picking one asks for the guide of the whole group.
+  const allLive = (m3uKinds(p)?.live || p.channels).filter(c => isLiveChannel(c) && !isSeparator(c) && visibleGroup(p, c.group || ''));
+  const groups = groupsOf(allLive);
   const t0 = guideDay ? startOfDay(Date.now() + guideDay * DAY) : Math.floor((Date.now() - 2 * HOUR) / (30 * MINUTE)) * 30 * MINUTE;
   const t1 = guideDay ? t0 + DAY : t0 + 30 * HOUR;
   const dayLabel = d => d === 0 ? 'Today' : d === 1 ? 'Tomorrow' : new Date(Date.now() + d * DAY).toLocaleDateString(undefined, { weekday: 'long' });
   const width = CH_W + ((t1 - t0) / MINUTE) * PX_PER_MIN;
   const x = t => ((t - t0) / MINUTE) * PX_PER_MIN;
-  guideState = { p, g, all: channels, channels, t0, t1, rendered: 0, group: null, q: '' };
+  guideState = { p, g, all: channels, allLive, channels, t0, t1, rendered: 0, group: null, q: '' };
   let times = '';
   for (let t = t0; t < t1; t += 30 * MINUTE) times += `<span style="left:${x(t)}px">${new Date(t).getHours() === 0 && new Date(t).getMinutes() === 0 ? `${fmtDay(t)} ` : ''}${fmtTime(t)}</span>`;
   view.innerHTML = `
@@ -3942,7 +3946,12 @@ function showGuide(p) {
   }, 30_000);
   const applyGuideFilter = () => {
     const gs = guideState, t = gs.q.trim().toLowerCase();
-    gs.channels = gs.all.filter(c => (gs.group === null || (c.group || '') === gs.group)
+    const base = gs.group === null ? gs.all : gs.allLive.filter(c => (c.group || '') === gs.group);
+    if (gs.group !== null) {
+      const want = gs.group;
+      ensureGuide(base)?.then(() => { if (guideState === gs && gs.group === want) { gs.g = guides.get(p.id) || gs.g; const y = el.scrollTop; applyGuideFilter(); el.scrollTop = y; } });
+    }
+    gs.channels = base.filter(c => true
       && (!t || c.name.toLowerCase().includes(t) || gs.g.list(c).some(p => p[1] > t0 && p[0] < t1 && p[2].toLowerCase().includes(t))));
     gs.rendered = 0;
     $('#grows').innerHTML = gs.channels.length ? '' : '<p class="muted center gempty">Nothing on matching that.</p>';
@@ -3986,7 +3995,7 @@ function renderGuideRows() {
       const cls = p[0] <= now && p[1] > now ? ' live' : p[1] <= now ? ' past' : '';
       return `<button class="gprog${cls}" data-p="${k}" style="left:${left}px;width:${Math.max(2, right - left - 2)}px"><b>${esc(p[2])}</b><span>${fmtRange(p)}</span></button>`;
     }).join('');
-    html += `<div class="grow" data-c="${i}"><button class="gch" data-ch>${logoHtml(c)}<span>${esc(c.name)}</span></button><div class="gline">${progs}</div></div>`;
+    html += `<div class="grow" data-c="${i}"><button class="gch" data-ch>${logoHtml(c)}<span>${esc(c.name)}</span></button><div class="gline">${progs || `<span class="gnone" style="left:${Math.max(0, x(now - 25 * MINUTE))}px">No guide information</span>`}</div></div>`;
   }
   rows.insertAdjacentHTML('beforeend', html);
   gs.rendered = end;
@@ -4128,7 +4137,7 @@ function playlistMenu(p) {
     real && { label: guides.get(p.id) ? `Update TV guide (${fmtDay(guides.get(p.id).at)} ${fmtTime(guides.get(p.id).at)})` : 'Load TV guide', fn: () => updateGuide(p) },
     real && { label: 'Set TV guide (EPG) link…', fn: () => setEpgUrl(p) },
     real && (p.sourceUrl || p.kind === 'xtream') && { label: 'Refresh channels now', fn: () => refreshSource(p) },
-    real && p.sourceUrl && p.kind !== 'xtream' && { label: p.autoRefresh ? '✓ Auto-refresh daily' : 'Auto-refresh daily', fn: async () => { p.autoRefresh = !p.autoRefresh; await save(p); toast(p.autoRefresh ? 'Will refresh once a day (your edits are replaced)' : 'Auto-refresh off'); } },
+    real && p.sourceUrl && p.kind !== 'xtream' && { label: p.autoRefresh !== false ? '✓ Auto-refresh daily' : 'Auto-refresh daily', fn: async () => { p.autoRefresh = p.autoRefresh === false; await save(p); toast(p.autoRefresh ? 'Will refresh once a day (your edits are replaced)' : 'Auto-refresh off'); } },
     viewing && !live && { label: `Reload ${state.tab} from provider`, fn: () => { vodCache.delete(vodKey(p, state.tab)); applyFilter(); loadVod(p, state.tab, { force: true }); } },
     real && { label: `Keep: ${{ live: 'Live TV only', vod: 'VOD only' }[p.content] || 'Live TV and VOD'}…`, fn: () => menu('Keep in this playlist', [
       ['both', 'Live TV and VOD'], ['live', 'Live TV only'], ['vod', 'VOD only (movies & series)'],
@@ -4595,9 +4604,23 @@ async function refreshSource(p, { silent = false } = {}) {
   }
 }
 
+// Everything stays current without anyone pressing Update: on opening the app, every 30 minutes while it's open and
+// in iOS background refresh. Playlists re-download once a day; the guide is re-asked for the channels you use (and
+// the guide group on screen) once its data is 3 hours old. Nothing runs while a channel or film is playing.
+let freshAt = 0;
+function keepFresh() {
+  if (state.playing || Date.now() - freshAt < 10 * MINUTE) return;
+  freshAt = Date.now();
+  backgroundRefresh().catch(() => {});
+  const mine = [...state.favorites, ...state.recents].filter(c => c?.url && isLiveChannel(c)).slice(0, 200);
+  const onScreen = location.hash.startsWith('#/guide') && guideState ? guideState.channels.slice(0, 300) : [];
+  ensureGuide([...mine, ...onScreen]);
+}
+
 async function backgroundRefresh() {
   for (const p of state.playlists) {
-    const auto = p.kind === 'xtream' || (p.autoRefresh && p.sourceUrl);
+    // Playlist links refresh daily unless you turned that off for one (Xtream logins always do).
+    const auto = p.kind === 'xtream' || (p.autoRefresh !== false && p.sourceUrl);
     if (auto && Date.now() - (p.refreshedAt || p.createdAt) > DAY) await refreshSource(p, { silent: true });
     maybeUpdateGuide(p);
   }

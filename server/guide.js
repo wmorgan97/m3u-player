@@ -15,7 +15,7 @@ import { readBody } from './sync.js';
 
 const PROXY_KEY = process.env.PROXY_KEY || '';
 const HOUR = 3600_000;
-const REFRESH = 6 * HOUR;
+const REFRESH = 3 * HOUR;   // the guide source is re-read every 3 hours (late schedule changes, new events)
 const DIR = fileURLToPath(new URL('../data/', import.meta.url));
 const URLS_FILE = join(DIR, 'guide-urls.json');
 const indexes = new Map();   // urls key -> { at, chans: Map(id -> JSON string), names, job }
