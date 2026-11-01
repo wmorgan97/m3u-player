@@ -8,7 +8,7 @@ import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
 import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport, importance } from './sports.js';
-import { fixtureTitle, isOn as fxIsOn, followMatches } from './fixtures.js';
+import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup } from './fixtures.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -3679,13 +3679,30 @@ const crestSrc = u => /^https:\/\/a\.espncdn\.com\/i\//.test(u || '') ? `https:/
 const crest = t => t?.crest ? `<img class="sp-crest" src="${esc(crestSrc(t.crest))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<span class="sp-crest"></span>';
 const fxBadge = f => `<span class="sp-crest sp-badge">${esc(f.sport === 'f1' ? 'F1' : f.sport === 'ufc' ? 'UFC' : (f.comp || '?').slice(0, 2))}</span>`;
 // One shown item, fixture or guide programme: { f?, channel, prog, live, title, comp, sport, start, rank }.
+// Club / match channels from the playlist's team groups ("UK| CHAMPIONSHIP PPV", "UK| SPFL PPV", …), for games no main
+// channel lists: a Championship game with no Sky slot is usually on the home club's own channel.
+const teamChanCache = new WeakMap();
+function teamChannels() {
+  const out = [];
+  for (const p of sportsSources()) {
+    const chans = sportsChannels(p);
+    let l = teamChanCache.get(chans);
+    if (!l) { l = chans.filter(c => isTeamChannelGroup(c.group)); teamChanCache.set(chans, l); }
+    out.push(...l);
+  }
+  return out;
+}
 function fxItem(f) {
   const best = fxHub.on.get(f.id)?.[0];
+  if (!best && f.home && f.sport === 'football') {
+    const tc = teamChannelFor(f, teamChannels());
+    if (tc) return { f, channel: tc.channel, prog: [f.start, f.end, fixtureTitle(f), `${f.comp || ''} — on the ${tc.side === 'match' ? 'match' : 'club'} channel`], live: false, teamCh: true, title: fixtureTitle(f), comp: f.comp, sport: f.sport, start: f.start, rank: f.compRank };
+  }
   return { f, channel: best?.channel || null, prog: best?.prog || null, live: !!best?.live, title: fixtureTitle(f), comp: f.comp, sport: f.sport, start: f.start, rank: f.compRank };
 }
 const guideItem = it => ({ ...it, start: it.prog[0], rank: importance(it) });
 // Until the channels are known, nothing (not a flash of "Not on your channels").
-const fxWhere = it => it.channel ? `<span class="sp-on">On ${esc(channelLabel(it.channel.name))}</span>` : fxHub.chAt || !it.f ? '<span class="sp-off">Not on your channels</span>' : '';
+const fxWhere = it => it.channel ? `<span class="sp-on">On ${esc(it.teamCh ? channelLabel(it.channel.name).replace(/\s*\/\/.*$/, '').replace(/^.*\|\s*/, '') + ' channel' : channelLabel(it.channel.name))}</span>` : fxHub.chAt || !it.f ? '<span class="sp-off">Not on your channels</span>' : '';
 const fxLines = it => it.f?.home
   ? `<span class="sp-fx-team">${crest(it.f.home)}<span>${esc(fxName(it.f.home))}</span>${it.f.status !== 'scheduled' && it.f.home.score != null ? `<b>${esc(it.f.home.score)}</b>` : ''}</span>
      <span class="sp-fx-team">${crest(it.f.away)}<span>${esc(fxName(it.f.away))}</span>${it.f.status !== 'scheduled' && it.f.away.score != null ? `<b>${esc(it.f.away.score)}</b>` : ''}</span>`

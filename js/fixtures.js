@@ -252,3 +252,23 @@ export function matchChannels(fixtures, byHour) {
 export function sortFixtures(list) {
   return [...list].sort((a, b) => a.start - b.start || b.compRank - a.compRank || fixtureTitle(a).localeCompare(fixtureTitle(b)));
 }
+
+// ---------- team channels: the fallback when no main channel lists a game ----------
+// Providers carry a channel per club ("UK| CHAMPIONSHIP PPV": "Blackburn Rovers", "UK| SPFL PPV": "Celtic TV",
+// "UK| SERIE A TEAM PPV": "UK: SERIE A - AC MILAN 4K") or per match ("National League 4 | Barrow vs Eastleigh // …").
+const TEAM_GROUP = /\bppv\b|\bteam\b|\bclubs?\b/i;
+const CHANNEL_NOISE = / (?:uk|gb|serie a|la ?liga|premier league|efl|spfl|championship|league one|league two|4k|uhd|fhd|hd|sd|raw|ppv|tv|channel|official)\b/g;
+export const isTeamChannelGroup = g => TEAM_GROUP.test(g || '');
+const channelTeam = name => (` ${foldName(name)} `).replace(CHANNEL_NOISE, ' ').replace(/\s+/g, ' ').trim();
+/** The club's own channel for this fixture (home side first), or a channel named after the match itself. */
+export function teamChannelFor(f, chans) {
+  if (!f?.home || !f?.away || !chans?.length) return null;
+  const hv = teamVariants(f.home), av = teamVariants(f.away);
+  const named = side => chans.find(c => { const t = channelTeam(c.name); return t && side.some(v => v === t || v === t.replace(PREFIX, '').replace(SUFFIX, '')); });
+  const home = named(hv);
+  if (home) return { channel: home, side: 'home' };
+  const away = named(av);
+  if (away) return { channel: away, side: 'away' };
+  const match = chans.find(c => titleHasTeams(c.name, f.home, f.away, hv, av));
+  return match ? { channel: match, side: 'match' } : null;
+}
