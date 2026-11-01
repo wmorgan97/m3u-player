@@ -64,12 +64,12 @@ fun Modifier.restorable(key: String): Modifier {
  *  Focus never recomposes the card: the scale is a layer property and the frame is drawn, both read at draw time,
  *  so moving the highlight costs a redraw of two cards and nothing else. That is what makes it feel instant. */
 @Composable
-fun FocusCard(modifier: Modifier, scale: Float = 1.06f, restoreKey: String? = null, label: String = "", onLongClick: (() -> Unit)? = null, onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
+fun FocusCard(modifier: Modifier, scale: Float = 1.06f, restoreKey: String? = null, label: String = "", onLongClick: (() -> Unit)? = null, onFocus: (() -> Unit)? = null, onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
     val focused = remember { mutableStateOf(false) }
     val anim = remember { Animatable(1f) }
     LaunchedEffect(Unit) { snapshotFlow { focused.value }.collect { f -> anim.animateTo(if (f) scale else 1f, tween(110)) } }
     val stroke = with(LocalDensity.current) { 3.dp.toPx() }; val radius = with(LocalDensity.current) { Tv.radius.toPx() }
-    Box(modifier.let { if (restoreKey != null) it.restorable(restoreKey) else it }.onFocusChanged { focused.value = it.isFocused }
+    Box(modifier.let { if (restoreKey != null) it.restorable(restoreKey) else it }.onFocusChanged { focused.value = it.isFocused; if (it.isFocused) onFocus?.invoke() }
         .let { if (onLongClick != null) it.holdOk(onLongClick) else it }
         .onKeyEvent { e -> if (e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter)) { Nav.pending = restoreKey; onClick(); true } else false }
         .clearAndSetSemantics { contentDescription = label }   // one accessibility node per card (Button Mapper listens to every change)
@@ -122,10 +122,10 @@ fun Caption(title: String, sub: String?, width: Dp, label: String = title) = tra
 
 /** A poster (2:3) with its title and year underneath. */
 @Composable
-fun PosterCard(v: Vod, width: Dp = Tv.poster, rank: Int? = null, onLong: (() -> Unit)? = null, onClick: () -> Unit) = traced("PosterCard") {
-    val key = "${v.kind}:${v.id}:${rank ?: ""}:${width.value}"
+fun PosterCard(v: Vod, width: Dp = Tv.poster, rank: Int? = null, restoreKey: String? = null, onLong: (() -> Unit)? = null, onFocus: (() -> Unit)? = null, onClick: () -> Unit) = traced("PosterCard") {
+    val key = restoreKey ?: "${v.kind}:${v.id}:${rank ?: ""}:${width.value}"
     Column(Modifier.width(width)) {
-        FocusCard(Modifier.width(width).aspectRatio(2f / 3f), restoreKey = key, label = v.label, onLongClick = onLong, onClick = onClick) {
+        FocusCard(Modifier.width(width).aspectRatio(2f / 3f), restoreKey = key, label = v.label, onLongClick = onLong, onFocus = onFocus, onClick = onClick) {
             Box(Modifier.fillMaxSize()) {
                 Picture(Repo.img(v.poster, 300), Modifier.fillMaxSize()) {
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
@@ -147,9 +147,9 @@ fun PosterCard(v: Vod, width: Dp = Tv.poster, rank: Int? = null, onLong: (() -> 
 /** Continue watching / episodes: a 16:9 picture with a progress line, title and detail beneath. */
 @Composable
 fun WideCard(image: String?, title: String, sub: String, progress: Float?, width: Dp = Tv.wide, badge: String? = null, restoreKey: String? = null,
-             onLong: (() -> Unit)? = null, onClick: () -> Unit) {
+             onLong: (() -> Unit)? = null, onFocus: (() -> Unit)? = null, onClick: () -> Unit) {
     Column(Modifier.width(width)) {
-        FocusCard(Modifier.width(width).aspectRatio(16f / 9f), scale = 1.04f, restoreKey = restoreKey, label = title, onLongClick = onLong, onClick = onClick) {
+        FocusCard(Modifier.width(width).aspectRatio(16f / 9f), scale = 1.04f, restoreKey = restoreKey, label = title, onLongClick = onLong, onFocus = onFocus, onClick = onClick) {
             Box(Modifier.fillMaxSize()) {
                 Picture(Repo.img(image, 500), Modifier.fillMaxSize()) {
                     Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {

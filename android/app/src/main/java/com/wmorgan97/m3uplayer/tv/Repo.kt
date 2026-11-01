@@ -43,6 +43,8 @@ data class Vod(
     val backdrop: String = "",
     val overview: String = "",
     val copies: Int = 1,
+    val genres: List<String> = emptyList(),   // TMDB's, on titles matched to TMDB (trending, lists, genres)
+    val votes: Int = 0,                       // TMDB vote count: how much the rating can be trusted
 ) {
     val title get() = displayTitle(name)
     val label get() = if (year != null) "$title ($year)" else title
@@ -653,7 +655,9 @@ object Repo {
         return Vod(if (kind == "series") "series" else "movie", if (kind == "series") o.optLong("series_id") else o.optLong("stream_id"), name,
             o.optString(if (kind == "series") "cover" else "stream_icon"), cats[o.optString("category_id")] ?: "",
             o.optDouble("rating").takeIf { !it.isNaN() && it > 0 && it < 9.5 }, year, o.optString("container_extension").ifEmpty { "mp4" },
-            tm?.optString("backdrop") ?: "", tm?.optString("overview") ?: o.optString("plot"))
+            tm?.optString("backdrop") ?: "", tm?.optString("overview") ?: o.optString("plot"),
+            genres = tm?.optJSONArray("genres")?.let { g -> (0 until g.length()).map { g.optString(it) }.filter { it.isNotEmpty() } } ?: emptyList(),
+            votes = tm?.optInt("votes") ?: 0)
     }
     /** English groups only, one entry per title (the best copy), as on the other devices. */
     private fun tidy(list: List<Vod>): List<Vod> {

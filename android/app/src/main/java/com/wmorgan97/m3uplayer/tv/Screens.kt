@@ -63,116 +63,6 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
-// ---------- Home ----------
-
-@Composable
-fun HomeScreen(act: TvActivity) {
-    val refresh = act.refresh + Repo.version
-    val movies by produceState(Repo.cachedOverview("movies"), Repo.version) { if (value == null) value = runCatching { Repo.overview("movies") }.getOrNull() }
-    val series by produceState(Repo.cachedOverview("series"), Repo.version) { if (value == null) value = runCatching { Repo.overview("series") }.getOrNull() }
-    val cw = remember(refresh) { Repo.continueWatching() }
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    val live by produceState(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: value }
-    // Your channels: favourites and recent channels in one row, the ones you watch most and most lately first (it
-    // replaces the separate favourites and recents rows: the same logos twice, neither saying what's on).
-    val mine = remember(refresh, live) { yourChannels() }
-    val films = remember(refresh, live) { live?.let { filmChannels(it, mine) } ?: emptyList() }
-    val guideTick = Repo.guideVersion
-    // Only the guide of what Home shows: your channels and a dozen film channels (the guide cache skips any asked lately).
-    LaunchedEffect(mine, films) { if (mine.isNotEmpty() || films.isNotEmpty()) Repo.requestGuide(mine.take(40) + films) }
-    // The minute ticks for progress lines and "in 5 min": only the cards that show them redraw, not the page.
-    LaunchedEffect(Unit) { while (true) { val t = System.currentTimeMillis(); delay(60_000 - t % 60_000 + 250); HomeClock.now = System.currentTimeMillis() } }
-    var soon by remember { mutableStateOf<List<SoonItem>>(emptyList()) }
-    LaunchedEffect(mine, films) {
-        snapshotFlow { Triple(Repo.guideVersion, HomeClock.now / 60_000, Repo.version) }.conflate().collect {
-            val next = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { startingSoon(mine, films, System.currentTimeMillis()) }
-            if (next.map { it.key + it.why } != soon.map { it.key + it.why }) soon = next
-        }
-    }
-    val reminded = remember(refresh) { Repo.reminders.mapTo(HashSet()) { "${it.url}|${it.start}" } }
-    var info by remember { mutableStateOf<Pair<Channel, Programme>?>(null) }
-    var menuFor by remember { mutableStateOf<Progress?>(null) }
-    var chanMenu by remember { mutableStateOf<Channel?>(null) }
-    val scope = rememberCoroutineScope()
-    fun group(c: Channel): List<Channel> = Repo.live?.channels?.filter { it.group == c.group && c.group.isNotEmpty() }?.takeIf { it.contains(c) } ?: listOf(c)
-    // A card removed from a row hands the highlight to its neighbour (the next, else the one before); the row's last
-    // card hands it to the first card of the row below, so the remote never falls back to the menu.
-    fun firstKeyBelow(row: String): String? {
-        val rows = listOf("yc" to mine.firstOrNull()?.let { "yc:" + it.url }, "cw" to cw.firstOrNull()?.let { "cw:" + it.url },
-            "ss" to soon.firstOrNull()?.let { "ss:" + it.key },
-            "mv" to movies?.trending?.firstOrNull()?.let { "${it.kind}:${it.id}:1:${Tv.poster.value}" })
-        return rows.dropWhile { it.first != row }.drop(1).firstNotNullOfOrNull { it.second }
-    }
-    fun <T> handOff(list: List<T>, gone: T, row: String, key: (T) -> String) {
-        val i = list.indexOf(gone)
-        val k = (list.getOrNull(i + 1) ?: list.getOrNull(i - 1).takeIf { i > 0 })?.let(key) ?: firstKeyBelow(row)
-        Nav.restoreKey = k
-        scope.launch { delay(1500); if (Nav.restoreKey == k) Nav.restoreKey = null }   // never left waiting for a card that isn't built
-    }
-
-    LazyColumn(Modifier.fillMaxSize(), state = rememberPageState(), contentPadding = PaddingValues(bottom = 56.dp)) {
-        // Trending films and series alternate (#1 movie, #1 series, #2 movie, …), each ranked within its own kind.
-        item { Hero(act, run { val m = (movies?.trending ?: emptyList()).filter { it.backdrop.isNotEmpty() }.take(4); val sr = (series?.trending ?: emptyList()).filter { it.backdrop.isNotEmpty() }.take(4)
-            (0 until maxOf(m.size, sr.size)).flatMap { k -> listOfNotNull(m.getOrNull(k), sr.getOrNull(k)) } }, movies == null && series == null) }
-        // Live first: on the TV, getting back to live TV is the commonest thing to do, and what's on changes by the
-        // minute. Then your films and episodes, then what starts soon, then the catalogue. (Sport stays on its own
-        // Sports page, by choice: Home is for your channels, films and series.)
-        if (mine.isNotEmpty()) {
-            item(key = "yc-t") { RowTitle("Your channels") }
-            item(key = "yc") {
-                // One-line titles: a row of 20+ channels nearly always has one long title, and a whole row sized for it
-                // left a band of empty card under every other title. The full title is in the player's banner.
-                CardRow(mine, { it.url }) { c, i ->
-                    val minute = HomeClock.now / 60_000
-                    val now = remember(guideTick, c, minute) { Repo.nowNext(c).first }
-                    NowCard(c, now, now?.let { shortTitle(it.title) } ?: "No guide information", twoLines = false, restoreKey = "yc:" + c.url, onLong = { chanMenu = c }) { act.playLive(mine, i) }
-                }
-            }
-        }
-        if (cw.isNotEmpty()) {
-            item(key = "cw-t") { RowTitle("Continue watching") }
-            item(key = "cw") {
-                CardRow(cw, key = { it.url }) { p, _ ->
-                    val it = p.item
-                    WideCard(it.optString("logo"), progressTitle(it), "${clock((p.d - p.t).toLong())} left", (p.t / p.d).toFloat(), restoreKey = "cw:" + p.url,
-                        badge = if (it.optString("kind") == "episode") "EPISODE" else null, onLong = { menuFor = p }) { resume(act, p) }
-                }
-            }
-        }
-        if (soon.isNotEmpty()) {
-            item(key = "ss-t") { RowTitle("Starting soon", "Next 2 hours") }
-            item(key = "ss") {
-                val two = anyTwoLines(remember(soon) { soon.map { it.p.title.replace(Regex("""\s*\((19|20)\d\d\)\s*$"""), "") } })
-                CardRow(soon, { it.key }) { s, _ -> SoonCard(s, s.key in reminded, twoLines = two, restoreKey = "ss:" + s.key) { info = s.c to s.p } }
-            }
-        }
-        val m = movies; val s = series
-        if (m == null) { item { SkeletonTitle() }; item { SkeletonRow() } }
-        else {
-            if (m.trending.isNotEmpty()) { item { RowTitle("Top 10 movies this week", "from TMDB") }; item { CardRow(m.trending.take(10), { it.id }) { v, i -> PosterCard(v, rank = i + 1) { act.go(Screen.Details(v)) } } } }
-            if (m.top.isNotEmpty()) { item { RowTitle("Popular movies") }; item { CardRow(m.top.take(30), { it.id }) { v, _ -> PosterCard(v) { act.go(Screen.Details(v)) } } } }
-            if (m.fresh.isNotEmpty()) { item { RowTitle("New movies") }; item { CardRow(m.fresh.take(30), { it.id }) { v, _ -> PosterCard(v) { act.go(Screen.Details(v)) } } } }
-        }
-        if (s == null) { item { SkeletonTitle() }; item { SkeletonRow() } }
-        else {
-            if (s.trending.isNotEmpty()) { item { RowTitle("Top 10 series this week", "from TMDB") }; item { CardRow(s.trending.take(10), { it.id }) { v, i -> PosterCard(v, rank = i + 1) { act.go(Screen.Details(v)) } } } }
-            if (s.top.isNotEmpty()) { item { RowTitle("Popular series") }; item { CardRow(s.top.take(30), { it.id }) { v, _ -> PosterCard(v) { act.go(Screen.Details(v)) } } } }
-            if (s.fresh.isNotEmpty()) { item { RowTitle("New series") }; item { CardRow(s.fresh.take(30), { it.id }) { v, _ -> PosterCard(v) { act.go(Screen.Details(v)) } } } }
-        }
-    }
-
-    menuFor?.let { p ->
-        Options(progressTitle(p.item), listOf(
-            "Resume" to { menuFor = null; resume(act, p) },
-            "Start over" to { menuFor = null; resume(act, p, fromStart = true) },
-            "Remove from Continue watching" to { menuFor = null; handOff(cw, p, "cw") { "cw:" + it.url }; scope.launch { Repo.saveProgress(p.url, p.t, p.d, p.item, hide = true); act.refresh++ } },
-        )) { menuFor = null }
-    }
-    // Removing a favourite (that isn't also a recent channel) or hiding a channel takes it out of the row.
-    chanMenu?.let { c -> ChannelOptions(act, c, onRemove = { what -> if (what == "hide" || Repo.recentChannels().none { it.optString("url") == c.url }) handOff(mine, c, "yc") { "yc:" + it.url } }) { chanMenu = null } }
-    info?.let { (c, p) -> ProgrammeDialog(act, c, p, System.currentTimeMillis(), group(c)) { info = null } }
-}
-
 /** A row of channel cards with what's on now (favourites, recent). */
 @Composable
 fun ChannelRowCards(act: TvActivity, all: List<Channel>, tick: Int, keyPrefix: String? = null, onLong: (Channel) -> Unit) {
@@ -204,7 +94,7 @@ fun progressTitle(it: JSONObject): String {
 fun liveFromSync(o: JSONObject): Channel = Repo.channelByUrl(o.optString("url"))
     ?: Channel(o.optString("name"), o.optString("url"), o.optString("group"), o.optString("logo"), o.optString("tvgId"), "", 0)
 
-private fun resume(act: TvActivity, p: Progress, fromStart: Boolean = false) {
+fun resume(act: TvActivity, p: Progress, fromStart: Boolean = false) {
     val it = p.item
     val title = progressTitle(it)
     val item = JSONObject().put("url", p.url).put("title", title).put("subtitle", if (it.optString("kind") == "episode") epTitle(it.optString("name")) else "")
@@ -661,7 +551,7 @@ private fun MoreLikeThis(act: TvActivity, items: List<Vod>) {
 }
 
 /** The episode to start: the one you were part-way through, else the one after the last you finished, else the first. */
-private fun nextEpisode(all: Map<Int, List<Episode>>): Pair<Episode, Double>? {
+fun nextEpisode(all: Map<Int, List<Episode>>): Pair<Episode, Double>? {
     val flat = all.values.flatten()
     if (flat.isEmpty()) return null
     val prog = flat.mapNotNull { e -> Repo.episodeUrl(e)?.let { Repo.progressFor(it) }?.let { e to it } }
@@ -671,7 +561,7 @@ private fun nextEpisode(all: Map<Int, List<Episode>>): Pair<Episode, Double>? {
     return (flat.getOrNull(i + 1) ?: latest.first) to 0.0
 }
 
-private fun playEpisode(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>, e: Episode, start: Double) {
+fun playEpisode(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>, e: Episode, start: Double) {
     val season = all[e.season] ?: listOf(e)
     val items = season.map { ep -> episodeItem(show, ep, Repo.episodeUrl(ep) ?: "", if (ep.id == e.id) start else 0.0) }
     act.play(items, season.indexOfFirst { it.id == e.id }.coerceAtLeast(0))
