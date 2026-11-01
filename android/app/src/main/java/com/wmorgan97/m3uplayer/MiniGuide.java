@@ -295,7 +295,7 @@ final class MiniGuide extends LinearLayout {
         t.root.setElevation(focused ? dp(8) : 0);
         String logo = r.optString("a", "");
         Object tag = t.logo.getTag();
-        if (!logo.equals(tag == null ? "" : tag)) {   // (a tile keeps its logo box even without a logo: the row stays even)
+        if (tag == null || !logo.equals(tag)) {   // (null: never bound — a channel without a logo still needs its initials)   // (a tile keeps its logo box even without a logo: the row stays even)
             t.initials.setText(initials(r.optString("t")));
             if (logo.isEmpty()) { t.logo.setTag(""); t.logo.setImageDrawable(null); t.logo.setVisibility(VISIBLE); }
             else PlayerActivity.Logos.show(t.logo, logo, dp(110), dp(26));   // (its visibility drives the initials)

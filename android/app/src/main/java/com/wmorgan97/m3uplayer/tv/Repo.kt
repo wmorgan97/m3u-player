@@ -369,7 +369,7 @@ object Repo {
         }
         return out.sortedByDescending { it.at }
     }
-    fun continueWatching() = progress().filter { !it.done && it.t > 30 && !it.item.optBoolean("hidden") && it.item.optString("url").isNotEmpty() }.take(20)
+    fun continueWatching() = progress().filter { !it.done && it.t > 5 && !it.item.optBoolean("hidden") && it.item.optString("url").isNotEmpty() }.take(20)
     fun progressFor(url: String): Progress? = progress().firstOrNull { it.url == url }
 
     fun recentChannels(): List<JSONObject> {

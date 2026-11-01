@@ -91,6 +91,10 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
     LaunchedEffect(eps) { delay(120); runCatching { playFocus.requestFocus() } }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    // Arriving: the header rises 8 dp and fades in over durMed (once; coming back from the player it's simply there).
+    var entered by rememberSaveable(v.id) { mutableStateOf(false) }
+    val enter = remember { androidx.compose.animation.core.Animatable(if (entered) 1f else 0f) }
+    LaunchedEffect(Unit) { if (!entered) { entered = true; enter.animateTo(1f, androidx.compose.animation.core.tween(Tv.durMed, easing = Tv.easeEnter)) } }
     var season by rememberSaveable(v.id) { mutableStateOf<Int?>(null) }   // null: the season you're watching
     // The season on screen, with TMDB's plots and sharp stills merged in once they arrive (same Episode ids, so play works).
     // TMDB's details are kept with the season they belong to: a season switch never shows the last season's plots.
@@ -101,22 +105,24 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
     val multiSeason = (merged?.size ?: 0) > 1
     val hasEpisodes = merged?.get(shownSeason)?.isNotEmpty() == true
     Box(Modifier.fillMaxSize()) {
-        if (backdrop.isNotEmpty()) Picture(backdrop, Modifier.fillMaxSize())
-        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0xFC0E1014), Color(0xE60E1014), Color(0x800E1014)))))
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xF50E1014)), startY = 250f)))
+        // The spotlight's backdrop (right-aligned, fading into the page): the art you opened it from carries over,
+        // already in memory, and TMDB's arrives with a short cross-fade when the row didn't know it.
+        CinematicBackdrop(backdrop, 500, Modifier.align(Alignment.TopEnd).fillMaxWidth(.74f).aspectRatio(16f / 9f))
         CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides CenteredBringIntoView) {
         // Overscan-safe on all sides: 48dp left/right, 36dp top, 40dp bottom (5% of 960x540dp is 48 x 27).
         LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = Tv.margin, end = Tv.margin, top = 36.dp, bottom = 40.dp)) {
             item(key = "head") {
                 // Back on the buttons: the page returns to the top (the episodes slide the header away, Apple TV style).
-                Row(Modifier.onFocusChanged { if (it.hasFocus && listState.firstVisibleItemIndex > 0) scope.launch { listState.animateScrollToItem(0) } }) {
+                Row(Modifier.graphicsLayer { alpha = enter.value; translationY = (1f - enter.value) * 8.dp.toPx() }.onFocusChanged { if (it.hasFocus && listState.firstVisibleItemIndex > 0) scope.launch { listState.animateScrollToItem(0) } }) {
                     Picture(Repo.img(v.poster, 300), Modifier.width(150.dp).aspectRatio(2f / 3f).clip(Tv.shape)) {
                         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
                             Text(v.title, Modifier.padding(10.dp), color = Tv.text2, fontSize = Tv.caption, fontWeight = FontWeight.SemiBold, maxLines = 4, overflow = TextOverflow.Ellipsis)
                         }
                     }
                     Spacer(Modifier.width(28.dp))
-                    Column(Modifier.weight(1f).padding(end = 64.dp)) {
+                    Column(Modifier.weight(1f).widthIn(max = 560.dp).padding(end = 64.dp)) {
+                        Text(if (v.kind == "series") "SERIES" else "MOVIE", fontSize = Tv.label, color = Tv.muted, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, maxLines = 1,
+                            modifier = Modifier.padding(bottom = 4.dp))
                         Text(v.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine)
                         info?.optString("tagline")?.takeIf { it.isNotBlank() }?.let { Text(it, fontSize = Tv.bodySmall, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp)) }
                         Spacer(Modifier.height(10.dp))
@@ -127,7 +133,7 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
                             v.year?.let { Tag("$it") }
                             info?.optInt("runtime")?.takeIf { it > 0 }?.let { Tag(runtime(it)) }
                             vote?.let { Tag("★ %.1f".format(it), color = Tv.star) }
-                            quality(v.name, v.group)?.let { Tag(it) }
+                            qualityTags(v.name, v.group).forEach { QualityTag(it) }
                             if (v.copies > 1) Tag("${v.copies} versions")
                             merged?.takeIf { it.size > 1 }?.let { Tag("${it.size} seasons") }
                             genres.take(3).forEach { Tag(it, color = Tv.muted, bg = Color(0x14FFFFFF)) }
@@ -144,12 +150,14 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
                         Spacer(Modifier.height(18.dp))
                         if (v.kind == "movie") {
                             val url = Repo.movieUrl(v) ?: ""
-                            val p = remember(refresh) { Repo.progressFor(url)?.takeIf { !it.done && it.t > 30 } }
+                            // The resume rule: started (past 5 s) and not finished carries on; finished plays from the start.
+                            val p = remember(refresh) { Repo.progressFor(url)?.takeIf { resumePoint(it) != null } }
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                TvButton(if (p != null) "Resume  ·  ${clock((p.d - p.t).toLong())} left" else "Play", { act.play(listOf(movieItem(v, url, p?.t ?: 0.0)), 0) },
+                                TvButton(if (p != null) "Resume  ·  ${clock((p.d - p.t).toLong().coerceAtLeast(0))} left" else "Play", { act.play(listOf(movieItem(v, url, p?.t ?: 0.0)), 0) },
                                     Modifier.focusRequester(playFocus), icon = Icons.Default.PlayArrow, style = TvButtonStyle.Primary)
                                 if (p != null) TvButton("Start over", { act.play(listOf(movieItem(v, url, 0.0)), 0) }, icon = Icons.Default.Replay)
                             }
+                            if (p != null && p.d > 0) TvProgress((p.t / p.d).toFloat().coerceIn(0f, 1f), Modifier.padding(top = 12.dp).width(240.dp))
                         } else {
                             val all = eps
                             val next = remember(all, refresh) { all?.let { nextEpisode(it) } }
@@ -206,7 +214,7 @@ fun nextEpisode(all: Map<Int, List<Episode>>): Pair<Episode, Double>? {
     if (flat.isEmpty()) return null
     val prog = flat.mapNotNull { e -> Repo.episodeUrl(e)?.let { Repo.progressFor(it) }?.let { e to it } }
     val latest = prog.maxByOrNull { it.second.at } ?: return flat.first() to 0.0
-    if (!latest.second.done && latest.second.t > 30) return latest.first to latest.second.t
+    resumePoint(latest.second)?.let { return latest.first to it }
     val i = flat.indexOf(latest.first)
     return (flat.getOrNull(i + 1) ?: latest.first) to 0.0
 }
@@ -286,7 +294,7 @@ private fun EpisodeSkeleton() {
 private fun EpisodeRow(act: TvActivity, show: Vod, all: Map<Int, List<Episode>>, e: Episode, art: String, modifier: Modifier = Modifier) {
     val p = remember(act.refresh) { Repo.episodeUrl(e)?.let { Repo.progressFor(it) } }
     val watched = p?.done == true
-    val partial = p?.takeIf { !it.done && it.t > 30 && it.d > 0 }
+    val partial = p?.takeIf { resumePoint(it) != null && it.d > 0 }
     val meta = listOfNotNull("Episode ${e.num}", epMinutes(e.duration)?.let { runtime(it) },
         if (watched) "Watched" else partial?.let { "${runtime(((it.d - it.t) / 60).toInt().coerceAtLeast(1))} left" }).joinToString("  ·  ")
     FocusCard(modifier.padding(top = 8.dp).fillMaxWidth(.86f).height(EP_H), scale = Tv.scaleLarge, restoreKey = "ep:" + e.id, label = "Episode ${e.num}, ${e.title}",

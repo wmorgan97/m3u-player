@@ -62,6 +62,14 @@ import org.json.JSONObject;
 public class PlayerActivity extends AppCompatActivity {
     public static PlayerActivity current;
 
+    // The new player interface (Compose, tv/player/*): null = the classic one built in buildUi. It is only ever an
+    // overlay: the engine, zapping, LiveBuffer and the keys stay here (see setupNewUi). The classic views stay built
+    // either way; with the new interface on they are simply never shown.
+    private com.wmorgan97.m3uplayer.tv.player.PlayerUi cui;
+    private View uiView;
+    private FrameLayout rootView;
+    private com.wmorgan97.m3uplayer.tv.player.FrameRateMatcher frm;
+
     private ExoPlayer player;
     private Player.Listener listener;
     private PlayerView playerView;
@@ -89,8 +97,9 @@ public class PlayerActivity extends AppCompatActivity {
     private final Object RETRY = new Object(), STALL = new Object();   // Handler tokens, so each kind can be cancelled as a group
     // A wait past 400ms: a small ring in the banner while the banner is up (a zap), else the spinner in the middle.
     private final Runnable spinOn = () -> {
-        boolean banner = this.infoBar.getVisibility() == View.VISIBLE;
-        this.infoSpin.setVisibility(banner ? View.VISIBLE : View.GONE);
+        boolean banner = bannerShown();
+        if (cui != null) cui.setTuning(banner);
+        else this.infoSpin.setVisibility(banner ? View.VISIBLE : View.GONE);
         this.spinner.setVisibility(banner ? View.GONE : View.VISIBLE);
     };
     private final Runnable startRun = () -> begin(token);
@@ -122,10 +131,10 @@ public class PlayerActivity extends AppCompatActivity {
     private int fpsN; private long fpsLast = -1;
     private final androidx.media3.exoplayer.video.VideoFrameMetadataListener fpsMeter = (pts, release, fmt, mf) -> {
         if (measuredFps > 0) return;
-        if (fmt != null && fmt.frameRate > 0) { measuredFps = fmt.frameRate; android.util.Log.i("M3U", "frame rate stated: " + measuredFps); ui.post(this::updateBadges); return; }
+        if (fmt != null && fmt.frameRate > 0) { measuredFps = fmt.frameRate; android.util.Log.i("M3U", "frame rate stated: " + measuredFps); ui.post(this::updateBadges); ui.post(this::armFrameMatch); return; }
         if (fpsLast >= 0 && pts > fpsLast && pts - fpsLast < 200_000 && fpsN < fpsGaps.length) fpsGaps[fpsN++] = pts - fpsLast;
         fpsLast = pts;
-        if (fpsN == fpsGaps.length) { long[] c = fpsGaps.clone(); java.util.Arrays.sort(c); measuredFps = 1e6f / c[c.length / 2]; android.util.Log.i("M3U", "frame rate measured: " + measuredFps); ui.post(this::updateBadges); }
+        if (fpsN == fpsGaps.length) { long[] c = fpsGaps.clone(); java.util.Arrays.sort(c); measuredFps = 1e6f / c[c.length / 2]; android.util.Log.i("M3U", "frame rate measured: " + measuredFps); ui.post(this::updateBadges); ui.post(this::armFrameMatch); }
     };
     private void resetFps() { measuredFps = 0; fpsN = 0; fpsLast = -1; }
 
@@ -141,7 +150,14 @@ public class PlayerActivity extends AppCompatActivity {
     private final Runnable shiftOff = () -> { if (player == null || !player.getPlayWhenReady()) return; shiftBar.setVisibility(View.GONE); syncBehindPill(); };
     private final Runnable shiftTick = new Runnable() { public void run() { if (shiftBar.getVisibility() != View.VISIBLE) return; updateShiftBar(); ui.postDelayed(this, 500); } };
     private final Runnable infoOff = () -> {
-        infoBar.setVisibility(View.GONE);
+        if (cui != null) {
+            boolean tuning = cui.getTuning() && (state == S_PREPARING || state == S_BUFFERING);
+            cui.hideBanner();
+            if (tuning) this.spinner.setVisibility(View.VISIBLE);   // still tuning: the wait moves to the middle
+            syncBehindPill();
+            return;
+        }
+        hideBannerNow();
         if (this.infoSpin.getVisibility() == View.VISIBLE) { this.infoSpin.setVisibility(View.GONE); this.spinner.setVisibility(View.VISIBLE); }   // still tuning: the wait moves to the middle
         syncBehindPill();
     };
@@ -153,7 +169,7 @@ public class PlayerActivity extends AppCompatActivity {
     private ImageButton playBtn, prevBtn, nextBtn, backBtn, fwdBtn, audioBtn, subsBtn, aspectBtn, infoBtn, listBtn, sleepBtn;
     private TextView noticeView;          // reminders: "Starting now on …  ·  OK to watch"
     private Runnable noticeAction;
-    private final Runnable noticeOff = () -> { noticeView.setVisibility(View.GONE); noticeAction = null; };
+    private final Runnable noticeOff = () -> { noticeView.setVisibility(View.GONE); noticeAction = null; if (cui != null) cui.setNotice(null); };
     private long sleepAt = 0;             // sleep timer: when playback stops (0 = off)
     private final Runnable sleepRun = () -> { if (player != null) player.pause(); finish(); };
     private int aspect = 0;
@@ -162,8 +178,8 @@ public class PlayerActivity extends AppCompatActivity {
 
     private final Runnable hideRun = this::hideOverlay;
     private final Runnable tick = new Runnable() { public void run() { if (player == null) return; onTick(); ui.postDelayed(this, 1000); } };
-    private final Runnable commitSeek = () -> { if (pendingSeek >= 0 && player != null) { player.seekTo(pendingSeek); pendingSeek = -1; } };
-    private final Runnable hudOff = () -> hud.setVisibility(View.GONE);
+    private final Runnable commitSeek = () -> { if (pendingSeek >= 0 && player != null) { player.seekTo(pendingSeek); pendingSeek = -1; } if (cui != null) { cui.setSeekTo(-1); pushTick(); } };
+    private final Runnable hudOff = () -> { hud.setVisibility(View.GONE); if (cui != null) cui.setHud(null); };
     private String zapDigits = "";
     private final Runnable zapRun = () -> {
         if (!zapDigits.isEmpty()) { zapKeyAt = android.os.SystemClock.uptimeMillis(); send("zap", "num", Integer.parseInt(zapDigits)); }   // only digits 0-9 go in, at most 4: always parses
@@ -177,8 +193,12 @@ public class PlayerActivity extends AppCompatActivity {
         LiveBuffer.wipe(this);   // a recording left by a crash
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | WindowManager.LayoutParams.FLAG_FULLSCREEN);
         buildUi();
+        setupNewUi();
+        frm = new com.wmorgan97.m3uplayer.tv.player.FrameRateMatcher(this);
+        frm.setEnabled(com.wmorgan97.m3uplayer.tv.player.FrameRateMatcher.enabled(this));
         player = PlayerHolder.take(this);   // built ahead of time while you browse, so the player screen opens with it ready
         runningUrl = PlayerHolder.takeHandedUrl();   // or the preview's player, already playing this channel
+        android.util.Log.i("M3U", "player screen: player @" + Integer.toHexString(System.identityHashCode(player)) + (runningUrl != null ? " handed over from the preview, already playing" : "") + (cui != null ? " [new interface]" : " [classic interface]"));
         if (runningUrl != null) attachWhenSurfaceReady(); else playerView.setPlayer(player);
         ring = LiveBuffer.boundTo(player);   // the preview's player may be playing a channel through its buffer already
         player.setVideoFrameMetadataListener(fpsMeter);
@@ -192,6 +212,7 @@ public class PlayerActivity extends AppCompatActivity {
                 frameShown = true;
                 scrim(false);
                 updateBadges();
+                armFrameMatch();
                 if (state == S_FAILED) return;
                 setState(player.getPlaybackState() == Player.STATE_READY ? S_PLAYING : S_BUFFERING);
             }
@@ -219,7 +240,8 @@ public class PlayerActivity extends AppCompatActivity {
                     android.util.Log.i("M3U", "playing in " + (now - loadUp) + "ms" + (zapKeyAt > 0 ? " (key to playing " + (now - zapKeyAt) + "ms)" : ""));
                 }
                 playBtn.setImageResource(playing ? androidx.media3.ui.R.drawable.exo_icon_pause : androidx.media3.ui.R.drawable.exo_icon_play);
-                if (!playing && overlay.getVisibility() == View.VISIBLE) ui.removeCallbacks(hideRun);
+                if (cui != null) cui.setPlaying(playing);
+                if (!playing && controlsShown()) ui.removeCallbacks(hideRun);
             }
             @Override public void onVideoSizeChanged(VideoSize size) { videoW = size.width; videoH = size.height; if (state == S_PLAYING) updateBadge(videoW, videoH); updateBadges(); }
             @Override public void onTracksChanged(Tracks t) { updateBadges(); }
@@ -282,8 +304,8 @@ public class PlayerActivity extends AppCompatActivity {
         ui.removeCallbacksAndMessages(STALL);
         hideNext(false);
         creditsDismissed = false;
-        if (channelList != null) channelList.setVisibility(View.GONE);
-        errorPanel.setVisibility(View.GONE);
+        closeChannels();
+        hideError();
         frameShown = false;
         videoW = videoH = 0;
         if (!same) resetFps();
@@ -298,6 +320,8 @@ public class PlayerActivity extends AppCompatActivity {
         prevBtn.setAlpha(next.optBoolean("hasPrev") ? 1f : .35f);
         nextBtn.setAlpha(next.optBoolean("hasNext") ? 1f : .35f);
         listBtn.setVisibility(list().length() > 1 ? View.VISIBLE : View.GONE);
+        ui.removeCallbacks(frameMatchRun);
+        if (cui != null) { cui.setInfo(null); pushMedia(); }
 
         // Holding up/down fires a load every ~150ms and the provider allows one connection: the first press starts at once,
         // but loads that follow quickly drop the stream and wait for the key to settle, so only the last channel connects.
@@ -399,7 +423,7 @@ public class PlayerActivity extends AppCompatActivity {
         state = s;
         ui.removeCallbacks(spinOn);
         if (s == S_PREPARING || s == S_BUFFERING) { if (spinner.getVisibility() != View.VISIBLE && infoSpin.getVisibility() != View.VISIBLE) ui.postDelayed(spinOn, SPINNER_DELAY_MS); }
-        else { spinner.setVisibility(View.GONE); infoSpin.setVisibility(View.GONE); }
+        else { spinner.setVisibility(View.GONE); infoSpin.setVisibility(View.GONE); if (cui != null) cui.setTuning(false); }
         if (s == S_PLAYING) {
             if (playingSince == 0) playingSince = android.os.SystemClock.uptimeMillis();
             updateBadge(videoW, videoH);
@@ -453,6 +477,8 @@ public class PlayerActivity extends AppCompatActivity {
         bindBanner(r.optString("n", ""), r.optString("t", ""), r.optString("a", ""), r.optString("nt", ""),
             r.optLong("ps", 0), r.optLong("pe", 0), r.optString("nx", ""), r.optString("s", ""));
         infoBadges.removeAllViews();   // nothing is known about a stream that isn't open yet
+        infoBadges.setTag(null);
+        if (cui != null) cui.setBadges(java.util.Collections.emptyList());
     }
 
     private boolean guideStale() {
@@ -462,6 +488,7 @@ public class PlayerActivity extends AppCompatActivity {
 
     private void bindBanner(String num, String name, String art, String nowTitle, long s, long e, String next, String fallback) {
         long now = System.currentTimeMillis();
+        if (cui != null) cui.showBanner(num, name, art, nowTitle, s, e, next, fallback);
         infoNum.setText(num);
         infoNum.setVisibility(num.isEmpty() ? View.GONE : View.VISIBLE);
         infoName.setText(name);
@@ -484,6 +511,7 @@ public class PlayerActivity extends AppCompatActivity {
         if (player == null || infoBadges == null) return;
         boolean known = frameShown || (state == S_PLAYING && videoW == 0);
         java.util.List<String> l = known ? StreamBadges.of(player.getVideoFormat(), videoW, videoH, measuredFps, player.getAudioFormat()) : java.util.Collections.emptyList();
+        if (cui != null) cui.setBadges(l);
         StringBuilder key = new StringBuilder(); for (String b : l) key.append(b).append('|');
         if (key.toString().equals(infoBadges.getTag())) return;
         infoBadges.setTag(key.toString());
@@ -571,17 +599,17 @@ public class PlayerActivity extends AppCompatActivity {
         ui.removeCallbacksAndMessages(RETRY);
         player.stop(); runningUrl = null;   // let go of the provider's one connection
         hideOverlay();
-        if (channelList != null) channelList.setVisibility(View.GONE);
+        closeChannels();
         errorText.setText(message);
         String last = item.optString("last", "");
         lastBtn.setVisibility(live && !last.isEmpty() ? View.VISIBLE : View.GONE);
-        errorPanel.setVisibility(View.VISIBLE);
-        retryBtn.requestFocus();
+        if (cui != null) { cui.setInfo(null); cui.hideBanner(); cui.showError(message, code, live && !last.isEmpty()); }
+        else { errorPanel.setVisibility(View.VISIBLE); retryBtn.requestFocus(); }
         send("error", "message", message + (code != null ? " (" + code + ")" : ""));
     }
 
     private void tryAgain() {
-        errorPanel.setVisibility(View.GONE);
+        hideError();
         lastLoadReq = 0;   // a deliberate retry, not a zap: start straight away
         load(item);
     }
@@ -620,6 +648,11 @@ public class PlayerActivity extends AppCompatActivity {
             if (left <= 60_000 && left > 59_000) showHud("Sleep in 1 minute");
         }
         clockLabel.setText(clk);
+        if (cui != null) {
+            cui.setClock(clockHm(System.currentTimeMillis()));
+            cui.setSleep(sleepAt > 0 ? Math.max(1, (Math.max(0, sleepAt - System.currentTimeMillis()) + 59_999) / 60_000) + " min" : "Off");
+            if (cui.getControls() || cui.getInfo() != null) pushTick();
+        }
         if (live) syncBehindPill();
         long t = Math.max(0, player.getCurrentPosition()), d = Math.max(0, player.getDuration());
         if (!live && d > 0) {
@@ -663,7 +696,7 @@ public class PlayerActivity extends AppCompatActivity {
             ui.removeCallbacks(startRun); ui.removeCallbacksAndMessages(RETRY); ui.removeCallbacksAndMessages(STALL);
             if (frameShown) scrim(true);
             player.stop(); closeRing(); runningUrl = null;
-            errorPanel.setVisibility(View.GONE);
+            hideError();
             setState(S_PREPARING);
         }
         JSONObject r = list().optJSONObject(zapTarget - item.optInt("listStart"));
@@ -677,7 +710,8 @@ public class PlayerActivity extends AppCompatActivity {
     private void revealBanner() {
         infoClock.setText(clockHm(System.currentTimeMillis()));
         shiftBar.setVisibility(View.GONE); behindPill.setVisibility(View.GONE);
-        infoBar.setVisibility(View.VISIBLE);
+        if (cui != null) cui.setClock(clockHm(System.currentTimeMillis())); else infoBar.setVisibility(View.VISIBLE);
+
         if (spinner.getVisibility() == View.VISIBLE) spinOn.run();   // (a wait still to come picks the banner by itself)
         ui.removeCallbacks(infoOff); ui.postDelayed(infoOff, 4500);
     }
@@ -699,6 +733,176 @@ public class PlayerActivity extends AppCompatActivity {
         badge.setVisibility(View.VISIBLE);
     }
 
+    // ---------- the new interface (tv/player) ----------
+    //
+    // Behind the "New player interface" setting (off by default). It is an overlay only: a ComposeView above the video
+    // and the classic views, fed from here (pushMedia / pushTick / the cui.set... calls) and sending its buttons back
+    // through onUiAction. If it can't be set up, the classic interface carries on (logged); if it crashed while drawing
+    // for the first time, the next player screen turns it off (PlayerBridge.crashedLastTime).
+
+    private void setupNewUi() {
+        if (!com.wmorgan97.m3uplayer.tv.player.PlayerUi.enabled(this)) return;
+        if (com.wmorgan97.m3uplayer.tv.player.PlayerBridge.crashedLastTime(this)) return;
+        String fail = getSharedPreferences("player", MODE_PRIVATE).getString("newUiFail", null);   // test hook only
+        try {
+            com.wmorgan97.m3uplayer.tv.player.PlayerUi u = new com.wmorgan97.m3uplayer.tv.player.PlayerUi(this::onUiAction);
+            View v = com.wmorgan97.m3uplayer.tv.player.PlayerBridge.host(this, u, fail);
+            rootView.addView(v, new FrameLayout.LayoutParams(-1, -1));
+            cui = u; uiView = v;
+            cui.setFrameMatch(com.wmorgan97.m3uplayer.tv.player.FrameRateMatcher.enabled(this));
+            cui.setAspect(ASPECTS[aspect]);
+            android.util.Log.i("M3U", "player ui: new interface");
+        } catch (Throwable t) {
+            cui = null; uiView = null;
+            android.util.Log.w("M3U", "player ui: new interface failed to start (" + t.getClass().getSimpleName() + "), using the classic one");
+        }
+    }
+
+    /** "Player interface: classic" from the More panel: the classic interface takes over at once (same stream). */
+    private void switchToClassic() {
+        com.wmorgan97.m3uplayer.tv.player.PlayerUi.setEnabled(this, false);
+        if (cui == null) return;
+        cui.closePanel(); cui.setInfo(null);
+        hideOverlay();
+        if (uiView != null) rootView.removeView(uiView);
+        cui = null; uiView = null;
+        android.util.Log.i("M3U", "player ui: switched to the classic interface (same player @" + Integer.toHexString(System.identityHashCode(player)) + ", " + (runningUrl != null ? "stream still open" : "no stream") + ", at " + player.getCurrentPosition() + "ms)");
+        showHud("Classic player interface");
+    }
+
+    /** A panel opened from the controls (or from a panel that was): Back returns to the controls. */
+    private boolean panelFromControls;
+    private void notePanelFrom() { panelFromControls = controlsShown() || (panelFromControls && cui != null && cui.modal()); }
+
+    private boolean controlsShown() { return cui != null ? cui.getControls() : overlay.getVisibility() == View.VISIBLE; }
+    private void controlsGone() { overlay.setVisibility(View.GONE); if (cui != null) cui.setControls(false); }
+    private boolean bannerShown() { return cui != null ? cui.getBanner() != null : infoBar.getVisibility() == View.VISIBLE; }
+    private void hideBannerNow() { infoBar.setVisibility(View.GONE); if (cui != null) cui.hideBanner(); }
+    private boolean panelShown() { return cui != null ? cui.modal() : channelList.getVisibility() == View.VISIBLE; }
+    private boolean errorShown() { return cui != null ? cui.getError() != null : errorPanel.getVisibility() == View.VISIBLE; }
+    private void hideError() { errorPanel.setVisibility(View.GONE); if (cui != null) cui.setError(null); }
+
+    /** What's playing, for the new interface's controls and info. */
+    private void pushMedia() {
+        if (cui == null) return;
+        cui.setMedia(new com.wmorgan97.m3uplayer.tv.player.PlayerUi.Media(live, item.optString("title", ""), item.optString("subtitle", ""),
+            item.optString("num", ""), item.optString("art", ""), item.optString("nowTitle", ""), item.optLong("nowStart", 0), item.optLong("nowEnd", 0),
+            item.optString("nextTitle", ""), item.optString("info", ""), item.optBoolean("hasPrev"), item.optBoolean("hasNext"), item.optBoolean("catchup"),
+            "Episodes".equals(item.optString("listTitle")), item.optString("listTitle", ""), list().length() > 1, item.optString("last", ""), item.optBoolean("fromLive")));
+        cui.setFavourite(live ? com.wmorgan97.m3uplayer.tv.player.PlayerBridge.isFavourite(favUrl()) : null);
+    }
+
+    /** The film's position, once a second, only while something on screen shows it. */
+    private void pushTick() {
+        if (cui == null || player == null) return;
+        cui.tick(Math.max(0, player.getCurrentPosition()), Math.max(0, player.getDuration()));
+        cui.setPlaying(player.getPlayWhenReady());
+    }
+
+    /** The Play next fill: sent when the countdown starts, pauses or resumes (it animates by itself in between). */
+    private Boolean countRunning;
+    private void pushCountdown() {
+        if (cui == null || player == null || nextMode == N_NONE) return;
+        boolean running = nextMode != N_STILL && (nextMode == N_END || player.getPlayWhenReady());
+        if (countRunning != null && countRunning == running) return;
+        countRunning = running;
+        float from = nextMode == N_STILL || countTotal <= 0 ? 0f : (float) (1 - Math.max(0, countLeft) / (double) countTotal);
+        cui.setCountdown(new com.wmorgan97.m3uplayer.tv.player.PlayerUi.Countdown(from, Math.max(0, countLeft), running));
+    }
+
+    /** The stream favourites know this channel by: the normal copy, when the 4K one is playing in its place. */
+    private String favUrl() {
+        return item.optBoolean("uhd") && !item.optString("fallback", "").isEmpty() ? item.optString("fallback") : item.optString("url");
+    }
+
+    private void toggleFavourite() {
+        if (!live) return;
+        String url = favUrl();
+        if (com.wmorgan97.m3uplayer.tv.player.PlayerBridge.isFavourite(url) == null) { showHud("Not a channel in your lists"); return; }
+        com.wmorgan97.m3uplayer.tv.player.PlayerBridge.toggleFavourite(this, url, fav -> {
+            showHud(fav ? "Added to favourites" : "Removed from favourites");
+            if (cui != null && url.equals(favUrl())) cui.setFavourite(fav);
+        });
+    }
+
+    private void lastChannel() {
+        if (!live || item.optString("last", "").isEmpty()) { showHud("No last channel yet"); return; }
+        zapKeyAt = android.os.SystemClock.uptimeMillis();
+        lastLoadReq = 0;
+        send("last");
+    }
+
+    private void openMore() {
+        if (cui == null) return;
+        notePanelFrom(); hideOverlay(); hideBannerNow(); cui.setInfo(null);
+        cui.setFrameMatch(frm != null && frm.getEnabled());
+        cui.showMore();
+        behindPill.setVisibility(View.GONE);
+    }
+
+    /** The new interface's buttons and rows. */
+    private void onUiAction(String what, long arg) {
+        if (player == null) return;
+        if (cui != null && cui.getControls()) bumpHide();
+        switch (what) {
+            case "play": togglePlay(); break;
+            case "seek": seekBy(arg); break;
+            case "channels": openChannels(); break;
+            case "list": showList(); break;
+            case "nextEpisode": step(1); break;
+            case "audio": pickTracks(C.TRACK_TYPE_AUDIO); break;
+            case "subs": pickTracks(C.TRACK_TYPE_TEXT); break;
+            case "fav": toggleFavourite(); break;
+            case "more": openMore(); break;
+            case "info": showInfo(); break;
+            case "aspect": aspectNext(); break;
+            case "sleep": pickSleep(); break;
+            case "last": if (cui != null) cui.closePanel(); hideError(); lastChannel(); break;
+            case "startOver": if (cui != null) cui.closePanel(); startOverAt(item.optInt("current"), 0); break;
+            case "goLive": if (cui != null) cui.closePanel(); if (item.optBoolean("fromLive")) send("goLive"); else goLive(); break;
+            case "jump": {
+                int abs = item.optInt("listStart") + (int) arg;
+                if (abs == item.optInt("current")) break;
+                zapKeyAt = android.os.SystemClock.uptimeMillis();
+                lastLoadReq = 0;
+                send("jump", "index", abs);
+                break;
+            }
+            case "frameMatch": {
+                boolean on = !(frm != null && frm.getEnabled());
+                com.wmorgan97.m3uplayer.tv.player.FrameRateMatcher.setEnabled(this, on);
+                if (frm != null) frm.setEnabled(on);
+                if (cui != null) cui.setFrameMatch(on);
+                showHud(on ? "Match frame rate: on" : "Match frame rate: off");
+                if (on) armFrameMatch();
+                break;
+            }
+            case "restart": if (cui != null) cui.closePanel(); pendingSeek = -1; player.seekTo(0); player.play(); showHud("From the beginning"); break;
+            case "classic": switchToClassic(); break;
+            case "retry": tryAgain(); break;
+            case "close": finish(); break;
+            case "nextPlay": goNext(); break;
+            case "nextOther": nextOtherPressed(); break;
+        }
+    }
+
+    // ---------- frame-rate matching (FrameRateMatcher) ----------
+
+    /** Asks for the display mode matching the stream once it has played steadily for 2 s: never mid-zap, never for a
+     *  channel you're passing through. */
+    private final Runnable frameMatchRun = () -> {
+        if (player == null || frm == null || !frm.getEnabled() || state != S_PLAYING || zapPending || stopped || isFinishing()) return;
+        if (android.os.SystemClock.uptimeMillis() - lastStepAt < 2000) { armFrameMatch(); return; }
+        Format v = player.getVideoFormat();
+        float fps = v != null && v.frameRate > 0 ? v.frameRate : measuredFps;
+        if (fps <= 0) return;   // not known yet: the fps meter calls again when it is
+        android.util.Log.i("M3U", "frame rate match: " + frm.request(fps));
+    };
+    private void armFrameMatch() {
+        ui.removeCallbacks(frameMatchRun);
+        if (frm != null && frm.getEnabled() && frameShown) ui.postDelayed(frameMatchRun, 2000);
+    }
+
     // ---------- remote ----------
 
     /** OK on any remote: the D-pad centre, a keyboard Enter, or a numpad Enter. Every OK check goes through here. */
@@ -709,6 +913,7 @@ public class PlayerActivity extends AppCompatActivity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
         int k = e.getKeyCode();
+        if (android.util.Log.isLoggable("M3UKeys", android.util.Log.DEBUG)) android.util.Log.d("M3UKeys", KeyEvent.keyCodeToString(k) + " " + e.getAction() + " r" + e.getRepeatCount() + " modal=" + (cui != null && cui.modal()));
         if (noticeAction != null && isOk(k)) {
             if (e.getAction() == KeyEvent.ACTION_UP) { Runnable r = noticeAction; noticeOff.run(); ui.removeCallbacks(noticeOff); r.run(); }
             return true;
@@ -726,8 +931,23 @@ public class PlayerActivity extends AppCompatActivity {
                 return true;
             }
         }
+        // New interface: a side panel or the info sheet has the remote (Compose moves the focus and presses). Back closes
+        // it; play/pause still works; the same key that opened it (Info, Menu, Captions, Guide) closes it again.
+        if (cui != null && cui.modal()) {
+            if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
+                if (k == KeyEvent.KEYCODE_BACK || k == KeyEvent.KEYCODE_INFO || k == KeyEvent.KEYCODE_MENU || k == KeyEvent.KEYCODE_CAPTIONS || k == KeyEvent.KEYCODE_GUIDE) {
+                    boolean toControls = panelFromControls && k == KeyEvent.KEYCODE_BACK;   // Back steps back to the controls it came from
+                    cui.back();
+                    if (!cui.modal()) { panelFromControls = false; if (toControls) showOverlay(); else syncBehindPill(); }
+                    return true;
+                }
+                if (k == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || k == KeyEvent.KEYCODE_MEDIA_PLAY || k == KeyEvent.KEYCODE_MEDIA_PAUSE) { togglePlay(); return true; }
+            }
+            if (k == KeyEvent.KEYCODE_BACK) return true;
+            return super.dispatchKeyEvent(e);
+        }
         if (e.getAction() == KeyEvent.ACTION_UP && live && isOk(k)
-            && errorPanel.getVisibility() != View.VISIBLE && overlay.getVisibility() != View.VISIBLE && channelList.getVisibility() != View.VISIBLE && nextMode == N_NONE) {
+            && !errorShown() && !controlsShown() && !panelShown() && nextMode == N_NONE) {
             if (okHeld) { okHeld = false; return true; }
             if (shiftBar.getVisibility() == View.VISIBLE) { togglePlay(); return true; }   // paused / rewinding: OK plays and pauses
             if (list().length() > 1) openGuide(); else showOverlay();
@@ -735,13 +955,26 @@ public class PlayerActivity extends AppCompatActivity {
         }
         if (e.getAction() == KeyEvent.ACTION_UP && okHeld && isOk(k)) { okHeld = false; return true; }
         if (e.getAction() != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(e);
-        boolean shown = overlay.getVisibility() == View.VISIBLE;
+        boolean shown = controlsShown();
         if (shown) bumpHide();
         if (live && k >= KeyEvent.KEYCODE_0 && k <= KeyEvent.KEYCODE_9) {
             zapDigits = (zapDigits + (k - KeyEvent.KEYCODE_0)); if (zapDigits.length() > 4) zapDigits = zapDigits.substring(zapDigits.length() - 4);
             showHud(zapDigits);
             ui.removeCallbacks(zapRun); ui.postDelayed(zapRun, 1300);
             return true;
+        }
+        // Remote keys for the things on the controls, where a remote has them (TV-style and universal remotes, CEC from
+        // the TV's own remote, keyboards). Not over the error panel or the next-episode card, which have their own keys.
+        if (nextMode == N_NONE && !errorShown() && e.getRepeatCount() == 0) {
+            switch (k) {
+                case KeyEvent.KEYCODE_INFO: showInfo(); return true;
+                case KeyEvent.KEYCODE_CAPTIONS: case KeyEvent.KEYCODE_PROG_YELLOW: pickTracks(C.TRACK_TYPE_TEXT); return true;
+                case KeyEvent.KEYCODE_PROG_GREEN: pickTracks(C.TRACK_TYPE_AUDIO); return true;
+                case KeyEvent.KEYCODE_MENU: if (cui != null) openMore(); else if (shown) hideOverlay(); else showOverlay(); return true;
+                case KeyEvent.KEYCODE_LAST_CHANNEL: case KeyEvent.KEYCODE_PROG_BLUE: lastChannel(); return true;
+                case KeyEvent.KEYCODE_PROG_RED: toggleFavourite(); return true;
+                case KeyEvent.KEYCODE_GUIDE: if (live && list().length() > 1) openChannels(); else showOverlay(); return true;
+            }
         }
         switch (k) {
             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE: case KeyEvent.KEYCODE_MEDIA_PLAY: case KeyEvent.KEYCODE_MEDIA_PAUSE:
@@ -752,7 +985,7 @@ public class PlayerActivity extends AppCompatActivity {
             case KeyEvent.KEYCODE_MEDIA_REWIND: if (live) shiftBy(-30_000, e.getRepeatCount() == 0); else seekBy(-30_000); return true;
         }
         // Error panel: left/right/OK work its buttons, Back closes the player, up/down still change channel.
-        if (errorPanel.getVisibility() == View.VISIBLE) {
+        if (errorShown()) {
             if (k == KeyEvent.KEYCODE_BACK) { finish(); return true; }
             if (live && (k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN)) {
                 if (e.getRepeatCount() == 0 || e.getRepeatCount() % 3 == 0) step(k == KeyEvent.KEYCODE_DPAD_UP ? -1 : 1);
@@ -763,23 +996,24 @@ public class PlayerActivity extends AppCompatActivity {
         // Next-episode card: left/right between its two buttons, OK presses, Back = Watch credits / Cancel. Nothing else leaks through.
         if (nextMode != N_NONE) {
             if (k == KeyEvent.KEYCODE_BACK) { nextBack(); return true; }
+            if (cui != null) return super.dispatchKeyEvent(e);   // the card's buttons are Compose's: arrows and OK go to it
             if (k == KeyEvent.KEYCODE_DPAD_LEFT) { nextPlay.requestFocus(); return true; }
             if (k == KeyEvent.KEYCODE_DPAD_RIGHT) { nextOther.requestFocus(); return true; }
             if (isOk(k) && e.getRepeatCount() == 0) { (nextOther.isFocused() ? nextOther : nextPlay).performClick(); return true; }
             return true;
         }
-        if (channelList.getVisibility() == View.VISIBLE) {
+        if (panelShown()) {
             if (k == KeyEvent.KEYCODE_BACK || k == KeyEvent.KEYCODE_DPAD_RIGHT) { closeChannels(); return true; }
             return super.dispatchKeyEvent(e);   // up/down move through the list, OK switches (see openChannels)
         }
         // Live TV, like a TV: up/down zap whatever is on screen; OK = the mini guide; hold OK = the controls; left = rewind,
         // right = forward when behind live (else the banner); play/pause pauses live; Back returns to live first.
-        if (live && (k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN) && !(shown && !justShown && overlay.findFocus() != null && overlay.findFocus() != playBtn)) {
+        if (live && (k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN) && (cui != null || !(shown && !justShown && overlay.findFocus() != null && overlay.findFocus() != playBtn))) {
             if (e.getRepeatCount() == 0 || e.getRepeatCount() % 3 == 0) step(k == KeyEvent.KEYCODE_DPAD_UP ? -1 : 1);   // held: one channel per ~3 repeats
             return true;
         }
-        if (live && isOk(k) && e.getRepeatCount() == 1) { showOverlay(); okHeld = true; return true; }
-        if (live && isOk(k) && e.getRepeatCount() > 1) return true;
+        if (live && isOk(k) && e.getRepeatCount() == 1 && !(cui != null && shown)) { showOverlay(); okHeld = true; return true; }
+        if (live && isOk(k) && e.getRepeatCount() > 1 && !(cui != null && shown)) return true;
         if (!shown) {
             switch (k) {
                 case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER: case KeyEvent.KEYCODE_NUMPAD_ENTER:
@@ -800,13 +1034,15 @@ public class PlayerActivity extends AppCompatActivity {
                     // Behind live: Back goes back to live (one press), before it closes anything.
                     if (live && (shifted || shiftTarget != NONE)) { goLive(); return true; }
                     if (item.optBoolean("fromLive")) { send("goLive"); return true; }   // started over: Back = the channel, live
-                    if (infoBar.getVisibility() == View.VISIBLE) { infoOff.run(); ui.removeCallbacks(infoOff); return true; }
+                    if (bannerShown()) { infoOff.run(); ui.removeCallbacks(infoOff); return true; }
                     if (shiftBar.getVisibility() == View.VISIBLE) { shiftBar.setVisibility(View.GONE); return true; }
                     finish(); return true;
             }
             return super.dispatchKeyEvent(e);
         }
         if (k == KeyEvent.KEYCODE_BACK) { hideOverlay(); return true; }
+        if (cui != null) return super.dispatchKeyEvent(e);   // the controls are Compose's: arrows move, OK presses
+
         boolean onButton = getCurrentFocus() != null && getCurrentFocus() != playerView && overlay.findFocus() != null && !justShown;
         if (live && !onButton && isOk(k) && list().length() > 1) { openChannels(); return true; }
         if (justShown && !isOk(k)) justShown = false;   // the first arrow moves onto the buttons
@@ -826,6 +1062,7 @@ public class PlayerActivity extends AppCompatActivity {
         long delta = pendingSeek - player.getCurrentPosition();
         seek.setProgress((int) (pendingSeek / 1000));
         elapsed.setText(clock(pendingSeek / 1000));
+        if (cui != null) cui.setSeekTo(pendingSeek);
         showHud(clock(pendingSeek / 1000) + "   " + (delta < 0 ? "−" : "+") + clock(Math.abs(delta) / 1000));
         ui.removeCallbacks(commitSeek);
         ui.postDelayed(commitSeek, 600);
@@ -839,7 +1076,7 @@ public class PlayerActivity extends AppCompatActivity {
 
     private void showHud(String text) {
         hud.setText(text);
-        hud.setVisibility(View.VISIBLE);
+        if (cui != null) cui.setHud(text); else hud.setVisibility(View.VISIBLE);
         ui.removeCallbacks(hudOff);
         ui.postDelayed(hudOff, 1200);
     }
@@ -847,12 +1084,13 @@ public class PlayerActivity extends AppCompatActivity {
     private void showOverlay() { showOverlay(false); }
     private boolean justShown = false;   // the info bar came up by itself (new channel): OK still means "channel list"
     private void showOverlay(boolean keep) {
-        boolean was = overlay.getVisibility() == View.VISIBLE;
+        boolean was = controlsShown();
         if (nextMode == N_CREDITS) { creditsDismissed = true; hideNext(false); }   // the controls came up over the credits: you're watching them
-        overlay.setVisibility(View.VISIBLE);
-        infoBar.setVisibility(View.GONE); ui.removeCallbacks(infoOff);   // the controls take the bottom of the screen
+        if (cui != null) { cui.closePanel(); cui.setInfo(null); pushTick(); cui.setControls(true); behindPill.setVisibility(View.GONE); }
+        else overlay.setVisibility(View.VISIBLE);
+        hideBannerNow(); ui.removeCallbacks(infoOff);   // the controls take the bottom of the screen
         if (playerView.getSubtitleView() != null) playerView.getSubtitleView().setBottomPaddingFraction(0.22f);   // subtitles sit above the controls
-        if (!was) playBtn.requestFocus();
+        if (!was && cui == null) playBtn.requestFocus();
         ui.removeCallbacks(hideRun);
         if (!keep) ui.postDelayed(hideRun, 5000);
     }
@@ -860,9 +1098,9 @@ public class PlayerActivity extends AppCompatActivity {
         ui.removeCallbacks(hideRun);
         if (player != null && player.isPlaying()) ui.postDelayed(hideRun, 5000);
     }
-    private void hideOverlayOnly() { overlay.setVisibility(View.GONE); ui.removeCallbacks(hideRun); }
+    private void hideOverlayOnly() { controlsGone(); ui.removeCallbacks(hideRun); }
     private void hideOverlay() {
-        overlay.setVisibility(View.GONE); ui.removeCallbacks(hideRun);
+        controlsGone(); ui.removeCallbacks(hideRun);
         if (behindPill != null) syncBehindPill();
         if (playerView.getSubtitleView() != null) playerView.getSubtitleView().setBottomPaddingFraction(0.08f);
         ui.post(this::checkCredits);   // a card held back while the controls were up
@@ -1002,7 +1240,7 @@ public class PlayerActivity extends AppCompatActivity {
 
     /** The bar: [sticky] while paused; otherwise it fades after 4 s (the "−4:12" pill stays at the top). */
     private void showShift(boolean sticky) {
-        infoBar.setVisibility(View.GONE); ui.removeCallbacks(infoOff);
+        hideBannerNow(); ui.removeCallbacks(infoOff);
         hideOverlay();
         updateShiftBar();
         shiftBar.setVisibility(View.VISIBLE);
@@ -1025,8 +1263,9 @@ public class PlayerActivity extends AppCompatActivity {
     /** "−4:12" at the top right while behind live and nothing else is showing; the controls' LIVE tag says the same. */
     private void syncBehindPill() {
         long b = behindMs();
-        boolean show = live && shifted && b >= 1500 && shiftBar.getVisibility() != View.VISIBLE && infoBar.getVisibility() != View.VISIBLE
-            && overlay.getVisibility() != View.VISIBLE && !guide.isOpen();
+        boolean show = live && shifted && b >= 1500 && shiftBar.getVisibility() != View.VISIBLE && !bannerShown()
+            && !controlsShown() && !guide.isOpen() && (cui == null || !cui.modal());
+        if (cui != null) cui.setBehindMs(live && shifted && b >= 1500 ? b : 0);
         behindPill.setText("−" + clock(b / 1000));
         behindPill.setVisibility(show ? View.VISIBLE : View.GONE);
         if (live) {
@@ -1051,7 +1290,7 @@ public class PlayerActivity extends AppCompatActivity {
     private void openGuide() {
         if (guideStale()) send("guide");
         hideOverlay();
-        infoBar.setVisibility(View.GONE); ui.removeCallbacks(infoOff);
+        hideBannerNow(); ui.removeCallbacks(infoOff);
         shiftBar.setVisibility(View.GONE); behindPill.setVisibility(View.GONE);
         guide.open(list(), item.optInt("current") - item.optInt("listStart"));
     }
@@ -1060,6 +1299,7 @@ public class PlayerActivity extends AppCompatActivity {
     public void updateGuide(JSONObject fresh) {
         if (fresh == null || !live || !fresh.optString("url").equals(item.optString("url"))) return;
         for (String k : new String[]{"nowTitle", "nowStart", "nowEnd", "nextTitle", "info", "catchup", "list", "total"}) if (fresh.has(k)) item.put(k, fresh.opt(k));
+        pushMedia();
         if (guide.isOpen()) guide.refresh(list(), item.optInt("current") - item.optInt("listStart"));
     }
 
@@ -1088,6 +1328,7 @@ public class PlayerActivity extends AppCompatActivity {
         if (nextMode == N_END || player.getPlayWhenReady()) countLeft -= now - countLast;
         countLast = now;
         nextFill.setLevel((int) (10_000 * (1 - Math.max(0, countLeft) / (double) countTotal)));
+        pushCountdown();
         if (countLeft <= 0) { autoRun++; goNext(); return; }
         ui.postDelayed(this, 33);
     } };
@@ -1113,7 +1354,7 @@ public class PlayerActivity extends AppCompatActivity {
         if (nextMode == N_CREDITS) { preloadNext(); return; }
         if (nextMode != N_NONE || creditsDismissed || state != S_PLAYING || !player.getPlayWhenReady()) return;
         // The controls, the channel panel or an error are up: wait (hideOverlay checks again).
-        if (overlay.getVisibility() == View.VISIBLE || errorPanel.getVisibility() == View.VISIBLE || channelList.getVisibility() == View.VISIBLE) return;
+        if (controlsShown() || errorShown() || panelShown()) return;
         showNext(autoRun >= STILL_AFTER ? N_STILL : N_CREDITS, 10_000);
     }
 
@@ -1156,8 +1397,19 @@ public class PlayerActivity extends AppCompatActivity {
             if (mode == N_CREDITS) preloadNext();
         }
         hideOverlayOnly();
-        infoBar.setVisibility(View.GONE);
+        hideBannerNow();
         // Fade and slide in (250 ms) over a soft scrim, Play next focused.
+        if (cui != null) {
+            cui.closePanel(); cui.setInfo(null);
+            CharSequence play = nextPlay.getText();
+            cui.setNext(new com.wmorgan97.m3uplayer.tv.player.PlayerUi.Next(mode == N_STILL, nextLabel.getText().toString(), nextName.getText().toString(),
+                nextSub.getVisibility() == View.VISIBLE ? nextSub.getText().toString() : "", art.startsWith("http") ? art : "",
+                play.toString().replace("▶", "").trim(), nextOther.getText().toString()));
+            countRunning = null;
+            pushCountdown();
+            subtitlesAbove(true);
+            return;
+        }
         nextPanel.animate().cancel(); nextScrim.animate().cancel();
         if (nextPanel.getVisibility() != View.VISIBLE) {
             nextPanel.setAlpha(0f); nextPanel.setTranslationY(dp(24)); nextScrim.setAlpha(0f);
@@ -1172,15 +1424,16 @@ public class PlayerActivity extends AppCompatActivity {
     /** Subtitles move up above the card while it's on screen (it covers the bottom right), and back down after. */
     private void subtitlesAbove(boolean card) {
         if (playerView.getSubtitleView() == null) return;
-        playerView.getSubtitleView().setBottomPaddingFraction(card ? 0.44f : overlay.getVisibility() == View.VISIBLE ? 0.22f : 0.08f);
+        playerView.getSubtitleView().setBottomPaddingFraction(card ? 0.44f : controlsShown() ? 0.22f : 0.08f);
     }
 
     /** Takes the card away (150 ms fade). [drop]: also un-queue the next episode. */
     private void hideNext(boolean drop) {
         ui.removeCallbacks(countRun);
         if (drop) dropPreload();
-        if (nextMode == N_NONE && nextPanel.getVisibility() != View.VISIBLE) return;
+        if (nextMode == N_NONE && nextPanel.getVisibility() != View.VISIBLE && (cui == null || cui.getNext() == null)) return;
         nextMode = N_NONE;
+        if (cui != null) cui.setNext(null);
         subtitlesAbove(false);
         nextPanel.animate().cancel(); nextScrim.animate().cancel();
         nextPanel.animate().alpha(0f).translationY(dp(12)).setDuration(150).withEndAction(() -> nextPanel.setVisibility(View.GONE)).start();
@@ -1294,10 +1547,17 @@ public class PlayerActivity extends AppCompatActivity {
         aspect = (aspect + 1) % ASPECTS.length;
         playerView.setResizeMode(aspect == 1 ? AspectRatioFrameLayout.RESIZE_MODE_ZOOM : aspect == 2 ? AspectRatioFrameLayout.RESIZE_MODE_FILL : AspectRatioFrameLayout.RESIZE_MODE_FIT);
         showHud(ASPECTS[aspect]);
+        if (cui != null) cui.setAspect(ASPECTS[aspect]);
     }
 
     /** Live TV: the channels down the left, the one playing picked; up/down browse, OK switches, Back / right close. */
     private void openChannels() {
+        if (cui != null) {
+            notePanelFrom(); hideOverlay(); hideBannerNow(); ui.removeCallbacks(infoOff); cui.setInfo(null);
+            cui.showChannels(list(), item.optInt("current") - item.optInt("listStart"), item.optString("last", ""));
+            behindPill.setVisibility(View.GONE);
+            return;
+        }
         JSArray l = list();
         final String last = item.optString("last", "");
         final int off = last.isEmpty() ? 0 : 1;   // "Last channel" sits above the list
@@ -1331,14 +1591,20 @@ public class PlayerActivity extends AppCompatActivity {
             }
         });
         hideOverlay();
-        infoBar.setVisibility(View.GONE); ui.removeCallbacks(infoOff);
+        hideBannerNow(); ui.removeCallbacks(infoOff);
         channelList.setVisibility(View.VISIBLE);
         channelList.setSelection(Math.max(0, cur - 3));
         channelList.post(() -> { channelList.requestFocus(); channelList.setSelection(cur); });
     }
-    private void closeChannels() { channelList.setVisibility(View.GONE); }
+    private void closeChannels() { channelList.setVisibility(View.GONE); if (cui != null) cui.closePanel(); }
 
     private void showList() {
+        if (cui != null && !live) {   // the new interface: image-led rows (still, number, title, runtime, progress)
+            notePanelFrom(); hideOverlay(); hideBannerNow(); cui.setInfo(null);
+            String t = item.optString("listTitle", "Episodes");
+            cui.showEpisodes("Up next".equals(t) ? "Up next" : t, list(), item.optInt("current") - item.optInt("listStart"));
+            return;
+        }
         JSArray l = list();
         String[] rows = new String[l.length()];
         for (int i = 0; i < l.length(); i++) {
@@ -1352,39 +1618,67 @@ public class PlayerActivity extends AppCompatActivity {
         });
     }
 
-    /** What's playing, like VLC's media info: codec, size, frame rate, HDR, bitrate, audio format. */
+    /** What's playing, like VLC's media info: codec, size, frame rate, HDR, bitrate, audio format. The new interface
+     *  shows it as a sheet with the programme (times, description, what's next) and quick actions. */
     private void showInfo() {
-        StringBuilder s = new StringBuilder();
         String about = item.optString("info", "");
-        if (!about.isEmpty()) s.append(about).append("\n\n");
         Format v = player.getVideoFormat(), a = player.getAudioFormat();
+        StringBuilder vs = new StringBuilder(), as = new StringBuilder();
         if (v != null) {
-            s.append("Video: ").append(codecName(v.sampleMimeType));
-            if (v.width > 0) s.append(" · ").append(v.width).append("×").append(v.height);
-            if (v.frameRate > 0) s.append(" · ").append(String.format(Locale.ROOT, "%.3g fps", v.frameRate));
+            vs.append(codecName(v.sampleMimeType));
+            int w = videoW > 0 ? videoW : v.width, h = videoW > 0 ? videoH : v.height;
+            if (w > 0) vs.append(" · ").append(w).append("×").append(h);
+            float fps = v.frameRate > 0 ? v.frameRate : measuredFps;
+            if (fps > 0) vs.append(" · ").append(String.format(Locale.ROOT, "%.3g fps", fps));
             if (v.colorInfo != null && (v.colorInfo.colorTransfer == C.COLOR_TRANSFER_ST2084 || v.colorInfo.colorTransfer == C.COLOR_TRANSFER_HLG))
-                s.append(v.colorInfo.colorTransfer == C.COLOR_TRANSFER_HLG ? " · HDR (HLG)" : " · HDR10");
-            if (v.codecs != null && v.codecs.startsWith("dvh")) s.append(" · Dolby Vision");
-            s.append("\n");
+                vs.append(v.colorInfo.colorTransfer == C.COLOR_TRANSFER_HLG ? " · HDR (HLG)" : " · HDR10");
+            if (v.codecs != null && v.codecs.startsWith("dvh")) vs.append(" · Dolby Vision");
         }
         if (a != null) {
-            s.append("Audio: ").append(codecName(a.sampleMimeType));
-            if (a.channelCount > 0) s.append(" · ").append(channels(a.channelCount));
-            if (a.sampleRate > 0) s.append(" · ").append(a.sampleRate / 1000).append(" kHz");
-            if (a.language != null && !a.language.equals("und")) s.append(" · ").append(a.language.toUpperCase(Locale.ROOT));
-            s.append("\n");
+            as.append(codecName(a.sampleMimeType));
+            if (a.channelCount > 0) as.append(" · ").append(channels(a.channelCount));
+            if (a.sampleRate > 0) as.append(" · ").append(a.sampleRate / 1000).append(" kHz");
+            if (a.language != null && !a.language.equals("und")) as.append(" · ").append(a.language.toUpperCase(Locale.ROOT));
         }
         int br = v != null && v.bitrate > 0 ? v.bitrate : v != null && v.peakBitrate > 0 ? v.peakBitrate : 0;
-        if (br > 0) s.append(String.format(Locale.ROOT, "Bitrate: %.1f Mbit/s\n", br / 1_000_000.0));
-        if (s.length() == 0) s.append("Stream details appear once it's playing.");
+        String bitrate = br > 0 ? String.format(Locale.ROOT, "%.1f Mbit/s", br / 1_000_000.0) : "";
+        if (cui != null) {
+            String title, when = "", next = "";
+            long s = item.optLong("nowStart"), e = item.optLong("nowEnd");
+            String now = item.optString("nowTitle", "");
+            if (live) {
+                title = now.isEmpty() ? item.optString("title", "") : now;
+                when = item.optString("title", "") + (s > 0 && e > s ? "  ·  " + clockHm(s) + " – " + clockHm(e) + "  ·  " + Math.max(1, (e - System.currentTimeMillis() + 59_999) / 60_000) + " min left" : "");
+                String nx = item.optString("nextTitle", "");
+                if (!nx.isEmpty()) next = "Next" + (e > 0 ? "  " + clockHm(e) : "") + "   " + nx;
+            } else {
+                title = item.optString("title", "");
+                when = item.optString("subtitle", "");
+                long d = player.getDuration();
+                if (d > 0) when += (when.isEmpty() ? "" : "  ·  ") + clock(d / 1000);
+            }
+            boolean known = frameShown || (state == S_PLAYING && videoW == 0);
+            List<String> badges = known ? StreamBadges.of(v, videoW, videoH, measuredFps, a) : java.util.Collections.emptyList();
+            notePanelFrom(); hideOverlay(); hideBannerNow(); cui.closePanel();
+            cui.setInfo(new com.wmorgan97.m3uplayer.tv.player.PlayerUi.Info(title, when, about, next, vs.toString(), as.toString(), bitrate, badges));
+            pushTick();
+            behindPill.setVisibility(View.GONE);
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        if (!about.isEmpty()) sb.append(about).append("\n\n");
+        if (vs.length() > 0) sb.append("Video: ").append(vs).append("\n");
+        if (as.length() > 0) sb.append("Audio: ").append(as).append("\n");
+        if (!bitrate.isEmpty()) sb.append("Bitrate: ").append(bitrate).append("\n");
+        if (sb.length() == 0) sb.append("Stream details appear once it's playing.");
         new AlertDialog.Builder(this, R.style.TvDialog)
-            .setTitle(item.optString("title")).setMessage(s.toString().trim()).setPositiveButton("Close", null).show();
+            .setTitle(item.optString("title")).setMessage(sb.toString().trim()).setPositiveButton("Close", null).show();
     }
 
     /** A reminder coming up while you watch: shown at the top for 20 seconds; OK runs it, Back dismisses it. */
     public void notice(String text, String hint, Runnable onOk) {
         noticeView.setText(text + "      " + hint);
-        noticeView.setVisibility(View.VISIBLE);
+        if (cui != null) cui.setNotice(text); else noticeView.setVisibility(View.VISIBLE);
         noticeAction = onOk;
         ui.removeCallbacks(noticeOff); ui.postDelayed(noticeOff, 20_000);
     }
@@ -1399,12 +1693,19 @@ public class PlayerActivity extends AppCompatActivity {
             sleepAt = w == 0 ? 0 : System.currentTimeMillis() + SLEEP_MIN[w] * 60_000L;
             if (sleepAt > 0) ui.postDelayed(sleepRun, SLEEP_MIN[w] * 60_000L);
             showHud(w == 0 ? "Sleep timer off" : "Sleep in " + rows[w]);
+            if (cui != null) cui.setSleep(w == 0 ? "Off" : rows[w]);
             onTick();
         });
     }
 
     private interface Pick { void on(int which); }
     private void dialog(String heading, String[] rows, int checked, Pick pick) {
+        if (cui != null) {   // the new interface: a side panel instead of a dialog
+            notePanelFrom(); hideOverlay(); hideBannerNow(); cui.setInfo(null);
+            cui.showOptions(heading, rows, checked, w -> { if (player != null) pick.on(w); syncBehindPill(); });
+            behindPill.setVisibility(View.GONE);
+            return;
+        }
         AlertDialog dlg = new AlertDialog.Builder(this, R.style.TvDialog)
             .setTitle(heading)
             .setSingleChoiceItems(rows, checked, (d, w) -> { d.dismiss(); if (player != null) pick.on(w); })
@@ -1464,6 +1765,7 @@ public class PlayerActivity extends AppCompatActivity {
     protected void onStop() {
         super.onStop();
         stopped = true;   // pending starts/reconnects wait for onStart instead of reopening the stream in the background
+        if (frm != null) frm.restore();   // (matched again once it plays steadily after coming back)
         ui.removeCallbacksAndMessages(STALL);
         if (isFinishing() || player == null) return;
         // Home button: stop, not pause. A paused stream keeps its HTTP connection, and the provider allows only one.
@@ -1489,6 +1791,7 @@ public class PlayerActivity extends AppCompatActivity {
         }
         // Live and playing: the stream carries on in the preview window, which shrinks back into its corner (the reverse of
         // going full screen). This screen fades out over it instead of cutting away.
+        if (frm != null) frm.restore();   // the display goes back to its own mode as the player closes
         int ps = player == null ? Player.STATE_IDLE : player.getPlaybackState();
         boolean toPreview = live && player != null && runningUrl != null && state != S_FAILED && (ps == Player.STATE_READY || ps == Player.STATE_BUFFERING);
         if (toPreview) { handedBack = true; PlayerHolder.returnPlayer(player, runningUrl); }
@@ -1503,6 +1806,7 @@ public class PlayerActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         ui.removeCallbacksAndMessages(null);   // every runnable posted on ui (spinner, retries, watchdog, zaps); each also checks player != null
+        if (frm != null) { frm.release(); frm = null; }
         if (!finished && player != null) {
             finished = true;
             double d = player.getDuration() > 0 ? player.getDuration() / 1000.0 : 0;
@@ -1589,6 +1893,8 @@ public class PlayerActivity extends AppCompatActivity {
 
     private void buildUi() {
         FrameLayout root = new FrameLayout(this);
+        rootView = root;
+
         root.setBackgroundColor(Color.BLACK);
         playerView = new PlayerView(this);
         playerView.setUseController(false);
@@ -1710,7 +2016,7 @@ public class PlayerActivity extends AppCompatActivity {
         retryBtn.setOnClickListener(v -> tryAgain());
         lastBtn = pill("Last channel", null);
         lastBtn.setOnClickListener(v -> {
-            errorPanel.setVisibility(View.GONE);
+            hideError();
             send("last");
         });
         eb.setClipChildren(false); eb.setClipToPadding(false); ep.setClipChildren(false); ep.setClipToPadding(false);

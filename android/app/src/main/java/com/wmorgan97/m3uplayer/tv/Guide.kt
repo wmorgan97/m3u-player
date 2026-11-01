@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarViewWeek
@@ -41,7 +42,7 @@ import kotlinx.coroutines.launch
 // OK: on now = watch; finished with catch-up = play it from the archive; anything else = details (remind me, etc.).
 
 private val ROW_H = 40.dp   // TiviMate-dense: ~13 channels on screen
-private val CHAN_W = 180.dp
+private val CHAN_W = 200.dp   // (room for most channel names next to the logo)
 private const val SPAN_MIN = 120
 private const val HALF_HOUR = 30 * 60_000L
 
@@ -93,6 +94,10 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
         else if (p.end <= viewStart) viewStart = maxOf(earliest, floor30(maxOf(p.start, p.end - span)))
         cursor = maxOf(p.start, viewStart)
     }
+    /** Back to the present: the window starts at this half hour and the highlight is on what's on now. */
+    fun jumpToNow() { val t = System.currentTimeMillis(); now = t; viewStart = floor30(t); cursor = t }
+    /** A whole window (two hours) later or earlier; the highlight lands on the programme at the window's start. */
+    fun page(pages: Int) { viewStart = guidePage(viewStart, pages, span, earliest, latest); cursor = viewStart }
     fun keepRowVisible() = scope.launch {
         val vis = listState.layoutInfo.visibleItemsInfo
         val first = vis.firstOrNull()?.index ?: 0; val last = (vis.lastOrNull()?.index ?: 0) - 1
@@ -134,6 +139,10 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
             Key.DirectionDown -> { if (row >= chans.size - 1) return true; row++; keepRowVisible() }
             Key.PageDown, Key.ChannelDown -> { row = minOf(chans.size - 1, row + 8); keepRowVisible() }
             Key.PageUp, Key.ChannelUp -> { row = maxOf(0, row - 8); keepRowVisible() }
+            // Fast sideways: fast-forward / rewind turn a whole page (two hours); the guide button comes back to now.
+            Key.MediaFastForward, Key.MediaSkipForward, Key.MediaNext -> page(1)
+            Key.MediaRewind, Key.MediaSkipBackward, Key.MediaPrevious -> page(-1)
+            Key.Guide, Key.MoveHome -> jumpToNow()
             else -> return false
         }
         return true
@@ -153,14 +162,24 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                 Text(java.text.SimpleDateFormat("EEEE d MMMM", java.util.Locale.UK).format(java.util.Date(now)), fontSize = Tv.bodySmall, color = Tv.muted)
             } else {
                 Text(selP?.title ?: selC.name, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val onAir = selP != null && selP.start <= now && selP.end > now
                 val bits = listOfNotNull(selC.name, selP?.let { "${dayLabel(it.start, now)}${hhmm(it.start)}–${hhmm(it.end)}" }, selP?.let { "${(it.end - it.start) / 60_000} min" },
-                    selP?.let { p -> when { p.start <= now && p.end > now -> "On now"; p.end <= now && Repo.catchupUrl(selC, p.start, p.end) != null -> "Catch-up"; Repo.hasReminder(selC.url, p.start) -> "Reminder set"; else -> null } })
-                Text(bits.joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
+                    selP?.let { p -> when { onAir -> liveLeftLabel(p, now) ?: "On now"; p.end <= now && Repo.catchupUrl(selC, p.start, p.end) != null -> "Catch-up"; Repo.hasReminder(selC.url, p.start) -> "Reminder set"; else -> liveStartsIn(p, now) } })
+                Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (onAir) { Box(Modifier.size(6.dp).background(Tv.live, CircleShape)); Spacer(Modifier.width(8.dp)) }   // (red only as a dot)
+                    Text(bits.joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (onAir) ProgressLine(liveFraction(selP!!, now), Modifier.padding(start = 14.dp).width(120.dp), 3.dp)
+                }
                 Text(selP?.desc?.ifBlank { null } ?: if (selP == null) "No programme information" else "", fontSize = Tv.caption, color = Tv.muted, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.captionLine, modifier = Modifier.padding(top = 4.dp))
             }
         }
         }
-        LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            // "Now": back to the present from anywhere in the guide (also the guide button, or Back once you've moved away).
+            item(key = "\u0000now") {
+                TvChip("Now", selected = false, onClick = { jumpToNow(); scope.launch { delay(60); runCatching { gridFocus.requestFocus() } } })
+            }
+            item(key = "\u0000sep") { Box(Modifier.padding(horizontal = 4.dp).width(1.dp).height(20.dp).background(Tv.line)) }
             // Group tabs: the shared chip (the open group in accent, the highlight white).
             items(groups, key = { it }) { g ->
                 TvChip((if (g in Repo.lockedGroups && Repo.pin.isNotEmpty()) "🔒 " else "") + prettyGroup(g), g == group, { group = g })
@@ -181,13 +200,8 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
             val gridW = maxWidth - CHAN_W
             val perMin = gridW / SPAN_MIN.toFloat()
             Column(Modifier.fillMaxSize()) {
-                // Time header: four half-hour marks across the window.
-                Box(Modifier.fillMaxWidth().height(22.dp).padding(start = CHAN_W).clipToBounds()) {
-                    for (k in 0 until SPAN_MIN / 30) {
-                        val t = viewStart + k * HALF_HOUR
-                        Text((if (k == 0) dayLabel(t, now) else "") + hhmm(t), Modifier.offset(x = perMin * (k * 30f)).padding(start = 6.dp).align(Alignment.CenterStart), fontSize = Tv.label, color = Tv.text2, fontWeight = FontWeight.Medium)
-                    }
-                }
+                // Time ruler: a label and a short tick at each half hour, the day when it isn't today, and a red dot where now is.
+                GuideRuler(viewStart, now, perMin)
                 Box(Modifier.fillMaxSize()) {
                     LazyColumn(Modifier.fillMaxSize().clearAndSetSemantics { }.focusRequester(gridFocus).onFocusChanged { gridFocused = it.isFocused }
                         .onPreviewKeyEvent { e ->
@@ -201,8 +215,8 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                             GuideRow(c, i == row && gridFocused, if (i == row) cursor else -1L, viewStart, span, now, tick, perMin, c.url in favUrls, c.url == Preview.channel?.url)
                         }
                     }
-                    if (now in viewStart until viewStart + span)
-                        Box(Modifier.padding(start = CHAN_W).offset(x = perMin * ((now - viewStart) / 60_000f)).width(2.dp).fillMaxHeight().background(Tv.live.copy(alpha = .9f)))
+                    if (now in viewStart until viewStart + span)   // the now-line: a thin red line, never a bar
+                        Box(Modifier.padding(start = CHAN_W).offset(x = perMin * ((now - viewStart) / 60_000f) - 0.75.dp).width(1.5.dp).fillMaxHeight().background(Tv.live.copy(alpha = .85f)))
                 }
             }
         }
@@ -212,6 +226,8 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
         val pl = Preview.list; val c = Preview.channel!!
         act.playLive(pl.ifEmpty { listOf(c) }, pl.indexOf(c).coerceAtLeast(0))
     }
+    // Moved away from now: Back first comes back to the present (registered after the handler above, so it goes first).
+    androidx.activity.compose.BackHandler(enabled = gridFocused && viewStart != floor30(now) && info == null && pinFor == null) { jumpToNow() }
     LaunchedEffect(locked, chans) { if (!locked && chans.isNotEmpty()) { delay(120); runCatching { gridFocus.requestFocus() } } }
     info?.let { (c, p) ->
         ProgrammeDialog(act, c, p, now, chans) { info = null }
@@ -225,6 +241,22 @@ internal fun dayLabel(t: Long, now: Long): String {
     return when (d) { 0 -> ""; 1 -> "Tomorrow "; -1 -> "Yesterday "; else -> java.text.SimpleDateFormat("EEE ", java.util.Locale.UK).format(java.util.Date(t)) }
 }
 
+/** The time ruler over the grid: half-hour labels with a hairline tick under each, and a red dot over the now-line. */
+@Composable
+private fun GuideRuler(viewStart: Long, now: Long, perMin: Dp) {
+    Box(Modifier.fillMaxWidth().height(28.dp).padding(start = CHAN_W).clipToBounds()) {
+        for (k in 0 until SPAN_MIN / 30) {
+            val t = viewStart + k * HALF_HOUR
+            val x = perMin * (k * 30f)
+            Box(Modifier.offset(x = x).align(Alignment.BottomStart).padding(bottom = 2.dp).width(1.dp).height(8.dp).background(Tv.lineStrong))
+            Text((if (k == 0) dayLabel(t, now) else "") + hhmm(t), Modifier.offset(x = x).padding(start = 8.dp, bottom = 6.dp).align(Alignment.BottomStart),
+                fontSize = Tv.label, lineHeight = Tv.labelLine, color = if (t + HALF_HOUR <= now) Tv.muted else Tv.text2, fontWeight = FontWeight.Medium)
+        }
+        if (now >= viewStart && now < viewStart + SPAN_MIN * 60_000L)
+            Box(Modifier.offset(x = perMin * ((now - viewStart) / 60_000f) - 3.dp).align(Alignment.BottomStart).size(6.dp).background(Tv.live, CircleShape))
+    }
+}
+
 /** One channel's row: the channel on the left, then only the programmes inside the window, drawn as plain boxes. */
 @Composable
 private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Long, span: Long, now: Long, tick: Int, perMin: Dp, fav: Boolean, inPreview: Boolean) {
@@ -235,7 +267,7 @@ private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Lon
     Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = 2.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
         Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 6.dp).background(if (cursor >= 0) Tv.surface3 else if (inPreview) Tv.accent.copy(alpha = .12f) else Tv.surface, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (inPreview) "▶" else if (Repo.showNumbers) "${c.num}" else "", fontSize = Tv.micro, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(if (Repo.showNumbers) 30.dp else 16.dp), maxLines = 1)
-            LogoTile(c, Modifier.size(width = 36.dp, height = 22.dp))
+            LogoTile(c, Modifier.size(width = 40.dp, height = 24.dp))
             Spacer(Modifier.width(8.dp))
             Text(c.name + if (fav) " ★" else "", fontSize = Tv.caption, lineHeight = 16.sp, color = if (inPreview) Tv.accent else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
         }
@@ -244,7 +276,7 @@ private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Lon
             for (p in shown) {
                 val s = maxOf(p.start, viewStart); val e = minOf(p.end, end)
                 val onAir = p.start <= now && p.end > now
-                Cell(p.title, "${hhmm(p.start)}–${hhmm(p.end)}", perMin * ((s - viewStart) / 60_000f), perMin * ((e - s) / 60_000f),
+                Cell(if (p.start < viewStart) "‹ " + p.title else p.title, "${hhmm(p.start)}–${hhmm(p.end)}", perMin * ((s - viewStart) / 60_000f), perMin * ((e - s) / 60_000f),
                     on = selected && sel == p, past = p.end <= now, onAir = onAir, progress = if (onAir) (now - p.start).toFloat() / (p.end - p.start) else null,
                     catchup = p.end <= now && c.hasCatchup && p.start > now - c.catchupDays * 86_400_000L)
             }

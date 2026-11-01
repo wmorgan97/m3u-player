@@ -5,6 +5,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
@@ -15,7 +17,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.*
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
@@ -97,22 +98,25 @@ fun SettingsScreen(act: TvActivity) {
 
     Column(Modifier.fillMaxSize()) {
         PageTitle("Settings", "Shared with your phone and computer through your server")
-        Row(Modifier.weight(1f).padding(start = Tv.margin - 12.dp, end = Tv.margin)) {
-            Column(Modifier.width(250.dp).fillMaxHeight().onPreviewKeyEvent { e ->
+        Row(Modifier.weight(1f).padding(start = Tv.margin - Tv.s3, end = Tv.margin)) {
+            Column(Modifier.width(SettingsDims.sectionColumn).fillMaxHeight().onPreviewKeyEvent { e ->
                 if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionRight) { goPane(focusedSec); true } else false
             }, verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 for (s in Sec.entries) SectionItem(s.icon, s.title, s == shown, secReqs.getValue(s), onFocus = { focusedSec = s }) { goPane(s) }
             }
-            Box(Modifier.padding(horizontal = 20.dp).width(1.dp).fillMaxHeight().background(Tv.line))
+            Box(Modifier.padding(horizontal = Tv.s5).width(1.dp).fillMaxHeight().background(Tv.line))
             val firstFocusable = rows.indexOfFirst { it.focusable }
-            LazyColumn(Modifier.weight(1f).widthIn(max = 760.dp).fillMaxHeight().onFocusChanged { inPane = it.hasFocus }.onPreviewKeyEvent { e ->
-                if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) { backToSections(); true } else false
-            }, contentPadding = PaddingValues(bottom = 56.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                item(key = "head-${shown.name}") {
-                    Text(shown.title.uppercase(), Modifier.padding(start = 12.dp, top = 10.dp, bottom = 8.dp), fontSize = Tv.label, color = Tv.muted, fontWeight = FontWeight.Bold)
-                }
-                itemsIndexed(rows, key = { i, _ -> "${shown.name}-$i" }) { i, r ->
-                    SettingRowView(r, if (i == firstFocusable) Modifier.focusRequester(paneReq) else Modifier)
+            val paneState = rememberLazyListState()
+            LaunchedEffect(shown) { paneState.scrollToItem(0) }   // a new section always opens at its top
+            // Dense list: edge scrolling with a peek of the next row; held Up/Down keeps TvActivity's list pace (Tv.heldListMs).
+            WithScroll(TvScroll.edge) {
+                LazyColumn(Modifier.weight(1f).widthIn(max = SettingsDims.paneMax).fillMaxHeight().onFocusChanged { inPane = it.hasFocus }.onPreviewKeyEvent { e ->
+                    if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionLeft) { backToSections(); true } else false
+                }, state = paneState, contentPadding = PaddingValues(bottom = Tv.s12), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    item(key = "head-${shown.name}") { SettingsPaneTitle(shown.title) }
+                    itemsIndexed(rows, key = { i, _ -> "${shown.name}-$i" }) { i, r ->
+                        SettingRowView(r, if (i == firstFocusable) Modifier.focusRequester(paneReq) else Modifier, first = i == 0)
+                    }
                 }
             }
         }
@@ -164,11 +168,11 @@ private fun sectionRows(
         Sec.Playlists -> {
             val s = Repo.syncData.optJSONObject("sources") ?: JSONObject()
             val sources = s.keys().asSequence().mapNotNull { k -> s.optJSONObject(k)?.let { k to it } }.filter { !it.second.optBoolean("deleted") }.toList()
-            sources.map { (key, src) ->
+            listOf(SettingRow.Header("Your playlists")) + sources.map { (key, src) ->
                 val x = src.optJSONObject("xtream")
                 val what = when (src.optString("content")) { "live" -> "Live TV"; "vod" -> "Movies & series"; else -> "Live TV, movies & series" }
                 val name = src.optString("name").ifBlank { if (x != null) "Xtream playlist" else "Playlist" }
-                SettingRow.Action(if (x != null) Icons.Default.Cloud else Icons.Default.Link, name, what, if (x != null) "Xtream" else "M3U") {
+                SettingRow.Action(if (x != null) Icons.Default.Cloud else Icons.Default.Link, name, what, if (x != null) "Xtream" else "M3U", opens = true) {
                     menu(name, listOf(
                         "Refresh now" to ::refreshLists,
                         "Edit" to { ask(playlistForm(key, src)) },
@@ -178,24 +182,24 @@ private fun sectionRows(
                     ))
                 }
             } + listOf(
-                SettingRow.Action(Icons.Default.PlaylistAdd, "Add playlist", "An Xtream login or an M3U link") {
+                SettingRow.Action(Icons.Default.PlaylistAdd, "Add playlist", "An Xtream login or an M3U link", opens = true) {
                     menu("Add playlist", listOf("Xtream login (server, username, password)" to { ask(playlistForm(null, JSONObject().put("kind", "xtream"))) },
                         "M3U playlist link" to { ask(playlistForm(null, JSONObject().put("kind", "url"))) }))
                 },
-                SettingRow.Action(Icons.Default.Refresh, "Refresh channel lists", "Download every playlist again", "${sources.size}", onClick = ::refreshLists),
+                SettingRow.Header("Maintenance"),
+                SettingRow.Action(Icons.Default.Refresh, "Refresh channel lists", "Download every playlist again", count(sources.size, "playlist"), onClick = ::refreshLists),
             )
         }
         Sec.Live -> listOf(
+            SettingRow.Header("Channels"),
             SettingRow.Toggle(Icons.Default.HighQuality, "Prefer 4K channels", "Start the 4K copy of a channel when there is one", Repo.fourKFirst) { Repo.fourKFirst = it; changed() },
-            SettingRow.Toggle(Icons.Default.PictureInPicture, "Channel preview", "Play the highlighted channel in a small window", Repo.preview) { Repo.preview = it },
-            SettingRow.Toggle(Icons.Default.Numbers, "Show channel numbers", "Numbers beside channels in lists, the guide and the banner", Repo.showNumbers) { Repo.showNumbers = it },
-            SettingRow.Toggle(Icons.Default.Language, "English groups only", "Hide other-language groups, films and series", Repo.englishOnly) { Repo.englishOnly = it; Repo.version++ },
+            SettingRow.Toggle(Icons.Default.PictureInPicture, "Channel preview", "Play the highlighted channel in a small window", Repo.preview) { Repo.preview = it; changed() },
             SettingRow.Note("Channel preview uses your one provider connection while you browse."),
         )
         Sec.Guide -> {
             val upcoming = Repo.reminders.count { it.start > System.currentTimeMillis() }
             listOf(
-                SettingRow.Action(Icons.Default.CalendarViewWeek, "Open the TV Guide", "Hold OK on a programme to set a reminder", if (upcoming == 0) "No reminders" else "$upcoming reminder${if (upcoming == 1) "" else "s"}") { act.root(Screen.Guide()) },
+                SettingRow.Action(Icons.Default.CalendarViewWeek, "Open the TV Guide", "Hold OK on a programme to set a reminder", if (upcoming == 0) "No reminders" else count(upcoming, "reminder")) { act.root(Screen.Guide()) },
                 SettingRow.Note("The guide refreshes automatically every 3 hours."),
             )
         }
@@ -207,52 +211,65 @@ private fun sectionRows(
             fun langMenu(title: String, prefKey: String) = menu(title, listOf("Automatic" to { player.edit().remove(prefKey).apply(); changed() }) +
                 listOf("en", "fr", "de", "es", "it", "pl", "pt", "ar", "tr", "nl").map { l -> langName(l) to { player.edit().putString(prefKey, l).apply(); changed() } })
             listOf(
+                SettingRow.Header("Subtitles & audio"),
                 SettingRow.Toggle(Icons.Default.ClosedCaption, "Subtitles", "Turn subtitles on for every film and episode that has them", subs) { player.edit().putBoolean("textOn", it).apply(); changed() },
-                SettingRow.Action(Icons.Default.Subtitles, "Subtitle language", "Used when subtitles are on", langName(subLang)) { langMenu("Subtitle language", "textLang") },
-                SettingRow.Action(Icons.Default.RecordVoiceOver, "Audio language", "Picked when a stream has more than one", langName(audioLang)) { langMenu("Audio language", "audioLang") },
-                SettingRow.Note("Changing the audio or subtitles while watching remembers your choice here too. While watching live TV: Up/Down change channel, OK opens the channel list, Left/Right show the banner."),
+                SettingRow.Action(Icons.Default.Subtitles, "Subtitle language", "Used when subtitles are on", langName(subLang), opens = true) { langMenu("Subtitle language", "textLang") },
+                SettingRow.Action(Icons.Default.RecordVoiceOver, "Audio language", "Picked when a stream has more than one", langName(audioLang), opens = true) { langMenu("Audio language", "audioLang") },
+                SettingRow.Header("Player"),
+                SettingRow.Toggle(Icons.Default.ViewQuilt, "New player interface", "The redesigned controls, panels and info while watching", com.wmorgan97.m3uplayer.tv.player.PlayerUi.enabled(act)) { com.wmorgan97.m3uplayer.tv.player.PlayerUi.setEnabled(act, it); changed() },
+                SettingRow.Toggle(Icons.Default.Tv, "Match frame rate", "Switch to the programme's rate: 50 Hz for TV, 24 Hz for films", com.wmorgan97.m3uplayer.tv.player.FrameRateMatcher.enabled(act)) { com.wmorgan97.m3uplayer.tv.player.FrameRateMatcher.setEnabled(act, it); changed() },
+                SettingRow.Note("With frame-rate matching the screen blanks briefly when the rate changes. Audio and subtitle choices made while watching are remembered here. Watching live TV: Up/Down change channel, OK opens the channel list, Left/Right show the banner."),
             )
         }
         Sec.Parental -> {
             val hasPin = Repo.pin.isNotEmpty()
             val locked = Repo.lockedGroups.size
             buildList {
-                add(SettingRow.Action(Icons.Default.Lock, if (hasPin) "Change PIN" else "Set a PIN", if (hasPin) "Enter your current PIN first" else "Then lock groups from Live TV", if (hasPin) "Set" else "Off") {
+                add(SettingRow.Header("PIN"))
+                add(SettingRow.Action(Icons.Default.Lock, if (hasPin) "Change PIN" else "Set a PIN", if (hasPin) "Enter your current PIN first" else "Then lock groups from Live TV", if (hasPin) "On" else "Off", opens = true) {
                     if (hasPin) askPin("Enter your current PIN", true) { choosePin() } else choosePin()
                 })
                 if (hasPin) {
-                    add(SettingRow.Action(Icons.Default.LockOpen, "Remove PIN", "Unlocks every group", danger = true) {
+                    add(SettingRow.Action(Icons.Default.LockOpen, "Remove PIN", "Unlocks every group", danger = true, opens = true) {
                         askPin("Enter your PIN", true) { Repo.pin = ""; Repo.unlocked.clear(); say("PIN removed") }
                     })
+                }
+                add(SettingRow.Header("Groups"))
+                add(SettingRow.Action(Icons.Default.FolderOff, "Locked groups", "Hold OK on a group in Live TV to lock it", if (locked == 0) "None" else count(locked, "group")) { act.root(Screen.Live()) })
+                if (hasPin) {
                     add(SettingRow.Action(Icons.Default.LockClock, "Lock opened groups again", "Groups opened with the PIN this session", "${Repo.unlocked.size} open") {
                         Repo.unlocked.clear(); Repo.version++; say("Locked groups need the PIN again")
                     })
                 }
-                add(SettingRow.Action(Icons.Default.FolderOff, "Locked groups", "Hold OK on a group in Live TV to lock it", "$locked") { act.root(Screen.Live()) })
             }
         }
         Sec.Interface -> {
             val hidden = Repo.hiddenGroups.size + Repo.hiddenChannels.size
             listOf(
+                SettingRow.Header("Lists"),
+                SettingRow.Toggle(Icons.Default.Numbers, "Show channel numbers", "Numbers beside channels in lists, the guide and the banner", Repo.showNumbers) { Repo.showNumbers = it; changed() },
                 SettingRow.Action(Icons.Default.Visibility, "Show hidden groups and channels", if (hidden == 0) "Hold OK on a group or channel to hide it" else hiddenNames(), if (hidden == 0) "None" else "$hidden hidden") {
                     if (hidden == 0) say("Nothing is hidden") else { Repo.showAllHidden(); say("$hidden item${if (hidden == 1) "" else "s"} shown again") }
                 },
+                SettingRow.Header("Content"),
+                SettingRow.Toggle(Icons.Default.Language, "English groups only", "Hide other-language groups, films and series", Repo.englishOnly) { Repo.englishOnly = it; Repo.version++ },
             )
         }
         Sec.Data -> listOf(
-            SettingRow.Action(Icons.Default.Sync, "Sync now", "Favourites, history and playlists from your other devices", if (Repo.online) "Online" else "Offline") {
+            SettingRow.Action(Icons.Default.Sync, "Sync now", "Favourites, history and playlists from your other devices", if (Repo.online) "Online" else "Offline", opens = true) {
                 ask(FormAsk("Sync now?", "Fetches favourites, what you've watched and playlists from your server.", emptyList(), "Sync") { Repo.sync(); act.refresh++; say("Up to date"); null })
             },
-            SettingRow.Action(Icons.Default.DeleteSweep, "Clear saved data", "Channel lists, catalogues and the guide download again") {
+            SettingRow.Action(Icons.Default.DeleteSweep, "Clear saved data", "Channel lists, catalogues and the guide download again", opens = true) {
                 menu("Clear saved data? Channel lists, catalogues and the guide download again next time.", listOf("Clear saved data" to { Repo.clearCache(); say("Saved data cleared") }))
             },
             SettingRow.Note(if (Repo.online) "Connected to your server." else "Offline: showing saved data until the server is reachable."),
         )
         Sec.About -> {
-            val version = runCatching { act.packageManager.getPackageInfo(act.packageName, 0).versionName }.getOrNull() ?: ""
             val host = Repo.server.removePrefix("https://").removePrefix("http://")
+            val syncError = Repo.lastSyncError
             listOf(
-                SettingRow.Action(Icons.Default.Dns, "Server", host, if (Repo.online) "Connected" else "Offline") {
+                SettingRow.Header("Connection"),
+                SettingRow.Action(Icons.Default.Dns, "Server", host, if (Repo.online) "Connected" else "Offline", opens = true) {
                     ask(FormAsk("Your server", "The address and key shown at the end of the server install.",
                         listOf(FormField("Server address", Repo.server, "https://your-server.ts.net:8443", url = true), FormField("Server key", Repo.key, "Server key", secret = true))) { (addr, k) ->
                         val a = addr.trimEnd('/').let { if (it.startsWith("http")) it else "https://$it" }
@@ -263,7 +280,7 @@ private fun sectionRows(
                         catch (e: Exception) { Repo.saveConfig(oldK, oldS); "Couldn't connect with that address and key" }
                     })
                 },
-                SettingRow.Action(Icons.Default.Movie, "Film & TV info (TMDB)", "Trending, backdrops, plots and episode pictures", when (tmdbOn) { true -> "Connected"; false -> "Not set up"; null -> "" }) {
+                SettingRow.Action(Icons.Default.Movie, "Film & TV info (TMDB)", "Trending, backdrops, plots and episode pictures", when (tmdbOn) { true -> "Connected"; false -> "Not set up"; null -> "" }, opens = true) {
                     ask(FormAsk("Film & TV info (TMDB)", "Get a free key at themoviedb.org (Settings, API): the API Read Access Token or the API Key. It's kept on your server only." +
                         if (tmdbOn == true) " A key is already saved: enter a new one to replace it." else "",
                         listOf(FormField("TMDB key", "", if (tmdbOn == true) "Saved on your server" else "Paste your TMDB key", secret = true))) { (k) ->
@@ -271,11 +288,18 @@ private fun sectionRows(
                         Repo.setTmdbKey(k) ?: run { say(if (k.isEmpty()) "TMDB key removed" else "TMDB connected"); null }
                     })
                 },
-                SettingRow.Note("M3U Player for Android TV $version"),
-            )
+                SettingRow.Action(Icons.Default.NetworkCheck, "Check connection", "Contact your server now and report back") {
+                    act.lifecycleScope.launch {
+                        val ok = runCatching { Repo.sync() }.isSuccess
+                        say(if (ok) "Your server answered" else "Couldn't reach your server"); changed()
+                    }
+                },
+            ) + SettingsAbout.diagnostics(act, syncError)
         }
     }
 }
+
+internal fun count(n: Int, one: String) = "$n $one${if (n == 1) "" else "s"}"
 
 /** Add or edit a playlist: an Xtream login (server, username, password) or an M3U link (and its TV guide link). */
 internal fun playlistForm(key: String?, src: JSONObject): FormAsk {

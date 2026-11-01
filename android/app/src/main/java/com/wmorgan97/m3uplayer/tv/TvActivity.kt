@@ -160,6 +160,9 @@ class TvActivity : ComponentActivity() {
     /** Test hook (adb only): `--es testStream <url> --ei testIndex n` plays a pretend channel list on that stream, so the
      *  player's channel panel, last-channel entry and zapping can be checked without touching the provider. */
     private fun testHook(i: Intent?) {
+        // `--es testPlayer "newUi=1,frameMatch=0,newUiFail=init"`: the player's settings (and a forced new-interface failure) for tests.
+        i?.getStringExtra("testPlayer")?.let { t -> i.removeExtra("testPlayer"); val ed = getSharedPreferences("player", MODE_PRIVATE).edit()
+            t.split(',').map { it.split('=') }.filter { it.size == 2 }.forEach { (k, v) -> if (k == "newUiFail") { if (v.isEmpty()) ed.remove(k) else ed.putString(k, v) } else ed.putBoolean(k, v == "1") }; ed.commit() }
         i?.getStringExtra("testPreview")?.let { Preview.testUrl = it.ifEmpty { null }; i.removeExtra("testPreview") }
         i?.getStringExtra("testSports")?.let { SportsHub.test = it; i.removeExtra("testSports") }
         i?.getStringExtra("testFollows")?.let { f -> i.removeExtra("testFollows"); Repo.testFollows = f.split('|').filter { it.isNotBlank() }.map { Repo.Follow(it.trim(), 1) }.ifEmpty { null }; Repo.version++ }
@@ -171,6 +174,10 @@ class TvActivity : ComponentActivity() {
             lifecycleScope.launch { runCatching { Repo.search(q) }.getOrNull()?.second?.firstOrNull()?.let { root(Screen.Vods("series")); go(Screen.Details(it)) } } }
         // `--es testEpisodes <url> [--ei testStart secs]`: a pretend 3-episode season on that video, to check next-episode autoplay.
         i?.getStringExtra("testEpisodes")?.let { u -> i.removeExtra("testEpisodes"); val st = i.getIntExtra("testStart", 0).toDouble()
+            // `--es testProgress "2=300,3=done"`: pretend saved progress for those test episodes (memory only, never synced).
+            com.wmorgan97.m3uplayer.tv.player.Resume.test.clear()
+            i.getStringExtra("testProgress")?.split(',')?.map { it.split('=') }?.filter { it.size == 2 }?.forEach { (n, v) ->
+                com.wmorgan97.m3uplayer.tv.player.Resume.test["$u#$n"] = if (v == "done") 734.0 to 734.0 else (v.toDoubleOrNull() ?: 0.0) to 734.0 }
             val eps = (1..3).map { n -> JSONObject().put("url", "$u#$n").put("title", "Test show · S1 E$n").put("subtitle", "Episode $n").put("live", false).put("start", if (n == 1) st else 0.0)
                 .put("listTitle", "$n. Episode $n").put("listTitleOverride", "Episodes")
                 .put("show", "Test show").put("epLabel", "S1 E$n").put("epTitle", "Episode $n").put("art", i.getStringExtra("testArt") ?: "https://peach.blender.org/wp-content/uploads/bbb-splash.png") }
@@ -428,7 +435,8 @@ class TvActivity : ComponentActivity() {
         val chans = if (o.optBoolean("live")) liveLists.firstOrNull { it.first === playList }?.second else null
         val now = System.currentTimeMillis()
         o.put("list", JSONArray(part.mapIndexed { k, r -> JSONObject().put("t", r.optString("listTitle", r.optString("title"))).put("s", r.optString("listSub"))
-            .apply { if (!r.optBoolean("live")) put("a", r.optString("art")).put("e", r.optString("epLabel")).put("n", r.optString("epTitle")) }
+            .apply { if (!r.optBoolean("live")) put("a", r.optString("art")).put("e", r.optString("epLabel")).put("n", r.optString("epTitle"))
+                .apply { com.wmorgan97.m3uplayer.tv.player.Resume.state(r.optString("url"))?.let { (f, w) -> put("pr", f.toDouble()).put("w", w) } } }
             .apply { chans?.getOrNull(from + k)?.let { c -> val (pn, px) = Repo.nowNext(c, now)
                 put("a", r.optString("art")).put("n", r.optString("num")).put("nt", pn?.title ?: "").put("ps", pn?.start ?: 0).put("pe", pn?.end ?: 0).put("nx", px?.title ?: "")
                     .put("cu", canStartOver(c, pn, now)) } } }))
@@ -438,7 +446,7 @@ class TvActivity : ComponentActivity() {
         o.put("total", playList.size)
         // Films/episodes: the next item's stream, so the player can buffer it during the end credits (see PlayerActivity.preloadNext).
         playList.getOrNull(i + 1)?.takeIf { !o.optBoolean("live") && !it.optBoolean("live") }?.let { n ->
-            o.put("nextItem", JSONObject().put("url", n.optString("url")).put("start", n.optDouble("start", 0.0)).put("headers", n.optJSONObject("headers") ?: JSONObject()))
+            o.put("nextItem", JSONObject().put("url", n.optString("url")).put("start", com.wmorgan97.m3uplayer.tv.player.Resume.startFor(n.optString("url")) ?: n.optDouble("start", 0.0)).put("headers", n.optJSONObject("headers") ?: JSONObject()))
         }
         o.put("listStart", from).put("current", i)
         o.put("listTitle", o.optString("listTitleOverride", "Up next"))   // the panel's heading: Channels / Episodes
@@ -452,6 +460,8 @@ class TvActivity : ComponentActivity() {
                 var n = if (e.optString("type") == "step") playIndex + e.optInt("dir") else e.optInt("index")
                 if (playList.getOrNull(playIndex)?.optBoolean("live") == true && playList.isNotEmpty()) n = Math.floorMod(n, playList.size)
                 if (n !in playList.indices || n == playIndex) return
+                // Films / episodes picked in the player (list, next / previous, autoplay): resume where they were left.
+                if (!playList[n].optBoolean("live")) com.wmorgan97.m3uplayer.tv.player.Resume.startFor(playList[n].optString("url"))?.let { playList[n].put("start", it) }
                 if (playList[n].optBoolean("live")) { lastLive = playList to playIndex; playList[n].put("last", playList[playIndex].optString("title")); Repo.lastChannelUrl = playList[n].optString("url") }
                 play(playList, n)
             }
@@ -462,6 +472,7 @@ class TvActivity : ComponentActivity() {
             "zap" -> { val c = Repo.channelByNumber(e.optInt("num")); if (c != null) playLive(Repo.live?.channels ?: listOf(c), Repo.live?.channels?.indexOf(c)?.coerceAtLeast(0) ?: 0) }
             "progress", "closed" -> {
                 val cur = playList.getOrNull(playIndex) ?: return
+                if (!cur.has("sync") && cur.optString("show") == "Test show") com.wmorgan97.m3uplayer.tv.player.Resume.test[cur.optString("url")] = e.optDouble("t") to e.optDouble("d")
                 if (!cur.optBoolean("live") && cur.has("sync")) lifecycleScope.launch {
                     Repo.saveProgress(cur.optString("url"), e.optDouble("t"), e.optDouble("d"), cur.optJSONObject("sync") ?: JSONObject())
                     if (e.optString("type") == "closed") refresh++

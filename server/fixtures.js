@@ -17,7 +17,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
-import { normaliseEspn, programmeIndex, matchChannels, sortFixtures, isOn } from '../js/fixtures.js';
+import { normaliseEspn, programmeIndex, matchChannels, clubIndex, sortFixtures, isOn } from '../js/fixtures.js';
 import { readBody } from './sync.js';
 import { guideIndex } from './guide.js';
 
@@ -26,7 +26,7 @@ const BASE = process.env.FIXTURES_BASE || 'https://site.api.espn.com/apis/site/v
 const DIR = fileURLToPath(new URL('../data/', import.meta.url));
 const CACHE_FILE = process.env.FIXTURES_CACHE || join(DIR, 'fixtures-cache.json');
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
-const FULL_EVERY = 15 * MIN, LIVE_EVERY = 2 * MIN, IDLE_AFTER = 6 * HOUR, WINDOW = 7 * DAY, KEEP_PAST = 12 * HOUR;
+const EMPTY_EVERY = 3 * HOUR, FULL_EVERY = 15 * MIN, LIVE_EVERY = 2 * MIN, IDLE_AFTER = 6 * HOUR, WINDOW = 7 * DAY, KEEP_PAST = 12 * HOUR;
 
 // rank: overrides the IMPORTANCE score of comp (sports.js); rankAs: use another competition's score.
 // by: 'month' (one request per calendar month the window touches) or 'day' (busy US leagues: one per day).
@@ -39,14 +39,32 @@ export const SOURCES = [
   { key: 'eng.league_cup', path: 'soccer/eng.league_cup', sport: 'football', comp: 'Carabao Cup' },
   { key: 'sco.1', path: 'soccer/sco.1', sport: 'football', comp: 'Scottish Premiership' },
   { key: 'eng.2', path: 'soccer/eng.2', sport: 'football', comp: 'Championship', rankAs: 'EFL' },
+  { key: 'eng.3', path: 'soccer/eng.3', sport: 'football', comp: 'League One', rank: 68 },
+  { key: 'eng.4', path: 'soccer/eng.4', sport: 'football', comp: 'League Two', rank: 66 },
+  { key: 'eng.5', path: 'soccer/eng.5', sport: 'football', comp: 'National League', rank: 54 },
+  { key: 'eng.trophy', path: 'soccer/eng.trophy', sport: 'football', comp: 'EFL Trophy', rank: 53 },
+  { key: 'sco.cis', path: 'soccer/sco.cis', sport: 'football', comp: 'Scottish League Cup', rank: 73 },
+  { key: 'sco.tennents', path: 'soccer/sco.tennents', sport: 'football', comp: 'Scottish Cup', rank: 70 },
+  { key: 'sco.2', path: 'soccer/sco.2', sport: 'football', comp: 'Scottish Championship', rank: 57 },
+  { key: 'uefa.nations', path: 'soccer/uefa.nations', sport: 'football', comp: 'Nations League', rank: 79 },
+  { key: 'eng.w.1', path: 'soccer/eng.w.1', sport: 'football', comp: 'WSL', rank: 60, women: true },
+  { key: 'uefa.wchampions', path: 'soccer/uefa.wchampions', sport: 'football', comp: "Women's Champions League", rank: 58, women: true },
   { key: 'esp.1', path: 'soccer/esp.1', sport: 'football', comp: 'LaLiga' },
   { key: 'ita.1', path: 'soccer/ita.1', sport: 'football', comp: 'Serie A' },
   { key: 'ger.1', path: 'soccer/ger.1', sport: 'football', comp: 'Bundesliga' },
   { key: 'fra.1', path: 'soccer/fra.1', sport: 'football', comp: 'Ligue 1', rank: 64 },
+  { key: 'por.1', path: 'soccer/por.1', sport: 'football', comp: 'Primeira Liga', rank: 52 },
+  { key: 'ned.1', path: 'soccer/ned.1', sport: 'football', comp: 'Eredivisie', rank: 50 },
+  { key: 'usa.1', path: 'soccer/usa.1', sport: 'football', comp: 'MLS' },
   { key: 'f1', path: 'racing/f1', sport: 'f1', comp: 'F1' },
   { key: 'nfl', path: 'football/nfl', sport: 'nfl', comp: 'NFL', by: 'day' },
   { key: 'nba', path: 'basketball/nba', sport: 'nba', comp: 'NBA', by: 'day' },
+  { key: 'nhl', path: 'hockey/nhl', sport: 'nhl', comp: 'NHL', by: 'day' },
+  { key: 'mlb', path: 'baseball/mlb', sport: 'mlb', comp: 'MLB', by: 'day' },
   { key: 'ufc', path: 'mma/ufc', sport: 'ufc', comp: 'UFC' },
+  { key: 'golf.pga', path: 'golf/pga', sport: 'golf', comp: 'PGA Tour', rankAs: 'Golf' },
+  { key: 'golf.eur', path: 'golf/eur', sport: 'golf', comp: 'DP World Tour', rank: 54 },
+  { key: 'golf.lpga', path: 'golf/lpga', sport: 'golf', comp: 'LPGA Tour', rank: 40 },
   { key: 'rugby.6n', path: 'rugby/180659', sport: 'rugby', comp: 'Six Nations' },
   { key: 'rugby.tests', path: 'rugby/289234', sport: 'rugby', comp: 'Rugby internationals', rankAs: 'Rugby' },
   { key: 'rugby.prem', path: 'rugby/267979', sport: 'rugby', comp: 'Premiership Rugby', rankAs: 'Rugby' },
@@ -60,7 +78,7 @@ const etDay = t => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_Yor
 /** The scoreboard requests for one source covering [from, to]. */
 export function requestsFor(src, from, to) {
   const out = new Set();
-  if (src.by === 'day') for (let t = from; t <= Math.min(to, from + 5 * DAY); t += DAY) out.add(`dates=${etDay(t)}`);   // busy leagues: 5 days is plenty
+  if (src.by === 'day') for (let t = from; t <= Math.min(to, from + 4 * DAY); t += DAY) out.add(`dates=${etDay(t)}`);   // busy leagues: 4 days is plenty
   else for (let t = from; t <= to + DAY; t += 20 * DAY) out.add(`dates=${etDay(t).slice(0, 6)}&limit=200`);
   if (src.by !== 'day') out.add(`dates=${etDay(to).slice(0, 6)}&limit=200`);
   return [...out].map(q => `${BASE}/${src.path}/scoreboard?${q}`);
@@ -68,7 +86,9 @@ export function requestsFor(src, from, to) {
 
 const state = { loaded: false, at: 0, liveAt: 0, asked: 0, job: null, liveJob: null, sources: {} };   // key -> { at, ok, error, fixtures }
 
+let requestCount = 0;
 async function getJson(url) {
+  requestCount++;
   const res = await fetch(url, { headers: { accept: 'application/json', 'user-agent': 'Mozilla/5.0 (m3u-player fixtures)' }, signal: AbortSignal.timeout(12_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const text = await res.text();
@@ -121,7 +141,9 @@ async function runAll(jobs) {
 async function refreshAll() {
   const now = Date.now(), t0 = now;
   let ok = 0;
-  await runAll(SOURCES.map(src => async () => {
+  const before = requestCount;
+  // A competition with nothing in the window (off season, a break) is asked again every 3 hours, not every 15 minutes.
+  await runAll(SOURCES.filter(src => { const p = state.sources[src.key]; return !(p?.ok && !p.fixtures.length && now - p.at < EMPTY_EVERY); }).map(src => async () => {
     const prev = state.sources[src.key];
     try {
       const list = (await fetchSource(src, requestsFor(src, now - (src.by === 'day' ? DAY : 6 * HOUR), now + WINDOW))).filter(f => inWindow(f, now));
@@ -132,7 +154,7 @@ async function refreshAll() {
     }
   }));
   state.at = Date.now(); state.liveAt = state.at;
-  console.log(`[fixtures] ${ok}/${SOURCES.length} competitions, ${allFixtures().length} fixtures in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+  console.log(`[fixtures] ${ok}/${SOURCES.length} competitions (${requestCount - before} requests), ${allFixtures().length} fixtures in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   saveSoon();
 }
 // Games on (or due on) now: only their competitions' days are fetched again.
@@ -234,7 +256,14 @@ export async function handleFixtures(req, res, url, send, allow) {
     for (const id of q.ids || []) if (ix.chans.has(id)) only.add(id);
     for (const n of q.names || []) { const id = ix.names[n]; if (id && ix.chans.has(id)) only.add(id); }
     const now = Date.now();
-    const channels = matchChannels(fixtures, progIndexFor(ix, only, now));
+    // Club channels among yours, confirmed by their own guide (parsed only for the clubs playing in the window).
+    const chans = [...only].map(id => ({ id, name: ix.display?.[id] || id }));
+    const clubs = clubIndex(chans, fixtures), parsed = new Map();
+    const progsOf = id => {
+      if (!parsed.has(id)) { let progs = []; try { progs = JSON.parse(ix.chans.get(id) || '[]'); } catch {} parsed.set(id, { name: ix.display?.[id] || id, progs }); }
+      return parsed.get(id);
+    };
+    const channels = matchChannels(fixtures, progIndexFor(ix, only, now), clubs, progsOf, now);
     return sendJson(req, res, send, { at: state.at, guideAt: ix.at, channels });
   }
   send(res, 404, 'Not found');

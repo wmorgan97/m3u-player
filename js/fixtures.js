@@ -37,7 +37,7 @@ const team = c => {
 export function normaliseEspn(ev, src) {
   try {
     const compRank = src.rank ?? IMPORTANCE[src.rankAs || src.comp] ?? 0;
-    const base = { sport: src.sport, comp: src.comp, compRank };
+    const base = { sport: src.sport, comp: src.comp, compRank, ...(src.women ? { women: true } : {}) };
     const comps = ev.competitions || [];
     if (src.sport === 'f1') {
       const gp = String(ev.name || ev.shortName || '').replace(SPONSOR, '').replace(SPONSOR, '').trim();
@@ -49,6 +49,17 @@ export function normaliseEspn(ev, src) {
           ...(st === 'live' && c.status?.type?.shortDetail ? { minute: c.status.type.shortDetail } : {}),
           title: gp, session, venue: ev.circuit?.fullName || '' };
       }).filter(f => f.start);
+    }
+    if (src.sport === 'golf') {
+      // A tournament: one item per round day (the feed gives the days, not tee times; the guide gives the coverage).
+      const from = Date.parse(ev.date), to = Date.parse(ev.endDate) || from;
+      if (!from) return [];
+      const st = statusOf(ev.status), out = [];
+      for (let t = from, r = 1; t <= to && r <= 4; t += 24 * HOUR, r++) {
+        const now = Date.now(), status = st === 'final' ? 'final' : t + 24 * HOUR <= now ? 'final' : st === 'live' && t <= now ? 'live' : 'scheduled';
+        out.push({ id: `${src.key}:${ev.id}:${r}`, ...base, start: t, end: t + 24 * HOUR, allDay: true, status, title: String(ev.name || ''), session: `Round ${r}` });
+      }
+      return out;
     }
     if (src.sport === 'ufc') {
       // A fight card: the event's date is the prelims, the last bouts' time the main card.
@@ -118,7 +129,7 @@ for (const [canon, ...rest] of ALIASES) for (const n of [canon, ...rest]) { cons
 const PREFIX = /^(?:afc|fc|cf|ac|as|ssc|ss|us|sc|sv|vfb|vfl|tsg|rc|rcd|ud|cd|sd|ca|1 fc|fk|nk|sk|bsc|kv|krc|kaa|rsc|sl|gnk)\s+/;
 const SUFFIX = /\s+(?:fc|afc|cf|sc|ac|bc|fk|city|town|united|rovers|albion|athletic|county|wanderers|hotspur|rugby|rfc|north end|argyle|alexandra|orient|stanley)$/;
 // Cores shared by two clubs: "Manchester" alone could be City or United.
-const AMBIGUOUS = new Set(['manchester', 'sheffield', 'bristol', 'dundee', 'nottingham', 'notts', 'birmingham', 'oxford', 'cambridge', 'leicester tigers', 'real', 'inter', 'sporting', 'athletic', 'paris', 'new york', 'los angeles', 'la']);
+const AMBIGUOUS = new Set(['manchester', 'sheffield', 'bristol', 'dundee', 'nottingham', 'notts', 'leicester tigers', 'real', 'inter', 'sporting', 'athletic', 'paris', 'new york', 'los angeles', 'la']);
 
 /** Every way the guide might write a team: its names, nickname, aliases and the core without "FC" / "City" etc. */
 export function teamVariants(t) {
@@ -155,10 +166,14 @@ export function titleHasTeams(title, home, away, hv = teamVariants(home), av = t
   return b.some(([x0, x1]) => a.some(([y0, y1]) => x1 <= y0 || y1 <= x0));
 }
 
-/** A follow ("Man Utd", "Spurs", "Chelsea Women", "F1") matches this fixture? Women's follows never match (no women's feed). */
+/** A follow ("Man Utd", "Spurs", "Chelsea Women", "F1") matches this fixture? "Chelsea" is the men's team, "Chelsea
+ *  Women" (or "… Ladies", "… W", "… WFC") the women's. */
+const WOMEN_Q = / (?:women|womens|ladies|wfc|lfc|w)\b/g;
 export function followMatches(q, f) {
-  const k = foldName(q);
-  if (!k || /\b(?:women|womens|ladies|wsl|w)\b/.test(k)) return false;
+  let k = foldName(q);
+  const women = WOMEN_Q.test(` ${k}`); WOMEN_Q.lastIndex = 0;
+  if (women) k = ` ${k}`.replace(WOMEN_Q, '').trim();
+  if (!k || women !== !!f.women) return false;
   if (!f.home) {
     const c = classify(q);
     return !!c && c.comp === f.comp;
@@ -188,7 +203,7 @@ export function programmeIndex(progs, now = Date.now()) {
     // a long block is fine here, because a match needs both teams and the kick-off time.
     if (isNotGame(p.title, now) || (!MATCHUP.test(p.title) && !classify(p.title))) continue;
     const prog = [p.start, p.end, p.title, p.desc || ''];
-    const it = { ...p, t: foldName(p.title), live: isLiveEvent(prog), women: isWomens(p.title, p.desc) };
+    const it = { ...p, t: foldName(p.title), live: isLiveEvent(prog), women: isWomens(p.title, p.desc), sport: classify(p.title)?.sport || null };
     for (let h = Math.floor(p.start / HOUR); h <= Math.floor((p.end - 1) / HOUR); h++) {
       const l = byHour.get(h);
       if (l) l.push(it); else byHour.set(h, [it]);
@@ -203,16 +218,18 @@ const F1_SESSION = { 'Practice 1': /practice 1|\bfp1\b|first practice/, 'Practic
 /** Channels showing a fixture: programmes overlapping kick-off ±30 min that name both teams (F1: the session; UFC:
  *  the card). [{ id, name, start, end, title, desc, live }], live-tagged first, at most 24. */
 export function channelsFor(f, byHour, hv, av) {
-  const from = (f.prelims || f.start) - 30 * MIN, to = f.start + 30 * MIN;
+  const from = (f.prelims || f.start) - 30 * MIN, to = f.allDay ? f.end : f.start + 30 * MIN;
   const seen = new Set(), out = [];
   const place = f.sport === 'f1' ? foldName(f.title).split(' ').filter(w => w.length >= 4 && !/^(?:grand|prix|city)$/.test(w)) : [];
   if (f.home && !hv) { hv = teamVariants(f.home); av = teamVariants(f.away); }
   for (let h = Math.floor(from / HOUR); h <= Math.floor(to / HOUR); h++) {
     for (const p of byHour.get(h) || []) {
-      if (seen.has(p) || p.start >= to || p.end <= from) continue;
+      // On at kick-off and still on a quarter of an hour in: not the build-up show before, not the replay after.
+      if (seen.has(p) || p.start > to || p.end < (f.allDay ? f.start : (f.prelims || f.start) + 15 * MIN)) continue;
       seen.add(p);
-      if (p.women) continue;
-      if (f.home) { if (!titleHasTeams(p.t, null, null, hv, av)) continue; }
+      if (p.women !== !!f.women) continue;
+      // Both teams, and not another sport's game between same-named cities ("New England v Miami": MLS, not the NFL).
+      if (f.home) { if (!titleHasTeams(p.t, null, null, hv, av) || (p.sport && p.sport !== f.sport)) continue; }
       else if (f.sport === 'f1') {
         // The session, and the race's place ("Mexico") or Formula 1 by name: "ISU Grand Prix" skating and a MotoGP
         // "Grand Prix of Malaysia" are on at the same time too.
@@ -221,6 +238,11 @@ export function channelsFor(f, byHour, hv, av) {
         const named = (/((?:[a-z0-9]+ ){0,3})grand prix/.exec(p.t)?.[1] || '').split(' ')
           .filter(w => w.length >= 3 && !/^(?:f1|formula|one|live|the|fia|and|race|day|sunday|saturday|\d+)$/.test(w));
         if (named.length && !named.some(w => place.includes(w))) continue;   // another race: "2026 United States Grand Prix" 
+      }
+      else if (f.sport === 'golf') {
+        if (classify(p.title)?.sport !== 'golf' || !p.live) continue;
+        const words = foldName(f.title).split(' ').filter(w => w.length >= 5 && !/^(?:championship|open|classic|invitational|tour|world|international)$/.test(w));
+        if (words.length && !words.some(w => ` ${p.t} `.includes(` ${w} `))) continue;
       }
       else if (f.sport === 'ufc') {
         if (classify(p.title)?.sport !== 'ufc') continue;
@@ -234,19 +256,68 @@ export function channelsFor(f, byHour, hv, av) {
   const best = new Map();   // one entry per channel: its live-tagged programme if it has one
   for (const p of out) { const b = best.get(p.id); if (!b || (p.live && !b.live)) best.set(p.id, p); }
   return [...best.values()].sort((a, b) => b.live - a.live || Math.abs(a.start - f.start) - Math.abs(b.start - f.start)).slice(0, 24)
-    .map(({ id, name, start, end, title, desc, live }) => ({ id, name, start, end, title, desc: (desc || '').slice(0, 300), live }));
+    .map(({ id, name, start, end, title, desc, live }) => ({ id, name, start, end, title, desc: (desc || '').slice(0, 300), live, ev: live ? 'live' : 'listed' }));
+}
+
+// ---------- club channels confirmed by their own guide ----------
+// A club channel's guide often names only the opponent ("vs Stoke City", "Stoke City (H)"), so the both-teams rule above
+// misses it. These are found by the channel's name or guide id ("Blackburn Rovers", "BlackburnRovers.efl"), then
+// confirmed by a programme at kick-off that names the other side.
+const compact = s => foldName(s).replace(/ /g, '');
+function channelKeys(id, name) {
+  const keys = new Set();
+  const t = channelTeam(name);
+  if (t) { keys.add(t.replace(/ /g, '')); keys.add(t.replace(PREFIX, '').replace(SUFFIX, '').replace(/ /g, '')); }
+  const fromId = String(id || '').toLowerCase().split('.')[0].replace(/[^a-z0-9]/g, '');
+  if (fromId.length >= 4) keys.add(fromId);
+  keys.delete('');
+  return keys;
+}
+/** chans: [{ id, name }] (guide id + display name). -> Map(compact team name -> [channel id]) for the fixtures' teams. */
+export function clubIndex(chans, fixtures) {
+  const wanted = new Set();
+  for (const f of fixtures) if (f.home) for (const t of [f.home, f.away]) for (const v of teamVariants(t)) if (v.length >= 4) wanted.add(v.replace(/ /g, ''));
+  const out = new Map();
+  for (const c of chans) for (const k of channelKeys(c.id, c.name)) if (wanted.has(k)) { const l = out.get(k) || []; if (!l.includes(c.id)) l.push(c.id); out.set(k, l); }
+  return out;
+}
+/** Club channels whose own guide shows this game: [{ id, name, start, end, title, desc, live, ev: 'club' }].
+ *  progsOf(id) -> { name, progs: [[start, end, title, desc]] } for a channel in the index. */
+export function clubChannelsFor(f, clubs, progsOf, now = Date.now()) {
+  if (!f.home || !clubs.size) return [];
+  const out = [];
+  for (const [side, other] of [[f.home, f.away], [f.away, f.home]]) {
+    const ov = teamVariants(other);
+    const ids = new Set(teamVariants(side).flatMap(v => clubs.get(v.replace(/ /g, '')) || []));
+    for (const id of ids) {
+      const ch = progsOf(id);
+      for (const p of ch?.progs || []) {
+        if (p[0] > f.start + 30 * MIN || p[1] < f.start + 15 * MIN || isNotGame(p[2], now)) continue;
+        const sp = classify(p[2])?.sport;
+        if (isWomens(p[2], p[3]) !== !!f.women || (sp && sp !== f.sport) || !spans(foldName(p[2]), ov).length) continue;
+        out.push({ id, name: ch.name, start: p[0], end: p[1], title: p[2], desc: String(p[3] || '').slice(0, 300), live: isLiveEvent(p), ev: 'club' });
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 /** { fixtureId: [channels] } for every fixture with at least one. */
-export function matchChannels(fixtures, byHour) {
+export function matchChannels(fixtures, byHour, clubs = new Map(), progsOf = () => null, now = Date.now()) {
   const out = {};
   for (const f of fixtures) {
     if (f.status === 'final' || f.status === 'postponed') continue;
     const l = channelsFor(f, byHour);
+    for (const c of clubChannelsFor(f, clubs, progsOf, now)) if (!l.some(x => x.id === c.id)) l.push(c);
     if (l.length) out[f.id] = l;
   }
   return out;
 }
+
+/** How sure "where to watch" is, best first: a programme naming both teams tagged live; one on air (not tagged); the
+ *  club's own channel confirmed by its guide; a club channel by name only (the app's guess, no guide entry). */
+export const EVIDENCE = { live: 3, listed: 2, event: 2, club: 1, likely: 0 };
 
 /** Soonest first; at the same time, the bigger competition first. */
 export function sortFixtures(list) {
@@ -259,7 +330,7 @@ export function sortFixtures(list) {
 const TEAM_GROUP = /\bppv\b|\bteam\b|\bclubs?\b/i;
 const CHANNEL_NOISE = / (?:uk|gb|serie a|la ?liga|premier league|efl|spfl|championship|league one|league two|4k|uhd|fhd|hd|sd|raw|ppv|tv|channel|official)\b/g;
 export const isTeamChannelGroup = g => TEAM_GROUP.test(g || '');
-const channelTeam = name => (` ${foldName(name)} `).replace(CHANNEL_NOISE, ' ').replace(/\s+/g, ' ').trim();
+export const channelTeam = name => (` ${foldName(name)} `).replace(CHANNEL_NOISE, ' ').replace(/\s+/g, ' ').trim();
 /** The club's own channel for this fixture (home side first), or a channel named after the match itself. */
 export function teamChannelFor(f, chans) {
   if (!f?.home || !f?.away || !chans?.length) return null;
@@ -271,4 +342,50 @@ export function teamChannelFor(f, chans) {
   if (away) return { channel: away, side: 'away' };
   const match = chans.find(c => titleHasTeams(c.name, f.home, f.away, hv, av));
   return match ? { channel: match, side: 'match' } : null;
+}
+
+// ---------- event / league-pass channels: the matchup is in the channel's name ----------
+// "Lakers @ Jazz" (tvg-id teamarr-event-<feed id>), "MLB 01 |  Rays x Brewers start:2026-10-25 01:00:00 stop:…",
+// "PPV EVENT 05: UFC 333 Volkanovski vs. Evloev (10.24 2:00 PM ET)", "LIVE EVENT 04 - 1pm Browne v Burden",
+// "National League 4 | Barrow vs Eastleigh // UK Sat 31 Oct 3:00pm". Providers rename these daily, so a date in the name
+// must agree with the fixture's (a name left over from an earlier game doesn't count); "No Game Today" never matches.
+const PASS_GROUP = /league pass|sunday ticket|center ice|mlb\.?tv|\bppv\b|\bevents?\b|college|flo ?sports|b\/r max|dazn|\bteam\b|\bclubs?\b/i;
+export const isEventGroup = g => PASS_GROUP.test(g || '');
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+/** The date a channel name carries, as [month, day] (or null): "start:2026-10-25 …", "(10.24 2:00 PM ET)", "Sat 31 Oct", "@ Oct 23". */
+export function nameDate(name) {
+  const n = String(name || '');
+  let m = /start:\s*(\d{4})-(\d\d)-(\d\d)/i.exec(n);
+  if (m) return [+m[2] - 1, +m[3]];
+  m = /\((\d{1,2})[./](\d{1,2})\b/.exec(n);
+  if (m) return [+m[1] - 1, +m[2]];
+  m = /\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i.exec(n);
+  if (m) return [MONTHS[m[2].toLowerCase()], +m[1]];
+  m = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})\b/i.exec(n);
+  if (m) return [MONTHS[m[1].toLowerCase()], +m[2]];
+  return null;
+}
+const dateNear = (md, t) => [-DAY_MS, 0, DAY_MS].some(d => { const x = new Date(t + d); return x.getUTCMonth() === md[0] && x.getUTCDate() === md[1]; });
+const DAY_MS = 24 * HOUR;
+/** Event channels whose name is this fixture: [{ channel, how: 'id' | 'name' }], an exact feed-id match first. */
+export function eventChannelsFor(f, chans) {
+  if (!chans?.length) return [];
+  const espnId = String(f.id).split(':')[1];
+  const out = [];
+  const hv = f.home && teamVariants(f.home), av = f.away && teamVariants(f.away);
+  const num = f.sport === 'ufc' && /\bufc (\d{3})\b/.exec(foldName(f.title))?.[1];
+  const names = f.sport === 'ufc' ? foldName(f.title.split(':').slice(1).join(' ')).split(' ').filter(w => w.length >= 4) : [];
+  for (const c of chans) {
+    if (espnId && String(c.tvgId || '').endsWith(`-${espnId}`)) { out.push({ channel: c, how: 'id' }); continue; }
+    const n = String(c.name || '');
+    if (/no (?:game|event)s? today|^#|off ?air/i.test(n)) continue;
+    let hit = false;
+    if (f.home) hit = titleHasTeams(n, null, null, hv, av);
+    else if (f.sport === 'ufc') { const t = ` ${foldName(n)} `; hit = (num && t.includes(` ufc ${num} `)) || (names.length >= 2 && names.filter(w => t.includes(` ${w} `)).length >= 2); }
+    if (!hit) continue;
+    const md = nameDate(n);
+    if (md && !dateNear(md, f.start)) continue;
+    out.push({ channel: c, how: 'name', prelims: f.sport === 'ufc' && /prelim/i.test(n) });
+  }
+  return out.sort((a, b) => (a.how === 'id' ? 0 : 1) - (b.how === 'id' ? 0 : 1) || (a.prelims ? 1 : 0) - (b.prelims ? 1 : 0));
 }

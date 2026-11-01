@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -148,6 +149,9 @@ object SportsHub {
     fun searched(q: String) = q in raw
     val doneCount get() = raw.size
     val total get() = COMPETITIONS.sumOf { it.queries.size }
+    /** Competitions (labels, and classifySport names) the fixtures feed covers. */
+    val FEED_COMPS = setOf("Premier League", "Champions League", "Europa League", "Conference League", "FA Cup", "EFL", "Carabao Cup", "Scottish Premiership",
+        "LaLiga", "Serie A", "Bundesliga", "MLS", "Formula 1", "F1", "Six Nations", "Rugby", "UFC", "NFL", "NBA")
     private val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
 
     // UK-only and all-countries results are saved apart (a UK search only looks through your UK channels' guide).
@@ -158,6 +162,7 @@ object SportsHub {
     fun showAll(c: Context, v: Boolean) {
         if (Repo.sportsAll == v) return
         Repo.sportsAll = v
+        FixturesHub.scopeChanged(c)
         if (v) { fetchedAt.clear(); again = true; refresh(c) }
     }
 
@@ -168,7 +173,9 @@ object SportsHub {
         scope.launch {
             try {
                 val now = System.currentTimeMillis()
-                val queries = (COMPETITIONS.flatMap { it.queries } + Repo.follows.map { it.q }).distinct()
+                // With real fixtures, the guide is only searched for the sports the feed doesn't cover (darts, snooker, cricket…).
+                val comps = if (FixturesHub.usable) COMPETITIONS.filter { it.label !in FEED_COMPS } else COMPETITIONS
+                val queries = (comps.flatMap { it.queries } + Repo.follows.map { it.q }).distinct()
                 for (q in queries) if (q !in raw) runCatching {   // the saved copies first: the page has shape at once
                     val f = file(c, q); if (!f.exists()) return@runCatching
                     raw[q] = parse(JSONObject(f.readText()).optJSONArray("matches")); fetchedAt[q] = f.lastModified()
@@ -299,26 +306,28 @@ object SportsHub {
 
     // ---------- onto your channels ----------
 
-    private class Index(val sig: String, val byId: Map<String, List<Channel>>, val byName: Map<String, List<Channel>>)
+    /** [teams]: club / match channels from the playlist's team groups ("UK| CHAMPIONSHIP PPV"), the fixtures' fallback. */
+    internal class Index(val sig: String, val byId: Map<String, List<Channel>>, val byName: Map<String, List<Channel>>, val teams: List<Channel> = emptyList())
     @Volatile private var index: Index? = null
-    private fun indexFor(l: Repo.Live): Index = synchronized(this) {
+    internal fun indexFor(l: Repo.Live): Index = synchronized(this) {
         // Keyed on the list's contents, not the object: a refresh that loads the same playlist again keeps the index.
         val sig = "${l.channels.size}|${l.channels.firstOrNull()?.url}|${l.channels.lastOrNull()?.url}|${Repo.englishOnly}|${Repo.sportsAll}|${Repo.hiddenGroups.size}|${Repo.hiddenChannels.size}"
         index?.takeIf { it.sig == sig }?.let { return it }
         val t0 = android.os.SystemClock.uptimeMillis()
         val hid = Repo.hiddenGroups; val hidCh = Repo.hiddenChannels
-        val byId = HashMap<String, MutableList<Channel>>(); val byName = HashMap<String, MutableList<Channel>>()
+        val byId = HashMap<String, MutableList<Channel>>(); val byName = HashMap<String, MutableList<Channel>>(); val teams = ArrayList<Channel>()
         val english = Repo.englishOnly; val ukOnly = !Repo.sportsAll
         for (c in l.channels) {
             if (c.group in hid || c.url in hidCh || c.name.trimStart().startsWith("#")) continue
             if (ukOnly && !isUkChannel(c)) continue
             if (english && (!englishGroup(c.group) || OTHER_LANG.containsMatchIn(c.name) || OTHER_LANG.containsMatchIn(c.group))) continue
             c.tvgId.trim().lowercase().takeIf { it.isNotEmpty() }?.let { byId.getOrPut(it) { ArrayList() } += c }
+            if (FixtureRules.isTeamChannelGroup(c.group)) teams += c
             val n = fastNorm(c.name)
             if (n.isNotEmpty()) byName.getOrPut(n) { ArrayList() } += c
             if (c.tvgName.isNotEmpty() && c.tvgName != c.name) fastNorm(c.tvgName).takeIf { it.isNotEmpty() && it != n }?.let { byName.getOrPut(it) { ArrayList() } += c }
         }
-        return Index(sig, byId, byName).also { index = it; Log.i(TAG, "sports index: ${l.channels.size} channels in ${android.os.SystemClock.uptimeMillis() - t0} ms") }
+        return Index(sig, byId, byName, teams).also { index = it; Log.i(TAG, "sports index: ${l.channels.size} channels in ${android.os.SystemClock.uptimeMillis() - t0} ms") }
     }
 
     /** Which copy of a channel to use: not a backup or SD copy, an English group, HD (the web app's order). */
@@ -331,7 +340,7 @@ object SportsHub {
     /** UK broadcasters first, then other English-speaking ones (Astro, Fox AU, beIN Asia…) only when they're all there is. */
     private val UK = Regex("""\b(sky sports|tnt sports|bt sport|bbc|itv|stv|channel ?[45]|premier sports|eurosport|viaplay|amazon prime|prime video|dazn|racing tv|s4c)\b|^\s*(uk|gb)\s*[:|\-]|\b(uk|gb)\b""", RegexOption.IGNORE_CASE)
     private val FOREIGN_EN = Regex("""\b(sky sport (\d+|select|now|news|arena)|astro|fox sports?|bein|supersport|sportsnet|tsn|one soccer|kayo|optus|stan|starhub|hub sports|sportsmax|willow|ten sports|ptv|espn|fubo|golazo|nbc|cbs|abc|usa network|tubi|pluto|altitude|nfl channel)\b|^\s*(us|usa|ca|au|nz|sg|my|za|in)\s*[:|\-]""", RegexOption.IGNORE_CASE)
-    private fun prefer(c: Channel) = (if (BACKUP.containsMatchIn(c.name)) 0 else 2) + (if (englishGroup(c.group)) 2 else 0) + (if (HD.containsMatchIn(c.name)) 1 else 0) +
+    internal fun prefer(c: Channel) = (if (BACKUP.containsMatchIn(c.name)) 0 else 2) + (if (englishGroup(c.group)) 2 else 0) + (if (HD.containsMatchIn(c.name)) 1 else 0) +
         (if (UK.containsMatchIn(c.name) || UK.containsMatchIn(c.group)) 6 else if (FOREIGN_EN.containsMatchIn(c.name) || FOREIGN_EN.containsMatchIn(c.group)) 0 else 3)
     /** A channel marked as another language by a country code before its name or group ("IT: SKY SPORT", "DE | Sport"). */
     private val OTHER_LANG = Regex("""^\s*(fr|de|es|it|nl|pt|pl|tr|ar|ru|gr|ro|bg|hu|cz|sk|se|no|dk|fi|be|ch|at|br|mx|la|il|ir|al|rs|hr|si|ba|mk|cn|jp|kr|ph|th|vn|af|ex|ku|mt|lat|swe|nor|den|ger|ita|esp|por|pol|tur|ara|rus|bra|mex|hrv)\s*[:|\-]""", RegexOption.IGNORE_CASE)
@@ -444,6 +453,71 @@ object SportsHub {
         // Live now: the biggest events first (Premier League above MLS and minor sports), else as found, then ending soonest.
         val liveSorted = live.withIndex().sortedWith(compareByDescending<IndexedValue<SportItem>> { importance(it.value) }.thenBy { it.index }.thenBy { it.value.p.end }).map { it.value }
         return Page(liveSorted.distinctBy { it.key }.take(30), soon, rows, showing.take(40), teams)
+    }
+
+    // ---------- real fixtures ----------
+
+    /** One shown item: a fixture (with the channel showing it, when known), or a guide programme for a sport the feed
+     *  doesn't cover. */
+    data class FxItem(val f: Fixture?, val s: SportItem?, val ch: FxChannel?, val rank: Int, val start: Long) {
+        val key get() = f?.id ?: ("g:" + s!!.key)
+        val c get() = ch?.c ?: s?.c
+        val p get() = ch?.p ?: s?.p
+        val comp get() = f?.comp ?: s?.comp ?: s?.let { classifySport(it.p.title) }
+        val title get() = f?.label ?: s?.let { tidyTitle(it.p.title, it.comp) } ?: ""
+        /** "On Sky Sports Main Event", or null when not on your channels. */
+        val where get() = ch?.where ?: s?.let { FixtureRules.shortChannel(it.c.name) }
+    }
+    data class FxDay(val label: String, val date: String, val items: List<FxItem>)
+    /** A followed team: its next real fixture, else its next match from the guide (women's teams, other sports), else none. */
+    data class FxTeamEntry(val q: String, val fx: FxItem?, val guide: SportItem?)
+    data class FxPage(val live: List<FxItem>, val days: List<FxDay>, val teams: List<FxTeamEntry>, val chansKnown: Boolean, val nextLabel: String?)
+
+    /** Asks the server which of your channels (those in the Sports index: UK ones unless you chose otherwise) show each game. */
+    suspend fun refreshFixtureChannels(c: Context, l: Repo.Live, force: Boolean = false) {
+        val ix = withContext(Dispatchers.Default) { indexFor(l) }
+        FixturesHub.refreshChannels(c, l, ix.byId.keys, ix.byName.keys, ix.sig, force)
+    }
+
+    private val FX_BIG = 70   // Premier League … LaLiga: shown even when not on your channels; smaller ones only when they are
+    private fun feedSport(comp: String?) = comp != null && comp in FEED_COMPS
+
+    /** Everything the fixtures page shows, worked out off the main thread. [g]: the guide page (other sports, sports channels). */
+    fun fixturePage(l: Repo.Live, now: Long, g: Page?): FxPage {
+        val ix = indexFor(l)
+        val all = FixturesHub.list.value.orEmpty()
+        val raw = FixturesHub.channels.value
+        val memo = HashMap<String, FxChannel?>()
+        fun best(f: Fixture): FxChannel? = memo.getOrPut(f.id) {
+            val out = ArrayList<FxChannel>()
+            for (m in raw?.get(f.id).orEmpty()) for (c in ix.byId[m.id.lowercase()] ?: ix.byName[fastNorm(m.name)] ?: emptyList()) {
+                if (out.none { it.c.url == c.url }) out += FxChannel(c, Programme(m.start, m.end, m.title, m.desc), m.live)
+            }
+            FixtureRules.sortChannels(out, { it.live }, { isUkChannel(it.c) }, { prefer(it.c) }).firstOrNull()
+                // No main channel lists it: the club's own channel (home first), or a channel for the match itself.
+                ?: if (raw != null && f.home != null && f.sport == "football") FixtureRules.teamChannelFor(f, ix.teams) { it.name }?.let { (c, side) ->
+                    FxChannel(c, Programme(f.start, f.end, f.label, "${f.comp} — on the ${if (side == FixtureRules.Side.Match) "match" else "club"} channel"), false, side)
+                } else null
+        }
+        fun item(f: Fixture) = FxItem(f, null, best(f), f.compRank, f.start)
+        fun guide(s: SportItem) = FxItem(null, s, null, importance(s.p.title, s.comp), s.p.start)
+        val until = now + 72 * 3600_000L
+        val shown = { it: FxItem -> it.f == null || it.ch != null || it.rank >= FX_BIG }
+        val fx = all.filter { it.status != "postponed" && it.start < until }
+        val gLive = g?.live.orEmpty().filter { s -> (s.comp ?: classifySport(s.p.title)).let { it != null && !feedSport(it) } }.map(::guide)
+        val gUp = g?.rows.orEmpty().filter { !feedSport(it.first) }.flatMap { it.second }.filter { it.p.start in (now + 1)..until }.map(::guide)
+        val live = (fx.filter { it.isOn(now) }.map(::item) + gLive).filter(shown)
+            .sortedWith(compareByDescending<FxItem> { it.rank }.thenByDescending { it.c != null }.thenBy { it.start }).take(16)
+        val up = (fx.filter { it.status == "scheduled" && it.start > now }.map(::item) + gUp).filter(shown)
+            .sortedWith(compareBy<FxItem> { it.start }.thenByDescending { it.rank })
+        val dateFmt = java.text.SimpleDateFormat("EEE d MMM", java.util.Locale.UK)
+        val days = up.groupBy { dayWord(it.start, now) }.map { (label, items) -> FxDay(label, dateFmt.format(java.util.Date(items.first().start)), items.take(40)) }
+        val teams = Repo.follows.map { fl ->
+            val f = FixtureRules.teamFixtures(fl.q, all, now).firstOrNull()
+            if (f != null) FxTeamEntry(fl.q, item(f), null) else FxTeamEntry(fl.q, null, teamMatches(ix, fl.q, now).firstOrNull())
+        }
+        val next = up.firstOrNull()?.let { "${it.title}, ${dayWord(it.start, now)} ${hhmm(it.start)}" }
+        return FxPage(live, days, teams, raw != null, next)
     }
 
     /** One match once: the same fixture on several channels (each guide words it differently: "Fútbol Bundesliga -
@@ -570,7 +644,21 @@ fun SportsScreen(act: TvActivity) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     // Opening the page, and following a team (on any device): searches whatever is older than 30 minutes, or new.
     val followKey = Repo.follows.joinToString("|") { it.q.lowercase() }
-    LaunchedEffect(followKey) { SportsHub.refresh(ctx.applicationContext) }
+    LaunchedEffect(followKey) { FixturesHub.readCache(ctx.applicationContext); SportsHub.refresh(ctx.applicationContext) }
+    // Real fixtures: the saved copy at once, then fresh every 15 minutes (2 while a game is on), and which of your
+    // channels shows each game. Never while something is playing full screen.
+    LaunchedEffect(Unit) {
+        val app = ctx.applicationContext
+        if (SportsHub.test == "nofixtures") { SportsHub.test = null; FixturesHub.disabled = true }
+        FixturesHub.readCache(app)
+        while (true) {
+            if (com.wmorgan97.m3uplayer.PlayerActivity.current == null) {
+                FixturesHub.refresh(app)
+                Repo.live?.let { l -> runCatching { SportsHub.refreshFixtureChannels(app, l) } }
+            }
+            delay(if (FixturesHub.usable && (FixturesHub.channels.value == null || Repo.live == null)) 3_000 else 30_000)
+        }
+    }
     val live by produceState(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: value }
     var minute by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); minute = System.currentTimeMillis() } }
@@ -580,14 +668,22 @@ fun SportsScreen(act: TvActivity) {
     // Worked out again as results land, never cancelled half-way (results arrive faster than the page is worked out):
     // each pass finishes, then the newest state is taken.
     var page by remember { mutableStateOf<SportsHub.Page?>(null) }
+    var fpage by remember { mutableStateOf<SportsHub.FxPage?>(null) }
     LaunchedEffect(Unit) {
-        snapshotFlow { listOf(live, SportsHub.doneCount, Repo.guideVersion, minute, Repo.version) }.conflate().collect { k ->
+        snapshotFlow { listOf(live, SportsHub.doneCount, Repo.guideVersion, minute, Repo.version, FixturesHub.version.intValue, FixturesHub.ok.value) }.conflate().collect { k ->
             val l = k[0] as Repo.Live? ?: return@collect
-            page = withContext(Dispatchers.Default) { runCatching { SportsHub.page(l, System.currentTimeMillis()) }.onFailure { android.util.Log.w("M3U", "sports page failed", it) }.getOrNull() } ?: page
+            withContext(Dispatchers.Default) {
+                val now = System.currentTimeMillis()
+                val g = runCatching { SportsHub.page(l, now) }.onFailure { android.util.Log.w("M3U", "sports page failed", it) }.getOrNull() ?: page
+                val f = if (FixturesHub.usable) runCatching { SportsHub.fixturePage(l, now, g) }.onFailure { android.util.Log.w("M3U", "fixtures page failed", it) }.getOrNull() else null
+                withContext(Dispatchers.Main) { page = g; fpage = f }
+            }
         }
     }
     val reminded = remember(ver) { Repo.reminders.mapTo(HashSet()) { "${it.url}|${it.start}" } }
     var info by remember { mutableStateOf<SportItem?>(null) }
+    var infoTeams by remember { mutableStateOf<List<String>?>(null) }   // a fixture's two sides (else read from the title)
+    var fxInfo by remember { mutableStateOf<Fixture?>(null) }
     var teamInfo by remember { mutableStateOf<String?>(null) }
     val first = remember { FocusRequester() }
     var pageFocused by remember { mutableStateOf(false) }
@@ -598,7 +694,9 @@ fun SportsScreen(act: TvActivity) {
     val p = page
     val loading = SportsHub.busy || p == null
     // The page opens on its first card, even when the first card only arrives after a second or two.
-    val firstKey = p?.let { it.teams.firstOrNull()?.first ?: it.live.firstOrNull()?.key ?: it.soon.firstOrNull()?.key ?: it.rows.firstOrNull()?.second?.firstOrNull()?.key }
+    val fp = fpage
+    val firstKey = if (fp != null) fp.teams.firstOrNull()?.q ?: fp.live.firstOrNull()?.key ?: fp.days.firstOrNull()?.items?.firstOrNull()?.key
+        else p?.let { it.teams.firstOrNull()?.first ?: it.live.firstOrNull()?.key ?: it.soon.firstOrNull()?.key ?: it.rows.firstOrNull()?.second?.firstOrNull()?.key }
     LaunchedEffect(firstKey) {
         if (firstKey == null) return@LaunchedEffect
         repeat(15) { if (landed || System.currentTimeMillis() - openedAt > 30_000) return@LaunchedEffect; delay(100); runCatching { first.requestFocus() } }
@@ -606,6 +704,17 @@ fun SportsScreen(act: TvActivity) {
 
     fun group(c: Channel): List<Channel> = Repo.live?.channels?.filter { it.group == c.group && c.group.isNotEmpty() }?.takeIf { it.contains(c) } ?: listOf(c)
     fun watch(c: Channel) { val g = group(c); act.playLive(g, g.indexOf(c).coerceAtLeast(0)) }
+    fun sides(f: Fixture) = listOfNotNull(f.home, f.away).map { it.label }
+    /** OK on a fixture: on now -> its channel; coming up -> the programme (Remind me, Follow); not on your channels -> its details. */
+    fun open(it: SportsHub.FxItem, longPress: Boolean = false) {
+        val now = System.currentTimeMillis()
+        val c = it.c; val pr = it.p
+        when {
+            c == null || pr == null -> fxInfo = it.f
+            !longPress && (it.f?.isOn(now) == true || (it.f == null && pr.start <= now) || (it.ch?.teamCh == true && now >= pr.start)) -> watch(c)
+            else -> { info = SportItem(c, pr, it.comp); infoTeams = it.f?.let(::sides) }
+        }
+    }
 
     val listState = rememberPageState()
     HeldPace()
@@ -614,7 +723,8 @@ fun SportsScreen(act: TvActivity) {
         item(key = "title") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) {
-                    PageTitle("Sports", if (loading && (p == null || p.rows.isEmpty())) "Looking through the TV guide…" else "Live and upcoming on your ${if (Repo.sportsAll) "" else "UK "}channels · next 3 days")
+                    PageTitle("Sports", if (fp != null) "Real fixtures · big games and your ${if (Repo.sportsAll) "" else "UK "}channels · next 3 days"
+                        else if (loading && (p == null || p.rows.isEmpty())) "Looking through the TV guide…" else "Live and upcoming on your ${if (Repo.sportsAll) "" else "UK "}channels · next 3 days")
                 }
                 // Which countries' channels: UK by default (the user is in the UK); one press away from Up on the first row.
                 Row(Modifier.padding(end = Tv.margin, top = Tv.topMargin - 8.dp).onFocusChanged { chipsFocused = it.hasFocus }, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -622,6 +732,64 @@ fun SportsScreen(act: TvActivity) {
                     SportsChip("All countries", Repo.sportsAll) { SportsHub.showAll(ctx.applicationContext, true) }
                 }
             }
+        }
+        if (fp != null) {
+            var firstUsed = false
+            fun takeFirst(): Modifier = if (!firstUsed) { firstUsed = true; Modifier.focusRequester(first) } else Modifier
+            val scope = if (Repo.sportsAll) ":all" else ""
+            if (fp.teams.isNotEmpty()) {
+                val m = takeFirst()
+                item(key = "fx-teams-t") { SportsRowTitle("My teams", first = true) }
+                item(key = "fx-teams") {
+                    CardRow(fp.teams, { it.q.lowercase() }) { e, i ->
+                        val mod = if (i == 0) m else Modifier
+                        when {
+                            e.fx != null -> FxTeamCard(e.q, e.fx, minute, fp.chansKnown, e.fx.c != null && "${e.fx.c!!.url}|${e.fx.p!!.start}" in reminded, mod, onLong = { teamInfo = e.q }) { open(e.fx) }
+                            else -> TeamCard(e.q, e.guide, minute, e.guide != null && e.guide.key in reminded, mod, onLong = { teamInfo = e.q }) {
+                                val s = e.guide
+                                when { s == null -> teamInfo = e.q; s.onAir(System.currentTimeMillis()) -> watch(s.c); else -> { info = s; infoTeams = null } }
+                            }
+                        }
+                    }
+                }
+            }
+            if (fp.live.isNotEmpty()) {
+                val m = takeFirst()
+                item(key = "fx-live-t") { SportsRowTitle("Live now", count = fp.live.size, first = fp.teams.isEmpty()) }
+                item(key = "fx-live$scope") { CardRow(fp.live, { it.key }) { it, i -> FxLiveCard(it, minute, fp.chansKnown, if (i == 0) m else Modifier, onLong = { open(it, longPress = true) }) { open(it) } } }
+            } else {
+                item(key = "fx-nolive") {
+                    Text("No live games right now" + (fp.nextLabel?.let { "  ·  Next: $it" } ?: ""), fontSize = Tv.bodySmall, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = Tv.margin, end = Tv.margin, top = if (fp.teams.isEmpty()) 0.dp else 8.dp, bottom = 4.dp))
+                }
+            }
+            for (d in fp.days) {
+                val m = takeFirst()
+                item(key = "fx-d-${d.label}") { SportsRowTitle(d.label + "  ·  " + d.date, count = d.items.size, first = fp.teams.isEmpty() && fp.live.isEmpty() && d === fp.days.first()) }
+                item(key = "fx-r-${d.label}$scope") {
+                    CardRow(d.items, { it.key }) { it, i -> FxNextCard(it, minute, fp.chansKnown, it.c != null && "${it.c!!.url}|${it.p!!.start}" in reminded, if (i == 0) m else Modifier, row = d.label) { open(it) } }
+                }
+            }
+            val chans = p?.channels.orEmpty().filter { it.second != null }
+            if (chans.isNotEmpty()) {
+                item(key = "ch-t") { SportsRowTitle("Sports channels", count = chans.size) }
+                item(key = "ch$scope") {
+                    val list = chans.map { it.first }
+                    CardRow(chans, { it.first.url }) { (c, now), i ->
+                        val prog = now?.let { ((minute - it.start).toFloat() / (it.end - it.start)) }
+                        ChannelCard(c.name, c.logo, now?.title ?: prettyGroup(c.group), prog, restoreKey = "sp:ch:" + c.url) { act.playLive(list, i) }
+                    }
+                }
+            }
+            if (fp.live.isEmpty() && fp.days.isEmpty()) item(key = "fx-empty") {
+                Box(Modifier.fillMaxWidth().padding(top = 60.dp)) {
+                    EmptyState(Icons.Default.SportsSoccer, "No games in the next three days", "Nothing from the big competitions or on your ${if (Repo.sportsAll) "" else "UK "}channels")
+                }
+            }
+            if (!fp.chansKnown && (fp.live.isNotEmpty() || fp.days.isNotEmpty())) item(key = "fx-finding") {
+                Text("Finding the channels…", fontSize = Tv.bodySmall, color = Tv.muted, modifier = Modifier.padding(start = Tv.margin, top = 16.dp))
+            }
+            return@LazyColumn
         }
         if (p == null) { repeat(3) { k -> item(key = "sk$k") { Column { if (k > 0) SkeletonTitle() else Spacer(Modifier.height(8.dp)); SkeletonRow(count = 4, width = if (k == 0) LIVE_W else NEXT_W, aspect = if (k == 0) LIVE_W / LIVE_H else NEXT_W / NEXT_H) } } }; return@LazyColumn }
         var firstUsed = false
@@ -685,7 +853,16 @@ fun SportsScreen(act: TvActivity) {
         }
     }
     }
+    LaunchedEffect(fp) {   // adb test hooks on the fixtures page (`--es testSports dialog|fxinfo`): never presses OK on a channel
+        val f = fp ?: return@LaunchedEffect
+        when (SportsHub.test) {
+            "dialog" -> { val it = f.days.flatMap { d -> d.items }.firstOrNull { it.c != null } ?: return@LaunchedEffect; SportsHub.test = null; open(it, longPress = true) }
+            "fxinfo" -> { val it = f.days.flatMap { d -> d.items }.firstOrNull { it.c == null && it.f != null } ?: return@LaunchedEffect; SportsHub.test = null; fxInfo = it.f }
+            "teamch" -> { val it = (f.live + f.days.flatMap { d -> d.items }).firstOrNull { it.ch?.teamCh == true } ?: return@LaunchedEffect; SportsHub.test = null; open(it, longPress = true) }
+        }
+    }
     LaunchedEffect(p) {
+        if (fpage != null && SportsHub.test != null && !SportsHub.test!!.startsWith("scroll:")) return@LaunchedEffect
         val t = SportsHub.test?.takeIf { it != "groups" } ?: return@LaunchedEffect
         if (t.startsWith("scroll:")) { if (SportsHub.busy) return@LaunchedEffect; SportsHub.test = null; delay(500); listState.scrollToItem(t.substringAfter(':').toIntOrNull() ?: 0); return@LaunchedEffect }
         val s = p?.rows?.firstOrNull()?.second?.firstOrNull() ?: return@LaunchedEffect
@@ -695,7 +872,8 @@ fun SportsScreen(act: TvActivity) {
             kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) { delay(60_000); if (Repo.hasReminder(s.c.url, s.p.start)) Repo.toggleReminder(s.c, s.p) }
         } else info = s
     }
-    info?.let { s -> ProgrammeDialog(act, s.c, s.p, System.currentTimeMillis(), group(s.c), teams = teamsIn(s.p.title, s.comp)) { info = null } }
+    info?.let { s -> ProgrammeDialog(act, s.c, s.p, System.currentTimeMillis(), group(s.c), teams = infoTeams ?: teamsIn(s.p.title, s.comp)) { info = null; infoTeams = null } }
+    fxInfo?.let { f -> FixtureDialog(f, fp?.chansKnown == true) { fxInfo = null } }
     teamInfo?.let { t -> TeamDialog(t) { teamInfo = null } }
 }
 
@@ -889,3 +1067,184 @@ fun importance(title: String, comp: String? = null): Int =
     (IMPORTANCE[classifySport(title) ?: if (comp == "Formula 1") "F1" else comp] ?: 0) + (if (REAL_MATCH.containsMatchIn(title)) 4 else 0)
 
 private fun importance(it: SportItem) = importance(it.p.title, it.comp)
+
+// ---------- real fixtures: cards ----------
+
+private val FX_LIVE_W = 320.dp
+private val FX_LIVE_H = 156.dp
+private val FX_NEXT_W = 300.dp
+private val FX_NEXT_H = 140.dp
+
+/** A club crest from the feed (small, cached by Coil like every picture); nothing when there is none. */
+@Composable
+private fun Crest(t: FxTeam?, size: Dp) {
+    val url = FixtureRules.crestUrl(t?.crest)
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    Box(Modifier.size(size), contentAlignment = Alignment.Center) {
+        if (url != null) coil.compose.AsyncImage(
+            model = remember(url) { coil.request.ImageRequest.Builder(ctx).data(url).size(96).crossfade(false).build() },
+            contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.Fit, modifier = Modifier.fillMaxSize())
+    }
+}
+
+/** "F1" / "UFC" on a small tile, where a team sport has its crests. */
+@Composable
+private fun CompTile(f: Fixture, size: Dp) {
+    Box(Modifier.size(size).clip(Tv.shapeS).background(Tv.surface3), contentAlignment = Alignment.Center) {
+        Text(when (f.sport) { "f1" -> "F1"; "ufc" -> "UFC"; else -> f.comp.take(2) }, fontSize = Tv.micro, fontWeight = FontWeight.Bold, color = Tv.text2, maxLines = 1)
+    }
+}
+
+/** One side of a fixture: crest, name and (once it has started) the score. */
+@Composable
+private fun TeamLine(t: FxTeam, score: String?, crest: Dp, big: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Crest(t, crest)
+        Spacer(Modifier.width(10.dp))
+        Text(t.label, Modifier.weight(1f), fontSize = if (big) Tv.body else Tv.bodySmall, lineHeight = if (big) Tv.bodyLine else Tv.bodySmallLine,
+            fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (score != null) Text(score, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Tv.text, modifier = Modifier.padding(start = 8.dp))
+    }
+}
+
+/** What's being played: the two sides with crests, or (F1, UFC) the event and its session. */
+@Composable
+private fun FixtureLines(it: SportsHub.FxItem, live: Boolean, crest: Dp, big: Boolean) {
+    val f = it.f
+    when {
+        f?.home != null && f.away != null -> Column(verticalArrangement = Arrangement.spacedBy(if (big) 6.dp else 4.dp)) {
+            val scored = live || f.status == "final"
+            TeamLine(f.home, if (scored) f.home.score else null, crest, big)
+            TeamLine(f.away, if (scored) f.away.score else null, crest, big)
+        }
+        f != null -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CompTile(f, crest); Spacer(Modifier.width(10.dp))
+                Text(f.title, fontSize = if (big) Tv.body else Tv.bodySmall, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Text(f.session.ifBlank { f.venue }, fontSize = Tv.label, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = crest + 10.dp))
+        }
+        else -> Text(it.title, fontSize = if (big) Tv.body else Tv.bodySmall, lineHeight = if (big) Tv.bodyLine else Tv.bodySmallLine, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun LiveDot() = Box(Modifier.size(8.dp).clip(RoundedCornerShape(50)).background(Tv.live))
+
+/** Where it's on: "On Sky Sports Main Event" / "On Blackburn Rovers channel", "Not on your channels" (once the channels are known). */
+private fun whereText(it: SportsHub.FxItem, known: Boolean): String? = it.where?.let { w -> "On $w" } ?: if (known || it.f == null) "Not on your channels" else null
+
+/** Live now: the minute and competition, both sides with crests and the score, and the channel. */
+@Composable
+private fun FxLiveCard(it: SportsHub.FxItem, now: Long, known: Boolean, modifier: Modifier, onLong: () -> Unit, onClick: () -> Unit) {
+    val f = it.f
+    val clock = when { f == null -> "until ${hhmm(it.p?.end ?: now)}"; f.status == "live" -> f.minute ?: "Live"; else -> "Starting" }
+    val where = whereText(it, known)
+    val off = it.c == null && known
+    val score = f?.home?.score?.let { h -> f.away?.score?.let { a -> " $h–$a" } }.orEmpty()
+    FocusCard(modifier.width(FX_LIVE_W).height(FX_LIVE_H), scale = Tv.scaleWide, restoreKey = "sp:fxl:" + it.key,
+        label = "${it.title}$score, $clock, ${it.comp.orEmpty()}, ${where.orEmpty()}", onLongClick = onLong, onClick = onClick) {
+        Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface)))) {
+            Column(Modifier.fillMaxSize().alpha(if (off) .55f else 1f).padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LiveDot(); Spacer(Modifier.width(8.dp))
+                    Text(clock, fontSize = Tv.label, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 1)
+                    Text("  ·  " + (it.comp ?: ""), Modifier.weight(1f), fontSize = Tv.label, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(10.dp))
+                FixtureLines(it, live = true, crest = 26.dp, big = true)
+                Spacer(Modifier.weight(1f))
+                if (where != null) Text(where, fontSize = Tv.label, color = if (it.c != null) Tv.text2 else Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            val p = it.p
+            val prog = if (f != null) (now - f.start).toFloat() / (f.end - f.start) else if (p != null) (now - p.start).toFloat() / (p.end - p.start) else null
+            if (prog != null) ProgressLine(prog.coerceIn(0f, 1f), Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
+        }
+    }
+}
+
+/** Coming up: kick-off, both sides with crests, the competition and the channel (dimmed when it isn't on yours). */
+@Composable
+private fun FxNextCard(it: SportsHub.FxItem, now: Long, known: Boolean, reminded: Boolean, modifier: Modifier, row: String, onClick: () -> Unit) {
+    val mins = (it.start - now) / 60_000
+    val soon = mins in 0..59
+    val where = whereText(it, known)
+    val off = it.c == null && known
+    val meta = listOfNotNull(listOfNotNull(it.comp, it.f?.round?.takeIf { r -> r.isNotBlank() }).joinToString(" · ").ifBlank { null }, where).joinToString("  ·  ")
+    FocusCard(modifier.width(FX_NEXT_W).height(FX_NEXT_H), scale = Tv.scaleWide, restoreKey = "sp:fx:$row:" + it.key,
+        label = "${it.title}, ${dayWord(it.start, now)} ${hhmm(it.start)}, $meta", onLongClick = onClick, onClick = onClick) {
+        Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface2, Tv.surface)))) {
+            Column(Modifier.fillMaxSize().alpha(if (off) .55f else 1f).padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 12.dp)) {
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(hhmm(it.start), fontSize = Tv.body, color = Tv.text, fontWeight = FontWeight.Bold, maxLines = 1)
+                    if (soon) Text("  in ${mins.coerceAtLeast(1)} min", fontSize = Tv.label, color = Tv.star, fontWeight = FontWeight.Medium, maxLines = 1)
+                    Spacer(Modifier.weight(1f))
+                    if (reminded) Icon(Icons.Default.NotificationsActive, "Reminder set", tint = Tv.star, modifier = Modifier.size(18.dp))
+                }
+                Spacer(Modifier.height(8.dp))
+                FixtureLines(it, live = false, crest = 22.dp, big = false)
+                Spacer(Modifier.weight(1f))
+                Text(meta, fontSize = Tv.micro, color = if (it.c != null) Tv.text2 else Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+/** A followed team's next real fixture: its crest and name, the match, and when / where (live: the minute and score). */
+@Composable
+private fun FxTeamCard(team: String, it: SportsHub.FxItem, now: Long, known: Boolean, reminded: Boolean, modifier: Modifier, onLong: () -> Unit, onClick: () -> Unit) {
+    val f = it.f!!
+    val on = f.isOn(now)
+    val mine = FixtureRules.followedSide(team, f)
+    val whenText = if (on) (if (f.status == "live" && f.home != null) "${f.minute ?: "Live"} · ${f.home.score ?: 0}–${f.away?.score ?: 0}" else "Live now") else "${dayWord(f.start, now)} ${hhmm(f.start)}"
+    val where = whereText(it, known)
+    FocusCard(modifier.width(FX_NEXT_W).height(NEXT_H), scale = Tv.scaleWide, restoreKey = "sp:team:" + team.lowercase(),
+        label = "$team: ${it.title}, $whenText${where?.let { w -> ", $w" } ?: ""}", onLongClick = onLong, onClick = onClick) {
+        Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface)))) {
+            Column(Modifier.fillMaxSize().padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (mine != null) { Crest(mine, 22.dp); Spacer(Modifier.width(8.dp)) } else if (f.home == null) { CompTile(f, 22.dp); Spacer(Modifier.width(8.dp)) }
+                    Text(team, Modifier.weight(1f), fontSize = Tv.body, color = Tv.text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (reminded) Icon(Icons.Default.NotificationsActive, "Reminder set", tint = Tv.star, modifier = Modifier.size(18.dp))
+                }
+                Spacer(Modifier.weight(1f))
+                Text(it.title, fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (on) { LiveDot(); Spacer(Modifier.width(6.dp)) }
+                    Text(whenText + (where?.let { w -> "  ·  " + w.removePrefix("On ") } ?: ""), fontSize = Tv.micro, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            if (on) ProgressLine(((now - f.start).toFloat() / (f.end - f.start)).coerceIn(0f, 1f), Modifier.align(Alignment.BottomStart).fillMaxWidth(), 3.dp)
+        }
+    }
+}
+
+/** A fixture none of your channels shows: what, when, where it's played, and Follow for either side. */
+@Composable
+private fun FixtureDialog(f: Fixture, known: Boolean, onDismiss: () -> Unit) {
+    val first = remember { FocusRequester() }
+    val now = System.currentTimeMillis()
+    val sides = if (f.home != null && f.away != null) listOf(f.home.label, f.away.label) else listOf(f.comp)
+    val following = remember { mutableStateMapOf<String, Boolean>().apply { sides.forEach { put(it, Repo.isFollowing(it)) } } }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        TvDialogCard(600.dp) {
+            Text(listOf(f.comp, f.round).filter { it.isNotBlank() }.joinToString(" · "), fontSize = Tv.label, color = Tv.muted, fontWeight = Tv.wStrong, maxLines = 1)
+            Text(f.label + (if (f.status != "scheduled" && f.home?.score != null) "  ${f.home.score}–${f.away?.score}" else ""), fontSize = Tv.title, lineHeight = Tv.titleLine,
+                fontWeight = Tv.wTitle, color = Tv.text, maxLines = 2, modifier = Modifier.padding(top = 2.dp))
+            val whenText = if (f.isOn(now)) "On now" + (f.minute?.let { " · $it" } ?: "") else if (f.status == "final") "Finished" else "${dayWord(f.start, now)} ${hhmm(f.start)}"
+            Text(listOf(whenText, f.venue).filter { it.isNotBlank() }.joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, modifier = Modifier.padding(top = 6.dp))
+            Text(if (known) "Not on any of your ${if (Repo.sportsAll) "" else "UK "}channels." else "Still finding which channel shows it…",
+                fontSize = Tv.bodySmall, color = Tv.muted, modifier = Modifier.padding(top = 12.dp))
+            Spacer(Modifier.height(20.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                sides.forEachIndexed { i, t ->
+                    TvButton(if (following[t] == true) "Following $t ✓" else "Follow $t", { following[t] = Repo.toggleFollow(t) },
+                        if (i == 0) Modifier.focusRequester(first) else Modifier, style = if (i == 0) TvButtonStyle.Primary else TvButtonStyle.Secondary)
+                }
+                TvButton("Close", onDismiss)
+            }
+        }
+        LaunchedEffect(Unit) { delay(50); runCatching { first.requestFocus() } }
+    }
+}

@@ -1,69 +1,42 @@
 package com.wmorgan97.m3uplayer.tv
 
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.zIndex
-import androidx.compose.ui.layout.layout
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.focus.focusProperties
-import androidx.compose.foundation.focusGroup
-import androidx.compose.foundation.focusable
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.tv.material3.*
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.conflate
+import androidx.tv.material3.Icon
+import androidx.tv.material3.Text
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-// Movies and Series: the banner, the rows, a genre's full grid; and resuming from watch history.
+// Movies and Series: the spotlight (Spotlight.kt, shared with Home), Continue watching, the Top 10 and the genre
+// shelves; a shelf's full grid; and resuming from watch history.
 
 fun progressTitle(it: JSONObject): String {
     val name = it.optString("name"); val m = vodMeta(name)
@@ -78,135 +51,174 @@ fun resume(act: TvActivity, p: Progress, fromStart: Boolean = false) {
     act.play(listOf(item), 0)
 }
 
-/** The featured banner: TMDB's trending titles with their backdrops. Picked: a white frame; OK opens it. */
-@Composable
-fun Hero(act: TvActivity, items: List<Vod>, loading: Boolean = false) {
-    val shape = Tv.shapeL
-    val mod = Modifier.fillMaxWidth().height(340.dp).padding(start = Tv.margin, end = Tv.margin, top = Tv.topMargin)
-    if (items.isEmpty()) { Box(mod.clip(shape).let { if (loading) it.shimmer() else it.background(Tv.surface) }); return }
-    var focused by remember { mutableStateOf(false) }
-    // Own slide timer: the TV carousel stops auto-sliding while focused when an accessibility service is on (the Shield
-    // runs one), so slides advance here every 10 s, cross-fading over 0.8 s, and wait longer after you've moved by hand.
-    var index by remember(items) { mutableIntStateOf(0) }
-    var touchedAt by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(items) {
-        while (true) {
-            delay(10_000)
-            if (System.currentTimeMillis() - touchedAt > 12_000) index = (index + 1) % items.size
-        }
-    }
-    // Every slide's backdrop is fetched up front, so a slide never appears blank and then pops in.
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    LaunchedEffect(items) { val l = coil.Coil.imageLoader(ctx); items.forEach { l.enqueue(coil.request.ImageRequest.Builder(ctx).data(it.backdrop).build()) } }
-    // Rank within its own kind ("#3 trending series"), not its place in the mixed films + series banner.
-    val ranks = remember(items) { val n = HashMap<String, Int>(); items.map { v -> (n.merge(v.kind, 1, Int::plus) ?: 1) } }
-    Box(mod.onFocusChanged { focused = it.hasFocus }
-            .border(if (focused) 2.dp else 0.dp, if (focused) Tv.focusRing else Color.Transparent, shape).clip(shape)   // the banner is too big to grow: a clean white line
-            .onKeyEvent { e ->
-                if (e.type != KeyEventType.KeyDown) {
-                    if (e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter)) { items.getOrNull(index)?.let { act.go(Screen.Details(it)) }; return@onKeyEvent true }
-                    return@onKeyEvent false
-                }
-                when (e.key) {
-                    Key.DirectionRight -> { index = (index + 1) % items.size; touchedAt = System.currentTimeMillis(); true }
-                    Key.DirectionLeft -> if (index > 0) { index--; touchedAt = System.currentTimeMillis(); true } else false   // left on the first slide: the menu
-                    else -> false
-                }
-            }.focusable()) {
-    androidx.compose.animation.Crossfade(index.coerceIn(0, items.size - 1), animationSpec = androidx.compose.animation.core.tween(Tv.durCrossfade), label = "hero") { i ->
-        val v = items[i]
-        Box(Modifier.fillMaxSize()) {
-            Picture(v.backdrop, Modifier.fillMaxSize(), fade = false)   // (the slide change already cross-fades)
-            Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0xF20E1014), Color(0xB30E1014), Color.Transparent), endX = 1400f)))
-            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color(0x990E1014)), startY = 400f)))
-            Column(Modifier.align(Alignment.CenterStart).padding(start = 40.dp).fillMaxWidth(.56f)) {
-                Text("#${ranks.getOrElse(i) { i + 1 }} TRENDING ${if (v.kind == "series") "SERIES" else "MOVIE"}", fontSize = Tv.label, color = Tv.accent, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-                Spacer(Modifier.height(8.dp))
-                Text(v.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine)
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    v.year?.let { Tag("$it") }
-                    v.rating?.takeIf { it > 0 }?.let { Tag("★ %.1f".format(it), color = Tv.star) }
-                    quality(v.name, v.group)?.let { Tag(it) }
-                }
-                Spacer(Modifier.height(12.dp))
-                Text(v.overview, fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 3, overflow = TextOverflow.Ellipsis, lineHeight = Tv.bodySmallLine)
-                Spacer(Modifier.height(18.dp))
-                // One clear action, lit when the banner has focus (OK opens it).
-                // (Drawn like a TvButton: the banner itself is the focus target.)
-                Row(Modifier.height(Tv.buttonHeight).background(if (focused) Tv.focusSurface else Tv.accent, Tv.pill).padding(start = 16.dp, end = 22.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(if (v.kind == "series") Icons.Default.VideoLibrary else Icons.Default.PlayArrow, null, Modifier.size(Tv.icon), tint = if (focused) Tv.onFocus else Tv.onAccent)
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (v.kind == "series") "Episodes" else "Watch", style = TvType.button, color = if (focused) Tv.onFocus else Tv.onAccent)
-                }
-            }
-        }
-    }
-        CarouselDefaults.IndicatorRow(itemCount = items.size, activeItemIndex = index, modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp))
-    }
-}
-
 // ---------- Movies / Series ----------
+
+/** A Movies / Series history entry belongs on that page: films on Movies, episodes (and series) on Series. */
+private fun belongsTo(p: Progress, kind: String): Boolean {
+    val k = p.item.optString("kind")
+    return if (kind == "series") k == "episode" || k == "series" || (k.isEmpty() && p.url.contains("/series/"))
+    else k == "movie" || (k.isEmpty() && p.url.contains("/movie/"))
+}
 
 @Composable
 fun VodScreen(act: TvActivity, kind: String) {
-    val ov by produceState(Repo.cachedOverview(kind), Repo.version) { if (value == null) value = runCatching { Repo.overview(kind) }.getOrNull() }
+    var loaded by remember { mutableStateOf(Repo.cachedOverview(kind) != null) }
+    val ov by produceState(Repo.cachedOverview(kind), Repo.version) { if (value == null) value = runCatching { Repo.overview(kind) }.getOrNull(); loaded = true }
     val what = if (kind == "series") "series" else "movies"
     val o = ov
+    val refresh = act.refresh + Repo.version
+    val cw = remember(refresh, kind) { Repo.continueWatching().filter { isVodProgress(it) && belongsTo(it, kind) } }
+    // The slides: this week's six most-watched with a backdrop; each ranked within the trending list.
+    val slides = remember(o) { o?.trending.orEmpty().filter { it.backdrop.isNotEmpty() }.take(6) }
+    val ranks = remember(o) { o?.trending.orEmpty().withIndex().associate { (i, v) -> "${v.kind}:${v.id}" to (i + 1) } }
+    val spot = rememberSpotlight(slides, ranks)
+    val playFocus = remember { FocusRequester() }
+    val listState = rememberPageState()
+    val scope = rememberCoroutineScope()
+    var rowsFocused by remember { mutableStateOf(false) }
     HeldPace()
-    WithScroll(rememberRowAnchor(PAGE_ROW_TOP)) {
-    LazyColumn(Modifier.fillMaxSize(), state = rememberPageState(), contentPadding = PaddingValues(bottom = 56.dp)) {
-        item { Hero(act, o?.trending?.filter { it.backdrop.isNotEmpty() }?.take(6) ?: emptyList(), o == null) }
-        if (o == null) { repeat(3) { item { SkeletonTitle() }; item { SkeletonRow() } }; return@LazyColumn }
-        if (o.trending.isNotEmpty()) { item { RowTitle("Top 10 $what this week", "from TMDB") }; item { CardRow(o.trending.take(10), { it.id }) { v, i -> PosterCard(v, rank = i + 1) { act.go(Screen.Details(v)) } } } }
-        if (o.top.isNotEmpty()) { item { RowTitle("Popular now") }; item { CardRow(o.top.take(40), { it.id }) { v, _ -> PosterCard(v) { act.go(Screen.Details(v)) } } } }
-        if (o.fresh.isNotEmpty()) { item { RowTitle("New releases") }; item { CardRow(o.fresh.take(40), { it.id }) { v, _ -> PosterCard(v) { act.go(Screen.Details(v)) } } } }
-        for ((id, name) in o.groups) item(key = id) { GroupRow(act, kind, id, name) }
+    // The page opens on Play (as Home): first visit only, only if the remote hasn't moved, never when coming back.
+    var autoFocusDone by rememberSaveable { mutableStateOf(false) }
+    var pressed by remember { mutableStateOf(false) }
+    LaunchedEffect(slides.isNotEmpty()) {
+        if (slides.isEmpty() || autoFocusDone) return@LaunchedEffect
+        autoFocusDone = true
+        if (Nav.restoreKey != null) return@LaunchedEffect
+        repeat(12) { kotlinx.coroutines.delay(50); if (pressed) return@LaunchedEffect; runCatching { playFocus.requestFocus() } }
     }
+    // Back from deep in the rows: to the top first (Back again opens the menu), as on Home.
+    BackHandler(enabled = rowsFocused && slides.isNotEmpty()) { scope.launch { listState.animateScrollToItem(0) }; runCatching { playFocus.requestFocus() } }
+
+    if (loaded && o == null && cw.isEmpty()) {
+        EmptyState(if (kind == "series") Icons.Default.VideoLibrary else Icons.Default.Movie, "No $what yet", "Add a playlist with $what in Settings")
+        return
+    }
+    Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown) pressed = true; false }) {
+        SpotlightBackdrop(spot, Modifier.align(Alignment.TopEnd).fillMaxWidth(.74f).aspectRatio(16f / 9f))
+        Column(Modifier.fillMaxSize()) {
+            SpotlightHeader(act, spot, slides, refresh, playFocus, loading = o == null)
+            WithScroll(rememberRowAnchor(SPOT_ROW_TOP + SPOT_ROW_HEAD)) {
+                LazyColumn(Modifier.fillMaxWidth().weight(1f).onFocusChanged { rowsFocused = it.hasFocus }, state = listState,
+                    contentPadding = PaddingValues(top = SPOT_ROW_TOP, bottom = 240.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    var first = slides.isNotEmpty()   // the first row's Up goes to Play
+                    fun up(): Modifier { val f = first; first = false; return Modifier.upToPlay(f, playFocus) }
+                    if (cw.isNotEmpty()) { val m = up(); item(key = "cw") { ContinueRow(act, cw, spot, m) } }
+                    if (o == null) { item(key = "skel") { Column { SkeletonTitle(); SkeletonRow(width = Tv.poster) } }; return@LazyColumn }
+                    if (o.trending.isNotEmpty()) { val m = up(); item(key = "top10") { PosterShelf(act, "top10", "Top 10 $what this week", o.trending.take(10), spot, m, extra = "from TMDB", ranked = true) } }
+                    if (o.top.isNotEmpty()) { val m = up(); item(key = "popular") { PosterShelf(act, "popular", "Popular now", o.top.take(40), spot, m) } }
+                    if (o.fresh.isNotEmpty()) { val m = up(); item(key = "fresh") { PosterShelf(act, "fresh", "New releases", o.fresh.take(40), spot, m) } }
+                    for ((id, name) in o.groups) { val m = up(); item(key = "g:$id") { GroupRow(act, kind, id, name, spot, m) } }
+                }
+            }
+        }
+        // The rows dissolve into the page at the bottom edge instead of being cut off.
+        Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(28.dp).background(Brush.verticalGradient(listOf(Color.Transparent, Tv.bg))))
     }
 }
 
-/** Pages of rows (Movies, Series): where the focused row's cards settle, below its title (with the page's top margin above). */
+/** Pages of rows: where the focused row's cards settle (kept for callers outside the spotlight pages). */
 val PAGE_ROW_TOP = Tv.topMargin + 62.dp
+
+/** A shelf of posters under the spotlight; ranked shelves carry the Top 10 numerals. */
+@Composable
+private fun PosterShelf(act: TvActivity, id: String, title: String, items: List<Vod>, spot: SpotlightState, modifier: Modifier, extra: String? = null, ranked: Boolean = false) {
+    SpotRow(title, modifier, extra = extra) {
+        CardRow(items, key = { "${it.kind}:${it.id}" }) { v, i ->
+            PosterCard(v, Tv.poster, rank = if (ranked) i + 1 else null, restoreKey = "$id|${v.kind}:${v.id}", onFocus = { spot.preview(v) }) { act.go(Screen.Details(v)) }
+        }
+    }
+}
+
+private const val SHELF_MAX = 20
 
 /** A TMDB list / genre: its first titles, then a "See all" tile into the full grid. */
 @Composable
-fun GroupRow(act: TvActivity, kind: String, id: String, name: String) = traced("GroupRow") {
+fun GroupRow(act: TvActivity, kind: String, id: String, name: String, spot: SpotlightState? = null, modifier: Modifier = Modifier) = traced("GroupRow") {
     // Built once, with its titles, when they're already fetched (the usual case: every group is fetched at start).
     val items by produceState(Repo.cachedGroup(kind, id), id, Repo.version) { if (value == null) value = runCatching { Repo.group(kind, id) }.getOrElse { emptyList() } }
     val l = items
-    Column {
-        RowTitle(name, count = l?.size)
+    if (l != null && l.isEmpty()) return@traced   // an empty shelf is left out, not shown as a bare title
+    SpotRow(name, modifier, count = l?.size) {
         if (l == null) SkeletonRow()
-        else if (l.isNotEmpty()) WithScroll(rememberRowKeyline()) { LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
-            items(l.take(20), key = { it.id }) { v -> PosterCard(v) { act.go(Screen.Details(v)) } }
-            if (l.size > 20) item {
-                Column(Modifier.width(Tv.poster)) {
-                    FocusCard(Modifier.width(Tv.poster).aspectRatio(2f / 3f), onClick = { act.go(Screen.Grid(kind, id, name)) }) {
-                        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(Icons.Default.ArrowForward, null, tint = Tv.text, modifier = Modifier.size(28.dp))
-                                Spacer(Modifier.height(8.dp))
-                                Text("See all", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold, color = Tv.text)
-                                Text("${l.size} titles", color = Tv.muted, fontSize = Tv.label)
-                            }
-                        }
-                    }
-                    Caption(" ", null, Tv.poster)
-                }
-            }
+        else WithScroll(rememberRowKeyline()) { LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
+            items(l.take(SHELF_MAX), key = { it.id }) { v -> PosterCard(v, Tv.poster, restoreKey = "g$id|${v.kind}:${v.id}", onFocus = spot?.let { s -> { s.preview(v) } }) { act.go(Screen.Details(v)) } }
+            if (l.size > SHELF_MAX) item(key = "all") { SeeAllTile(l.size, kind) { act.go(Screen.Grid(kind, id, name)) } }
         } }
     }
 }
 
+/** The end of a shelf: a poster-sized tile into the shelf's full grid. */
+@Composable
+private fun SeeAllTile(count: Int, kind: String, onClick: () -> Unit) {
+    Column(Modifier.width(Tv.poster)) {
+        FocusCard(Modifier.width(Tv.poster).aspectRatio(2f / 3f), label = "See all $count", onClick = onClick) {
+            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.size(44.dp).clip(RoundedCornerShape(50)).background(Tv.surface3), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Default.ArrowForward, null, tint = Tv.text, modifier = Modifier.size(Tv.iconM))
+                    }
+                    Spacer(Modifier.height(Tv.s3))
+                    Text("See all", style = TvType.button, color = Tv.text)
+                    Text("$count ${if (kind == "series") "series" else "films"}", fontSize = Tv.label, lineHeight = Tv.labelLine, color = Tv.muted)
+                }
+            }
+        }
+        Caption(" ", null, Tv.poster)
+    }
+}
+
+// ---------- A shelf's full grid ----------
+
+private enum class GridSort(val label: String) { Featured("Featured"), Rating("Top rated"), Newest("Newest"), Title("A–Z") }
+
+private fun sorted(l: List<Vod>, s: GridSort): List<Vod> = when (s) {
+    GridSort.Featured -> l
+    // Ratings with only a handful of votes sort below trusted ones (votes is 0 when TMDB didn't say: kept as is).
+    GridSort.Rating -> l.sortedWith(compareByDescending<Vod> { (it.rating ?: 0.0) * (if (it.votes in 1..49) .8 else 1.0) }.thenBy { it.title.lowercase() })
+    GridSort.Newest -> l.sortedWith(compareByDescending<Vod> { it.year ?: 0 }.thenBy { it.title.lowercase() })
+    GridSort.Title -> l.sortedBy { it.title.lowercase().removePrefix("the ") }
+}
+
 @Composable
 fun GridScreen(act: TvActivity, kind: String, id: String, title: String) {
-    val items by produceState<List<Vod>?>(null) { value = runCatching { Repo.group(kind, id) }.getOrElse { emptyList() } }
+    val items by produceState(Repo.cachedGroup(kind, id)) { if (value == null) value = runCatching { Repo.group(kind, id) }.getOrElse { emptyList() } }
+    var sort by rememberSaveable { mutableStateOf(GridSort.Featured) }
+    // Sorting a few thousand titles stays off the main thread.
+    val shown by produceState<List<Vod>?>(null, items, sort) { val l = items ?: return@produceState; value = withContext(Dispatchers.Default) { sorted(l, sort) } }
+    val what = if (kind == "series") "series" else "films"
+    val gridState = rememberLazyGridState()
+    val scope = rememberCoroutineScope()
+    HeldPace()
     Column(Modifier.fillMaxSize()) {
-        PageTitle(title, items?.let { "${it.size} ${if (kind == "series") "series" else "movies"}" } ?: "Loading…")
-        LazyVerticalGrid(GridCells.Adaptive(Tv.posterWide), contentPadding = PaddingValues(start = Tv.margin, end = Tv.margin, bottom = 56.dp),
-            horizontalArrangement = Arrangement.spacedBy(Tv.gap), verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            items(items ?: emptyList(), key = { it.id }) { v -> PosterCard(v, width = Tv.posterWide) { act.go(Screen.Details(v)) } }
+        Row(Modifier.fillMaxWidth().padding(end = Tv.margin), verticalAlignment = Alignment.Bottom) {
+            Box(Modifier.weight(1f)) { PageTitle(title, items?.let { "${it.size} $what" } ?: "Loading…") }
+            // Sort: the shown order in accent; a new order starts from the top.
+            Row(Modifier.padding(bottom = 18.dp), horizontalArrangement = Arrangement.spacedBy(Tv.s2)) {
+                GridSort.entries.forEach { s -> TvChip(s.label, s == sort, { if (s != sort) { sort = s; scope.launch { gridState.scrollToItem(0) } } }) }
+            }
+        }
+        val l = shown
+        when {
+            l == null -> GridSkeleton()
+            l.isEmpty() -> EmptyState(if (kind == "series") Icons.Default.VideoLibrary else Icons.Default.Movie, "Nothing here yet", "This shelf has no $what in your playlist right now")
+            // Fixed-size cells: every poster the same size in every grid, whatever the screen width.
+            else -> LazyVerticalGrid(GridCells.FixedSize(Tv.posterWide), state = gridState, contentPadding = PaddingValues(start = Tv.margin, end = Tv.margin, top = Tv.s2, bottom = 56.dp),
+                horizontalArrangement = Arrangement.spacedBy(Tv.gap), verticalArrangement = Arrangement.spacedBy(Tv.s5)) {
+                items(l, key = { it.id }) { v -> PosterCard(v, width = Tv.posterWide, restoreKey = "grid|${v.kind}:${v.id}") { act.go(Screen.Details(v)) } }
+            }
+        }
+    }
+}
+
+/** Three rows of grey posters while a grid loads. */
+@Composable
+private fun GridSkeleton() {
+    val b = shimmerBrush()
+    Column(Modifier.padding(start = Tv.margin, top = Tv.s2), verticalArrangement = Arrangement.spacedBy(Tv.s5)) {
+        repeat(2) {
+            Row(horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
+                repeat(6) { Box(Modifier.width(Tv.posterWide).aspectRatio(2f / 3f).clip(Tv.shape).background(b)) }
+            }
         }
     }
 }

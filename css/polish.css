@@ -1315,6 +1315,7 @@ html:not(.mac) .ts-box kbd { display: none !important; }
 .sp-fx-meta { margin-top: 3px; font-size: var(--fs-footnote); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sp-on { color: var(--text); }
 .sp-off { color: var(--muted); }
+.sp-likely { color: color-mix(in srgb, var(--text) 78%, var(--muted)); }
 .sp-fx.off { cursor: default; }
 .sp-fx.off:active { background: none; }
 .sp-fx.off .sp-fx-team, .sp-fx.off .sp-time { color: color-mix(in srgb, var(--text) 70%, var(--bg)); }

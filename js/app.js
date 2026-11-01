@@ -8,7 +8,7 @@ import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
 import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport, importance } from './sports.js';
-import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup } from './fixtures.js';
+import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup, isEventGroup, eventChannelsFor } from './fixtures.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -3502,10 +3502,12 @@ function sportsChannels(p) {
   const all = m3uKinds(p)?.live || p.channels, mode = sportsMode();
   const hit = sportsChanCache.get(all);
   if (hit && hit.mode === mode && hit.n === all.length) return hit.list;
-  const list = all.filter(c => isLiveChannel(c) && !isSeparator(c) && visibleGroup(p, c.group || '') && sportsLangOk(c)).map(c => ({ ...c, src: p.id }));
+  // US league-pass and PPV event groups ("🏀 NBA League Pass", "🎟️ PPV Event") carry their games in English with no UK tag.
+  const list = all.filter(c => isLiveChannel(c) && !isSeparator(c) && visibleGroup(p, c.group || '') && (sportsLangOk(c) || US_PASS.test(c.group || ''))).map(c => ({ ...c, src: p.id }));
   sportsChanCache.set(all, { mode, n: all.length, list });
   return list;
 }
+const US_PASS = /league pass|sunday ticket|center ice|mlb\.?tv|ppv event|college (?:football|basketball)/i;
 const sportsLangOk = c => { const m = sportsMode(); return m === 'uk' ? isUkChannel(c) : m === 'any' || (isEnglishGroup(c.group || '') && !otherLanguage(c)); };
 const sportsSources = () => state.playlists.filter(p => !p.virtual && p.content !== 'vod' && epgUrls(p).length);
 
@@ -3515,7 +3517,7 @@ async function loadSports(force = false) {
   sportsHub.loading = (async () => {
     const results = [];
     // With real fixtures, the guide is only searched for the sports the feed doesn't cover (darts, snooker, cricket…).
-    const queries = fxUsable() ? SPORT_QUERIES.filter(q => !FEED_SPORTS.has(classify(q)?.sport)) : SPORT_QUERIES;
+    const queries = fxUsable() ? SPORT_QUERIES.filter(q => !FEED_SPORTS.has(classify(q)?.sport) || classify(q)?.sport === 'golf') : SPORT_QUERIES;
     sportsHub.done = 0; sportsHub.total = queries.length * Math.max(1, sportsSources().length);
     const football = queries.slice(0, 13), rest = queries.slice(13);
     const publish = () => { sportsHub.results = results.slice(); renderSportsSoon(); };
@@ -3609,7 +3611,7 @@ const renderSportsSoon = debounce(() => renderSports(), 120);
 // asked which of your channels shows each game (POST /fixtures/channels). An older server without /fixtures, or a feed
 // that fails, leaves the guide-only page above as it was. Sports the feed doesn't cover (darts, snooker, cricket, golf…)
 // still come from the guide search and sit in the same lists.
-const FEED_SPORTS = new Set(['football', 'f1', 'nfl', 'nba', 'ufc', 'rugby']);
+const FEED_SPORTS = new Set(['football', 'f1', 'nfl', 'nba', 'nhl', 'mlb', 'ufc', 'rugby']);
 const FX_BIG = 70;   // Premier League … LaLiga: shown even when not on your channels; smaller ones only under their chip
 const fxHub = { at: 0, ok: undefined, list: null, loading: null, chAt: 0, chLoading: null, on: new Map() };   // fixture id -> [{ channel, prog, live }]
 const fxUsable = () => fxHub.ok === true && !!fxHub.list;
@@ -3659,14 +3661,40 @@ async function loadFixtureChannels(force = false) {
           const out = on.get(id) || [];
           for (const m of list) {
             for (const c of ix.byId.get(String(m.id).toLowerCase()) || ix.byName.get(normName(m.name)) || []) {
-              if (!out.some(x => x.channel.url === c.url)) out.push({ channel: c, prog: [m.start, m.end, m.title, m.desc || ''], live: !!m.live });
+              if (!out.some(x => x.channel.url === c.url)) out.push({ channel: c, prog: [m.start, m.end, m.title, m.desc || ''], live: !!m.live, ev: m.ev || (m.live ? 'live' : 'listed') });
             }
           }
           on.set(id, out);
         }
       } catch {}
     }
-    for (const l of on.values()) l.sort((a, b) => b.live - a.live || (isUkChannel(b.channel) - isUkChannel(a.channel)) || sportsPrefer(b.channel) - sportsPrefer(a.channel));
+    // Event / league-pass channels named after the game ("Lakers @ Jazz", "PPV EVENT 05: UFC 333 …"): by the feed's id in
+    // the tvg-id, or by the name (with its date, if it has one, agreeing). Re-read on every load: providers rename daily.
+    const evChans = sportsSources().flatMap(p => sportsChannels(p).filter(c => isEventGroup(c.group)));
+    if (evChans.length) {
+      for (const f of fxHub.list || []) {
+        if (f.status === 'final' || f.status === 'postponed' || f.start > Date.now() + 3 * DAY || !(f.home || f.sport === 'ufc')) continue;
+        const named = eventChannelsFor(f, evChans);
+        if (!named.length) continue;
+        const out = on.get(f.id) || [];
+        for (const { channel, how } of named) {
+          const have = out.find(x => x.channel.url === channel.url);
+          if (have) { have.named = true; have.how = how; } else out.push({ channel, prog: [f.start, f.end, fixtureTitle(f), channel.name], live: false, ev: 'event', named: true, how });
+        }
+        on.set(f.id, out);
+      }
+    }
+    // Best evidence first: a main broadcaster's slot naming both teams (tagged live, then just on air); an event channel
+    // named after the game, more so when its guide agrees; the club's channel confirmed by its guide; (the app's guess at
+    // a club channel comes later, in fxItem).
+    const score = x => {
+      const main = !isEventGroup(x.channel.group);
+      if (main && x.ev === 'live') return 50;
+      if (main && x.ev === 'listed') return 40;
+      if (x.ev === 'club') return 20;
+      return 30 + (x.named && x.ev !== 'event' ? 5 : 0) + (x.how === 'id' ? 3 : 0) + (x.ev === 'live' ? 1 : 0);
+    };
+    for (const l of on.values()) l.sort((a, b) => score(b) - score(a) || (isUkChannel(b.channel) - isUkChannel(a.channel)) || sportsPrefer(b.channel) - sportsPrefer(a.channel));
     fxHub.on = on; fxHub.chAt = Date.now();
   })().finally(() => { fxHub.chLoading = null; renderSportsSoon(); repaintSportsBells(); });
   return fxHub.chLoading;
@@ -3677,7 +3705,7 @@ const fxName = t => (t.name.length <= 16 || !t.short ? t.name : t.short);
 // Club crests from the feed's CDN, asked for at the size shown (a 4 KB picture instead of a 36 KB one).
 const crestSrc = u => /^https:\/\/a\.espncdn\.com\/i\//.test(u || '') ? `https://a.espncdn.com/combiner/i?img=${u.slice(22)}&w=64&h=64` : u || '';
 const crest = t => t?.crest ? `<img class="sp-crest" src="${esc(crestSrc(t.crest))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<span class="sp-crest"></span>';
-const fxBadge = f => `<span class="sp-crest sp-badge">${esc(f.sport === 'f1' ? 'F1' : f.sport === 'ufc' ? 'UFC' : (f.comp || '?').slice(0, 2))}</span>`;
+const fxBadge = f => `<span class="sp-crest sp-badge">${esc(f.sport === 'f1' ? 'F1' : f.sport === 'ufc' ? 'UFC' : f.sport === 'golf' ? 'G' : (f.comp || '?').slice(0, 2))}</span>`;
 // One shown item, fixture or guide programme: { f?, channel, prog, live, title, comp, sport, start, rank }.
 // Club / match channels from the playlist's team groups ("UK| CHAMPIONSHIP PPV", "UK| SPFL PPV", …), for games no main
 // channel lists: a Championship game with no Sky slot is usually on the home club's own channel.
@@ -3696,13 +3724,24 @@ function fxItem(f) {
   const best = fxHub.on.get(f.id)?.[0];
   if (!best && f.home && f.sport === 'football') {
     const tc = teamChannelFor(f, teamChannels());
-    if (tc) return { f, channel: tc.channel, prog: [f.start, f.end, fixtureTitle(f), `${f.comp || ''} — on the ${tc.side === 'match' ? 'match' : 'club'} channel`], live: false, teamCh: true, title: fixtureTitle(f), comp: f.comp, sport: f.sport, start: f.start, rank: f.compRank };
+    if (tc) return { f, channel: tc.channel, prog: [f.start, f.end, fixtureTitle(f), `${f.comp || ''} — probably on the ${tc.side === 'match' ? 'match' : 'club'} channel (not in its guide)`], live: false, teamCh: true, ev: 'likely', title: fixtureTitle(f), comp: f.comp, sport: f.sport, start: f.start, rank: f.compRank };
   }
-  return { f, channel: best?.channel || null, prog: best?.prog || null, live: !!best?.live, title: fixtureTitle(f), comp: f.comp, sport: f.sport, start: f.start, rank: f.compRank };
+  const evGroup = !!best && best.ev !== 'club' && (US_PASS.test(best.channel.group || '') || /\bevents?\b/i.test(best.channel.group || ''));
+  return { f, channel: best?.channel || null, prog: best?.prog || null, live: !!best?.live, ev: best?.ev || null, evGroup,
+    teamCh: !!best && !evGroup && (best.ev === 'club' || isTeamChannelGroup(best.channel.group)), title: fixtureTitle(f), comp: f.comp, sport: f.sport,
+    start: f.allDay && best ? best.prog[0] : f.start, rank: f.compRank, main: !!best && !isEventGroup(best.channel.group) };
 }
 const guideItem = it => ({ ...it, start: it.prog[0], rank: importance(it) });
 // Until the channels are known, nothing (not a flash of "Not on your channels").
-const fxWhere = it => it.channel ? `<span class="sp-on">On ${esc(it.teamCh ? channelLabel(it.channel.name).replace(/\s*\/\/.*$/, '').replace(/^.*\|\s*/, '') + ' channel' : channelLabel(it.channel.name))}</span>` : fxHub.chAt || !it.f ? '<span class="sp-off">Not on your channels</span>' : '';
+// "On Sky Sports Main Event" (the guide lists the game there), "On Blackburn Rovers channel" (the club channel's own
+// guide shows it), "Likely on Blackburn Rovers channel" (a club channel, nothing in its guide to confirm it).
+const teamChLabel = c => channelLabel(c.name).replace(/\s*\/\/.*$/, '').replace(/^.*\|\s*/, '').replace(/\s+(?:tv|channel)$/i, '');
+// League-pass / PPV channels go by their group ("On NBA League Pass"): their names are long and change daily.
+const passLabel = g => String(g || '').replace(/[^\p{L}\p{N}&+./' -]+/gu, ' ').replace(/[ᴬ-ᵪᶜ-ᶿ²³¹⁰-₟]+/g, '').replace(/\s+/g, ' ').trim();
+const fxWhere = it => it.channel && it.evGroup ? `<span class="sp-on">On ${esc(passLabel(it.channel.group) || channelLabel(it.channel.name))}</span>`
+  : it.channel
+  ? (it.ev === 'likely' ? `<span class="sp-likely">Likely on ${esc(teamChLabel(it.channel))} channel</span>` : `<span class="sp-on">On ${esc(it.teamCh ? `${teamChLabel(it.channel)} channel` : channelLabel(it.channel.name))}</span>`)
+  : fxHub.chAt || !it.f ? '<span class="sp-off">Not on your channels</span>' : '';
 const fxLines = it => it.f?.home
   ? `<span class="sp-fx-team">${crest(it.f.home)}<span>${esc(fxName(it.f.home))}</span>${it.f.status !== 'scheduled' && it.f.home.score != null ? `<b>${esc(it.f.home.score)}</b>` : ''}</span>
      <span class="sp-fx-team">${crest(it.f.away)}<span>${esc(fxName(it.f.away))}</span>${it.f.status !== 'scheduled' && it.f.away.score != null ? `<b>${esc(it.f.away.score)}</b>` : ''}</span>`
@@ -3718,14 +3757,14 @@ const spFxLive = (it, k) => {
     <span class="sp-fxl-ch">${fxWhere(it)}</span></li>`;
 };
 const spFxRow = (it, k, attr = 'data-up') => `<li class="sp-row sp-fx${it.channel ? '' : ' off'}" ${attr}="${k}"${it.channel ? ' role="button" tabindex="0"' : ''}>
-    <span class="sp-time">${fmtTime(it.start)}</span>
+    <span class="sp-time">${it.f?.allDay && !it.channel ? '<small>All</small>day' : fmtTime(it.start)}</span>
     <span class="sp-text"><span class="sp-fx-teams">${fxLines(it)}</span><span class="sp-fx-meta">${fxMeta(it)}</span></span>
     ${it.channel && it.prog[0] > Date.now() ? spBell(it, `data-bell="${attr}:${k}"`) : '<span class="sp-bell-gap"></span>'}</li>`;
 const spFxTeamCard = (fl, k) => {
   const f = fxTeam(fl.q)[0], it = fxItem(f), on = fxIsOn(f);
   const mine = [f.home, f.away].find(t => t && followMatches(fl.q, { home: t, away: { name: '' } })) || null;
   const when = on ? `<i class="nc-dot"></i>${esc(f.status === 'live' && f.home ? `${f.minute || 'Live'} · ${f.home.score}–${f.away.score}` : 'Live now')}` : esc(`${shortDay(f.start)} ${fmtTime(f.start)}`);
-  const where = it.channel ? esc(channelLabel(it.channel.name)) : fxHub.chAt ? 'Not on your channels' : '';
+  const where = fxWhere(it).replace(/<[^>]+>/g, '').replace(/^On /, '');   // already escaped
   return `<li class="sp-team" data-team="${k}" role="button" tabindex="0"><b>${mine ? crest(mine) : ''}<span>${esc(fl.q)}</span></b>
     <span class="sp-team-title">${esc(it.title)}</span><span class="sp-team-when">${when}${where ? ` · ${where}` : ''}</span></li>`;
 };
@@ -3736,7 +3775,10 @@ function renderFixtureSports(body, chipsEl) {
   const liveFx = all.filter(f => fxIsOn(f, now)), upFx = all.filter(f => f.status === 'scheduled' && f.start > now);
   // Guide-only sports: what the feed doesn't cover, found the old way.
   const g = buildSports(sportsHub.results, sportsNow(), now);
-  const gLive = g.live.filter(it => it.sport && !FEED_SPORTS.has(it.sport)).map(guideItem), gUp = g.upcoming.filter(it => !FEED_SPORTS.has(it.sport) && it.prog[0] < until).map(guideItem);
+  // (golf is in both: the feed's tournaments, and the guide for the tours it doesn't list — the same slot once)
+  const fxSlots = new Set([...liveFx, ...upFx].map(fxItem).filter(it => it.channel).map(it => `${it.channel.url}|${it.prog[0]}`));
+  const gOk = it => !FEED_SPORTS.has(it.sport) && !fxSlots.has(`${it.channel.url}|${it.prog[0]}`);
+  const gLive = g.live.filter(it => it.sport && gOk(it)).map(guideItem), gUp = g.upcoming.filter(it => gOk(it) && it.prog[0] < until).map(guideItem);
   const have = new Set([...liveFx, ...upFx].map(f => f.sport).concat([...gLive, ...gUp].map(it => it.sport)));
   const ids = SPORTS.filter(s => have.has(s.id)).map(s => s.id);
   if (sportsFilter !== 'all' && !ids.includes(sportsFilter)) sportsFilter = 'all';
@@ -3745,7 +3787,9 @@ function renderFixtureSports(body, chipsEl) {
   chipsEl.hidden = ids.length <= 1;
   chipsEl.scrollLeft = x;
   // "All" keeps to the big competitions and whatever is on your channels; a sport's chip shows every game.
-  const shown = it => sportsFilter === 'all' ? it.channel || it.rank >= FX_BIG || !it.f : it.sport === sportsFilter;
+  // "All": the big competitions, games on a main channel, and guide-found sport; league-pass / club-channel-only games
+  // (a dozen NBA games a night) under their sport's chip.
+  const shown = it => sportsFilter === 'all' ? it.rank >= FX_BIG || !it.f || (it.channel && it.main) : it.sport === sportsFilter;
   const live = [...liveFx.map(fxItem), ...gLive].filter(shown).sort((a, b) => b.rank - a.rank || !!b.channel - !!a.channel || a.start - b.start).slice(0, 16);
   const up = [...upFx.map(fxItem), ...gUp].filter(shown).sort((a, b) => a.start - b.start || b.rank - a.rank);
   sportsHub.shown = { live, up };

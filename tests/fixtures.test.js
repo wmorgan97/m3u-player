@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normaliseEspn, fixtureTitle, isOn, foldName, teamVariants, titleHasTeams, followMatches, programmeIndex, channelsFor, matchChannels, sortFixtures } from '../js/fixtures.js';
+import { normaliseEspn, fixtureTitle, isOn, foldName, teamVariants, titleHasTeams, followMatches, programmeIndex, channelsFor, matchChannels, sortFixtures, clubIndex, clubChannelsFor, eventChannelsFor, nameDate, isEventGroup } from '../js/fixtures.js';
 
 // Trimmed from ESPN's scoreboard replies of 1 Nov 2026 (site.api.espn.com/apis/site/v2/sports/…/scoreboard).
 const team = (id, displayName, shortDisplayName, name = displayName) => ({ id, displayName, shortDisplayName, name, logo: `https://a.espncdn.com/i/teamlogos/soccer/500/${id}.png` });
@@ -145,4 +145,68 @@ test('channel matching: F1 needs the session and the race, UFC the card', () => 
   assert.deepEqual(channelsFor(quali, byHour), []);
   const card = { id: 'ufc:9', sport: 'ufc', comp: 'UFC', title: 'UFC 334: Gane v Hokit', start: t + H, prelims: t - H, end: t + 4 * H, status: 'scheduled' };
   assert.deepEqual(channelsFor(card, byHour).map(c => c.id), ['ufc']);
+});
+
+test('new competitions: WSL is women\'s, golf is one item per round day', () => {
+  const [w] = normaliseEspn(match('9', '2026-11-01T12:00Z', team('1', 'Chelsea', 'Chelsea'), team('2', 'Arsenal', 'Arsenal'), status('pre', 'STATUS_SCHEDULED', '')), { key: 'eng.w.1', sport: 'football', comp: 'WSL', rank: 60, women: true });
+  assert.equal(w.women, true);
+  assert.equal(w.compRank, 60);
+  assert.ok(followMatches('Chelsea Women', w));
+  assert.ok(!followMatches('Chelsea', w));
+  const men = { ...w, women: undefined };
+  assert.ok(followMatches('Chelsea', men));
+  assert.ok(!followMatches('Chelsea Women', men));
+  const g = normaliseEspn({ id: '5', name: 'Abu Dhabi Aldar Championship', date: '2026-11-05T05:00Z', endDate: '2026-11-08T05:00Z', status: status('pre', 'STATUS_SCHEDULED') }, { key: 'golf.eur', sport: 'golf', comp: 'DP World Tour', rank: 54 });
+  assert.deepEqual(g.map(f => f.session), ['Round 1', 'Round 2', 'Round 3', 'Round 4']);
+  assert.ok(g.every(f => f.allDay && f.end - f.start === 24 * 3600_000));
+  for (const [slug, comp] of [['eng.3', 'League One'], ['eng.4', 'League Two'], ['eng.5', 'National League'], ['sco.2', 'Scottish Championship'], ['eng.trophy', 'EFL Trophy']]) {
+    const [f] = normaliseEspn(match('1', '2026-11-03T19:45Z', team('1', 'Rochdale', 'Rochdale'), team('2', 'Doncaster Rovers', 'Doncaster'), status('pre', 'STATUS_SCHEDULED', '')), { key: slug, sport: 'football', comp });
+    assert.equal(f.comp, comp);
+  }
+});
+
+test('evidence: a pre-match show or another sport is never the source; club channels confirmed by their guide', () => {
+  const H = 3600_000, ko = Date.UTC(2026, 10, 3, 19, 45), now = ko - 3 * H;
+  const fx = { id: 'eng.2:1', sport: 'football', comp: 'Championship', start: ko, end: ko + 2 * H, status: 'scheduled', home: team('1', 'Blackburn Rovers', 'Blackburn'), away: team('2', 'Stoke City', 'Stoke') };
+  const p = (id, name, start, end, title) => ({ id, name, start, end, title, desc: '' });
+  const byHour = programmeIndex([
+    p('ss', 'Sky Sports Football', ko - H, ko + 10 * 60_000, 'EFL Countdown: Blackburn v Stoke'),       // build-up show, over by 10 minutes in
+    p('ss2', 'Sky Sports+', ko - 15 * 60_000, ko + 2 * H, 'Live EFL: Blackburn v Stoke'),
+    p('nfl', 'Sky Sports NFL', ko, ko + 3 * H, 'NFL: Blackburn Rovers v Stoke City'),                 // made-up, but another sport
+  ], now);
+  assert.deepEqual(channelsFor(fx, byHour).map(c => [c.id, c.ev]), [['ss2', 'live']]);
+  const chans = [{ id: 'blackburnrovers.efl', name: 'Blackburn Rovers' }, { id: 'stokecity.efl', name: 'UK: STOKE CITY TV' }, { id: 'bbc1', name: 'BBC One' }];
+  const clubs = clubIndex(chans, [fx]);
+  const progs = { 'blackburnrovers.efl': [[ko - 30 * 60_000, ko + 2 * H, 'vs Stoke City (H)', '']], 'stokecity.efl': [[ko - 30 * 60_000, ko + 2 * H, 'Stoke City Highlights', '']] };
+  const l = clubChannelsFor(fx, clubs, id => ({ name: id, progs: progs[id] || [] }), now);
+  assert.deepEqual(l.map(c => [c.id, c.ev]), [['blackburnrovers.efl', 'club']]);   // Stoke's slot is highlights: no evidence
+  const all = matchChannels([fx], byHour, clubs, id => ({ name: id, progs: progs[id] || [] }), now)[fx.id];
+  assert.deepEqual(all.map(c => c.ev), ['live', 'club']);
+});
+
+test('event / league-pass channels: matchup in the name, its date must agree, placeholders never match', () => {
+  const ko = Date.UTC(2026, 10, 1, 23, 30);
+  const f = { id: 'nba:401909861', sport: 'nba', comp: 'NBA', start: ko, end: ko + 3 * 3600_000, status: 'scheduled', home: { name: 'Utah Jazz', short: 'Jazz', nick: 'Jazz' }, away: { name: 'Los Angeles Lakers', short: 'Lakers', nick: 'Lakers' } };
+  const c = (name, group, tvgId = '') => ({ name, group, tvgId, url: name });
+  const chans = [c('Lakers @ Jazz', '🏀 NBA League Pass', 'teamarr-event-401909861'), c('NBA 05: Lakers vs Jazz start:2026-11-01 23:30:00', '🏀 NBA League Pass'),
+    c('NBA 06: Lakers vs Jazz start:2026-10-20 23:30:00', '🏀 NBA League Pass'), c('NBA 07: No Game Today', '🏀 NBA League Pass'), c('Boston Celtics', '🏀 NBA League Pass')];
+  assert.deepEqual(eventChannelsFor(f, chans).map(x => [x.channel.name, x.how]), [['Lakers @ Jazz', 'id'], ['NBA 05: Lakers vs Jazz start:2026-11-01 23:30:00', 'name']]);
+  const ufc = { id: 'ufc:9', sport: 'ufc', comp: 'UFC', title: 'UFC 333: Volkanovski v Evloev', start: Date.UTC(2026, 9, 24, 18), end: 0, status: 'scheduled' };
+  const ppv = [c('PPV EVENT 03: PRELIMS UFC 333 (10.24 12:00 PM ET)', '🎟️ PPV Event'), c('PPV EVENT 05: UFC 333 Volkanovski vs. Evloev (10.24 2:00 PM ET)', '🎟️ PPV Event'), c('PPV EVENT 06: UFC 332 Smith vs. Jones (09.12 2:00 PM ET)', '🎟️ PPV Event')];
+  assert.deepEqual(eventChannelsFor(ufc, ppv).map(x => x.channel.name.slice(0, 13)), ['PPV EVENT 05:', 'PPV EVENT 03:']);   // main card first
+  assert.deepEqual(nameDate('National League 4 | Barrow vs Eastleigh // UK Sat 31 Oct 3:00pm'), [9, 31]);
+  assert.deepEqual(nameDate('Harvest Hustle @ Oct 23 7:00 PM :Flo Racing 03'), [9, 23]);
+  assert.equal(nameDate('Lakers @ Jazz'), null);
+  assert.ok(isEventGroup('🏀 NBA League Pass') && isEventGroup('🎟️ PPV Event') && isEventGroup('UK| CHAMPIONSHIP PPV') && !isEventGroup('UK | Sports'));
+});
+
+test('real-data regressions (1-3 Nov 2026 guide)', () => {
+  // "Birmingham" is one club; MLS "New England v Miami" is not the NFL's Patriots at Dolphins.
+  const H = 3600_000, ko = Date.UTC(2026, 10, 3, 20);
+  const p = (id, title, start = ko - 15 * 60_000) => ({ id, name: id, start, end: start + 2.5 * H, title, desc: '' });
+  const byHour = programmeIndex([p('ssplus', 'Live EFL: Birmingham v Millwall'), p('wbz', 'NFL Football - New England Patriots at Miami Dolphins ᴸᶦᵛᵉ')], ko - H);
+  const bir = { id: 'b', sport: 'football', start: ko, end: ko + 2 * H, status: 'scheduled', home: team('1', 'Birmingham City', 'Birmingham'), away: team('2', 'Millwall', 'Millwall') };
+  const mls = { id: 'm', sport: 'football', start: ko, end: ko + 2 * H, status: 'scheduled', home: team('3', 'New England Revolution', 'New England'), away: team('4', 'Inter Miami CF', 'Miami') };
+  assert.deepEqual(channelsFor(bir, byHour).map(c => c.id), ['ssplus']);
+  assert.deepEqual(channelsFor(mls, byHour), []);
 });
