@@ -132,7 +132,7 @@ class TvActivity : ComponentActivity() {
         }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Tv.accent, background = Tv.bg, surface = Tv.surface, onSurface = Tv.text, onBackground = Tv.text, surfaceVariant = Tv.surface2)) {
-                CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides QuickBringIntoView) { App() }
+                CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides TvScroll.default) { App() }
             }
         }
     }
@@ -165,7 +165,8 @@ class TvActivity : ComponentActivity() {
         i?.getStringExtra("testFollows")?.let { f -> i.removeExtra("testFollows"); Repo.testFollows = f.split('|').filter { it.isNotBlank() }.map { Repo.Follow(it.trim(), 1) }.ifEmpty { null }; Repo.version++ }
         // `--es testFollowSync <name>`: follows <name> (synced), then unfollows it 5 s later: checks the server round trip.
         i?.getStringExtra("testFollowSync")?.let { n -> i.removeExtra("testFollowSync"); Repo.toggleFollow(n); lifecycleScope.launch { delay(5_000); if (Repo.isFollowing(n)) Repo.toggleFollow(n) } }
-        i?.getStringExtra("testScreen")?.let { sc -> i.removeExtra("testScreen"); when (sc) { "live" -> root(Screen.Live()); "guide" -> root(Screen.Guide()); "home" -> root(Screen.Home); "sports" -> root(Screen.Sports) } }
+        i?.getStringExtra("testScreen")?.let { sc -> i.removeExtra("testScreen"); when (sc) { "live" -> root(Screen.Live()); "guide" -> root(Screen.Guide()); "home" -> root(Screen.Home); "sports" -> root(Screen.Sports)
+            "movies" -> root(Screen.Vods("movies")); "series" -> root(Screen.Vods("series")); "search" -> root(Screen.Search); "settings" -> root(Screen.Settings) } }
         i?.getStringExtra("testSeries")?.let { q -> i.removeExtra("testSeries")   // test hook: open the first series found for q
             lifecycleScope.launch { runCatching { Repo.search(q) }.getOrNull()?.second?.firstOrNull()?.let { root(Screen.Vods("series")); go(Screen.Details(it)) } } }
         // `--es testEpisodes <url> [--ei testStart secs]`: a pretend 3-episode season on that video, to check next-episode autoplay.
@@ -198,10 +199,12 @@ class TvActivity : ComponentActivity() {
     override fun dispatchKeyEvent(e: KeyEvent): Boolean {
         // A held arrow repeats ~20 times a second. When a frame runs late those repeats queue up and the list keeps moving
         // after the key is let go; repeats that are already stale are dropped instead (the highlight stops when you stop).
-        // Held arrows also move at a steady pace (~11 steps a second): quick, but slow enough to stop where you mean to.
+        // Held arrows also move at a steady pace (KeyPace: ~10 steps a second sideways and in lists, ~6.5 between the big
+        // rows of Home / Movies / Sports): quick, but slow enough to stop where you mean to, and the scroll keeps up.
         if (e.action == KeyEvent.ACTION_DOWN && e.keyCode in KeyEvent.KEYCODE_DPAD_UP..KeyEvent.KEYCODE_DPAD_RIGHT) {
             val t = android.os.SystemClock.uptimeMillis()
-            if (e.repeatCount > 0 && (t - e.eventTime > 40 || t - lastRepeatAt < 90)) return true
+            val pace = if (e.keyCode == KeyEvent.KEYCODE_DPAD_UP || e.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) KeyPace.verticalMs else KeyPace.horizontalMs
+            if (e.repeatCount > 0 && (t - e.eventTime > 40 || t - lastRepeatAt < pace)) return true
             lastRepeatAt = t
         }
         // The remote's search / mic key: Search, listening.

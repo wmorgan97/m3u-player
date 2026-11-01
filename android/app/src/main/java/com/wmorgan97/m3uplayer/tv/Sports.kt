@@ -70,6 +70,7 @@ private val COMPETITIONS = listOf(
     Competition("LaLiga", listOf("LaLiga", "La Liga"), true, football = true),
     Competition("Serie A", listOf("Serie A"), true, football = true),
     Competition("Bundesliga", listOf("Bundesliga"), true, football = true),
+    Competition("MLS", listOf("MLS", "Major League Soccer"), true, Regex("""\bmls\b|major league soccer""", RegexOption.IGNORE_CASE), football = true),
     Competition("Formula 1", listOf("F1", "Formula 1"), false, Regex("""\b(f1|formula 1|formula one)\b""", RegexOption.IGNORE_CASE)),
     Competition("MotoGP", listOf("MotoGP"), false),
     Competition("Six Nations", listOf("Six Nations"), true),
@@ -255,12 +256,16 @@ object SportsHub {
      *  team in the title ("Arsenal v Spurs"), not the magazine shows and old matches around them. */
     private fun teamMatches(ix: Index, q: String, now: Long): List<SportItem> {
         val want = fastNorm(q); if (want.length < 2) return emptyList()
+        val women = wantsWomens(q)
         val year = java.util.Calendar.getInstance().apply { timeInMillis = now }.get(java.util.Calendar.YEAR)
         val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.UK).format(java.util.Date(now))
         val best = HashMap<String, Pair<SportItem, Int>>()
         for (m in raw[q].orEmpty()) {
             if (m.end <= now || m.start >= now + 72 * 3600_000L) continue
             if (!fastNorm(m.title).contains(want) || !FIXTURE.containsMatchIn(" ${m.title} ") || !real(m.title, m.desc, today, year) || !isLiveEvent(m.title, m.desc)) continue
+            // A real match only ("X v Y", "X vs Y", "X @ Y": never "Made in Chelsea"), and the men's side unless the follow
+            // itself says women's ("Chelsea" is the men's team; "Chelsea Women" theirs). Same rule as js/sports.js.
+            if (!MATCH_SPLIT.containsMatchIn(" ${m.title} ") || isWomensFixture(m.title, m.desc) != women) continue
             if (Repo.englishOnly && foreign(m.title, m.desc)) continue
             if (fastNorm(m.title) == fastNorm(m.name) || m.title.contains(" | ")) continue
             if (MAGAZINE.containsMatchIn(m.title) && !(LIVE_WORD.containsMatchIn(m.title) && FIXTURE_SPLIT.containsMatchIn(m.title))) continue
@@ -347,6 +352,7 @@ object SportsHub {
     private val WOMEN = Regex("""\b(women'?s?|ladies|femenino|féminine|frauen|uwcl|wsl)\b""", RegexOption.IGNORE_CASE)
     private val NON_WORD = Regex("""[^\p{L}\p{N}]+""")
     private val FIXTURE_SPLIT = Regex("""\s(?:v|vs|@)\.?\s""")
+    private val MATCH_SPLIT = Regex("""\s(?:v|vs|@)\.?\s""", RegexOption.IGNORE_CASE)
     private val YEAR = Regex("""\b(19[5-9]\d|20\d\d)\b(/\d{2,4})?""")
     private val SEASON = Regex("""\b(\d{2})/(\d{2})\b""")
     private val OTHER_SPORT = Regex("""\b(volleyball|basketball|handball|hockey|cricket|rugby|futsal|darts|snooker|pool|netball|kabaddi|e-?sports|efootball|fifa|beach soccer)\b""", RegexOption.IGNORE_CASE)
@@ -422,6 +428,7 @@ object SportsHub {
             if (liveKeys.add(matchKey(it))) live += it
         }
         val soon = rows.flatMap { it.second }.filter { it.p.start < now + 4 * 3600_000L }.sortedBy { it.p.start }.distinctBy { it.key }.take(20)
+            .sortedByDescending { importance(it) }   // the biggest events first; soonest first among equals (stable sort)
         // Live now keeps the competitions' order (Premier League first), then the sports channels' own matches.
         // (Row keys must be unique: one guide programme can reach a channel under two guide ids.)
         // Sports channels: only ones showing a real programme (event channels list their own name all day), your
@@ -434,7 +441,9 @@ object SportsHub {
         val teams = Repo.follows.map { f -> f.q to teamMatches(ix, f.q, now).firstOrNull() }
         if (test == "groups") { test = null   // adb test hook: which groups the page's channels come from (names only)
             (live.map { it.c } + rows.flatMap { r -> r.second.map { it.c } } + showing.map { it.first }).map { "${it.group} :: ${it.name}" }.distinct().forEach { Log.i(TAG, "sports channel: $it") } }
-        return Page(live.distinctBy { it.key }.take(30), soon, rows, showing.take(40), teams)
+        // Live now: the biggest events first (Premier League above MLS and minor sports), else as found, then ending soonest.
+        val liveSorted = live.withIndex().sortedWith(compareByDescending<IndexedValue<SportItem>> { importance(it.value) }.thenBy { it.index }.thenBy { it.value.p.end }).map { it.value }
+        return Page(liveSorted.distinctBy { it.key }.take(30), soon, rows, showing.take(40), teams)
     }
 
     /** One match once: the same fixture on several channels (each guide words it differently: "Fútbol Bundesliga -
@@ -547,6 +556,8 @@ private fun dayWord(t: Long, now: Long): String {
 
 // Cards sized to what they hold (a header line, two lines of title, a detail line), not to a picture's 16:9: more rows
 // fit on the screen and there's no empty band in the middle.
+/** Where the focused row's cards settle (the first row's own place under the page title, so the page doesn't jump). */
+private val SPORTS_ROW_TOP = 124.dp
 private val LIVE_W = 300.dp
 private val LIVE_H = 132.dp
 private val NEXT_W = 236.dp
@@ -597,6 +608,8 @@ fun SportsScreen(act: TvActivity) {
     fun watch(c: Channel) { val g = group(c); act.playLive(g, g.indexOf(c).coerceAtLeast(0)) }
 
     val listState = rememberPageState()
+    HeldPace()
+    WithScroll(rememberRowAnchor(SPORTS_ROW_TOP)) {
     LazyColumn(Modifier.fillMaxSize().onFocusChanged { pageFocused = it.hasFocus }, state = listState, contentPadding = PaddingValues(bottom = 56.dp)) {
         item(key = "title") {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -671,6 +684,7 @@ fun SportsScreen(act: TvActivity) {
             }
         }
     }
+    }
     LaunchedEffect(p) {
         val t = SportsHub.test?.takeIf { it != "groups" } ?: return@LaunchedEffect
         if (t.startsWith("scroll:")) { if (SportsHub.busy) return@LaunchedEffect; SportsHub.test = null; delay(500); listState.scrollToItem(t.substringAfter(':').toIntOrNull() ?: 0); return@LaunchedEffect }
@@ -685,21 +699,9 @@ fun SportsScreen(act: TvActivity) {
     teamInfo?.let { t -> TeamDialog(t) { teamInfo = null } }
 }
 
-/** A quiet pill (the Details screen's season pill): grey, the chosen one lighter, the highlight solid white. */
+/** UK channels / All countries: the shared [TvChip]. */
 @Composable
-private fun SportsChip(text: String, selected: Boolean, onClick: () -> Unit) {
-    var f by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(50)
-    Box(Modifier.onFocusChanged { f = it.isFocused }
-        .onKeyEvent { e -> if (e.type == KeyEventType.KeyUp && (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter)) { onClick(); true } else false }
-        .clearAndSetSemantics { contentDescription = text + if (selected) ", selected" else "" }
-        .focusable()
-        .background(when { f -> Tv.text; selected -> Color(0x40FFFFFF); else -> Color(0x1AFFFFFF) }, shape)
-        .padding(horizontal = 16.dp, vertical = 6.dp)) {
-        Text(text, fontSize = Tv.bodySmall, lineHeight = 18.sp, fontWeight = if (f || selected) FontWeight.SemiBold else FontWeight.Medium,
-            color = when { f -> Tv.bg; selected -> Tv.text; else -> Tv.text2 })
-    }
-}
+private fun SportsChip(text: String, selected: Boolean, onClick: () -> Unit) = TvChip(text, selected, onClick)
 
 /** "Arsenal v Spurs" -> [Arsenal, Spurs]: the two sides of a fixture, for "Follow …" in the programme's details. */
 fun teamsIn(title: String, comp: String?): List<String> {
@@ -717,7 +719,7 @@ private fun TeamCard(team: String, s: SportItem?, now: Long, reminded: Boolean, 
     val live = s?.onAir(now) == true
     val title = s?.let { tidyTitle(it.p.title, it.comp) }
     val label = when { s == null -> "$team, no match in the next 3 days"; live -> "$team: $title, live on ${s.c.name}"; else -> "$team: $title, ${dayWord(s.p.start, now)} ${hhmm(s.p.start)} on ${s.c.name}" }
-    FocusCard(modifier.width(NEXT_W).height(NEXT_H), restoreKey = "sp:team:" + team.lowercase(), label = label, onLongClick = onLong, onClick = onClick) {
+    FocusCard(modifier.width(NEXT_W).height(NEXT_H), scale = Tv.scaleWide, restoreKey = "sp:team:" + team.lowercase(), label = label, onLongClick = onLong, onClick = onClick) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface)))) {
             Column(Modifier.fillMaxSize().padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -748,13 +750,13 @@ private fun TeamCard(team: String, s: SportItem?, now: Long, reminded: Boolean, 
 private fun TeamDialog(team: String, onDismiss: () -> Unit) {
     val first = remember { FocusRequester() }
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Column(Modifier.freshOkOnly().width(460.dp).background(Tv.surface, Tv.bigShape).border(1.dp, Tv.line, Tv.bigShape).padding(24.dp)) {
-            Text(team, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("Every match on your channels gets a reminder, here and on your other devices.", fontSize = Tv.bodySmall, lineHeight = Tv.bodySmallLine, color = Tv.text2, modifier = Modifier.padding(top = 6.dp))
+        TvDialogCard(460.dp) {
+            Text(team, fontSize = Tv.title, fontWeight = Tv.wTitle, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("Their next live match on your channels shows under My teams. Open a match to set a reminder for it.", fontSize = Tv.bodySmall, lineHeight = Tv.bodySmallLine, color = Tv.text2, modifier = Modifier.padding(top = 6.dp))
             Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                androidx.tv.material3.OutlinedButton(onClick = { Repo.toggleFollow(team); onDismiss() }, modifier = Modifier.focusRequester(first)) { Text("Stop following", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold) }
-                androidx.tv.material3.OutlinedButton(onClick = onDismiss) { Text("Close", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold) }
+                TvButton("Stop following", { Repo.toggleFollow(team); onDismiss() }, Modifier.focusRequester(first))
+                TvButton("Close", onDismiss)
             }
         }
         LaunchedEffect(Unit) { delay(50); runCatching { first.requestFocus() } }
@@ -788,7 +790,7 @@ private fun LiveSportCard(s: SportItem, now: Long, modifier: Modifier, reminded:
     val title = tidyTitle(s.p.title, s.comp)
     val left = ((s.p.end - now) / 60_000).coerceAtLeast(1)
     val sub = listOfNotNull(s.comp, if (left < 60) "$left min left" else "until ${hhmm(s.p.end)}").joinToString("  ·  ")
-    FocusCard(modifier.width(LIVE_W).height(LIVE_H), scale = 1.05f, restoreKey = "sp:live:" + s.key, label = "$title, live on ${s.c.name}, $sub", onLongClick = onLong, onClick = onClick) {
+    FocusCard(modifier.width(LIVE_W).height(LIVE_H), scale = Tv.scaleWide, restoreKey = "sp:live:" + s.key, label = "$title, live on ${s.c.name}, $sub", onLongClick = onLong, onClick = onClick) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface)))) {
             Column(Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 14.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -808,13 +810,7 @@ private fun LiveSportCard(s: SportItem, now: Long, modifier: Modifier, reminded:
 }
 
 @Composable
-private fun LivePill() {
-    Row(Modifier.background(Color(0x40FF4550), RoundedCornerShape(5.dp)).padding(horizontal = 7.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(Tv.live))
-        Spacer(Modifier.width(5.dp))
-        Text("LIVE", fontSize = Tv.micro, fontWeight = FontWeight.Bold, color = Tv.text)
-    }
-}
+private fun LivePill() = TvBadge("LIVE", tone = BadgeTone.Live)
 
 /** Coming up: when (day and time), the match, and the channel. A bell when a reminder is set. */
 @Composable
@@ -823,7 +819,7 @@ private fun NextSportCard(s: SportItem, now: Long, reminded: Boolean, showComp: 
     val day = dayWord(s.p.start, now)
     val mins = (s.p.start - now) / 60_000
     val soon = mins in 0..59
-    FocusCard(modifier.width(NEXT_W).height(NEXT_H), restoreKey = "sp:$row:" + s.key, label = "$title, $day ${hhmm(s.p.start)} on ${s.c.name}", onLongClick = onClick, onClick = onClick) {
+    FocusCard(modifier.width(NEXT_W).height(NEXT_H), scale = Tv.scaleWide, restoreKey = "sp:$row:" + s.key, label = "$title, $day ${hhmm(s.p.start)} on ${s.c.name}", onLongClick = onClick, onClick = onClick) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface2, Tv.surface)))) {
             Column(Modifier.fillMaxSize().padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 12.dp)) {
                 Row(verticalAlignment = Alignment.Bottom) {
@@ -845,3 +841,51 @@ private fun NextSportCard(s: SportItem, now: Long, reminded: Boolean, showComp: 
         }
     }
 }
+
+// ---------- women's fixtures (equivalent to js/sports.js isWomens / wantsWomens) ----------
+
+private val WOMENS_TITLE = Regex("""\b(women'?s?|ladies|wsl|uwcl|femenino|feminine|f[ée]minine|frauen|girls)\b|\(w\)|\bw\s+v\b|\bv\s+[^|]*\bw\b(?=\s|$)|barclays wsl|women'?s super league""", RegexOption.IGNORE_CASE)
+private val WOMENS_DESC = Regex("""^\s*(?:women'?s|wsl|barclays women)""", RegexOption.IGNORE_CASE)
+private val COMBINING = Regex("""\p{Mn}+""")
+
+/** A women's fixture: "Chelsea Women v Arsenal Women", "Chelsea (W) v …", "Chelsea W v Arsenal W", "Barclays WSL: …",
+ *  or a description that starts "Women's …" / "WSL …". */
+fun isWomensFixture(title: String, desc: String = ""): Boolean =
+    WOMENS_TITLE.containsMatchIn(java.text.Normalizer.normalize(title, java.text.Normalizer.Form.NFD).replace(COMBINING, "")) || WOMENS_DESC.containsMatchIn(desc)
+
+/** The follow asks for the women's side ("Chelsea Women", "Arsenal W", "WSL"). */
+fun wantsWomens(q: String): Boolean = Regex("""\b(women|womens|ladies|wsl|w)\b""", RegexOption.IGNORE_CASE).containsMatchIn(q)
+
+// ---------- how big an event is (equivalent to js/sports.js IMPORTANCE / classify / importance) ----------
+
+/** Title -> competition, in the iPhone's order (first match wins). */
+private val CLASSIFY: List<Pair<String, Regex>> = listOf(
+    "Darts" to """\bdarts?\b|\bpdc\b""", "Snooker" to """\bsnooker\b""",
+    "Cricket" to """\bcricket\b|\bt20\b|\bipl\b|indian premier league|the hundred|big bash|\bodi\b|test match|\bashes\b""",
+    "Six Nations" to """six nations""", "Rugby" to """\brugby\b|gallagher premiership|\burc\b|super league|top 14|champions cup rugby""",
+    "Golf" to """\bgolf\b|\bpga\b|\blpga\b|dp world tour|ryder cup|\bthe masters\b|\bliv golf\b""",
+    "Tennis" to """\btennis\b|\batp\b|\bwta\b|wimbledon|roland[- ]garros|australian open|us open tennis""",
+    "MotoGP" to """\bmoto ?gp\b|\bmoto[23]\b""", "F1" to """\bf1\b|formula (?:1|one)\b""", "UFC" to """\bufc\b""",
+    "Boxing" to """(?<!kick[- ]?)\bboxing\b""", "WWE" to """\bwwe\b|smackdown|wrestlemania""", "NFL" to """\bnfl\b|redzone|super bowl""",
+    "NBA" to """\bnba\b""", "NHL" to """\bnhl\b|stanley cup""", "MLB" to """\bmlb\b|world series""",
+    "Champions League" to """(?<!\b(?:afc|caf|concacaf|women'?s)\s)champions league""", "Europa League" to """europa (?:conference )?league""",
+    "FA Cup" to """\bfa cup\b|emirates fa cup""", "Carabao Cup" to """carabao cup|\befl cup\b|league cup""",
+    "Scottish Premiership" to """scottish premiership|\bspfl\b""", "EFL" to """\befl\b|sky bet|^championship\b|\bleague (?:one|two)\b""",
+    "Premier League" to """premier league""", "LaLiga" to """\bla ?liga\b""", "Serie A" to """\bserie a\b""", "Bundesliga" to """bundesliga""",
+    "MLS" to """\bmls\b|major league soccer""", "F1" to """grand prix\b""",
+).map { (c, r) -> c to Regex(r, RegexOption.IGNORE_CASE) }
+
+private val IMPORTANCE = mapOf("Premier League" to 100, "Champions League" to 95, "F1" to 92, "FA Cup" to 88, "Europa League" to 85, "Six Nations" to 84,
+    "Boxing" to 80, "UFC" to 78, "Carabao Cup" to 76, "Scottish Premiership" to 74, "EFL" to 72, "LaLiga" to 70, "Serie A" to 66, "Bundesliga" to 65,
+    "NFL" to 62, "Cricket" to 60, "Rugby" to 58, "Darts" to 56, "Snooker" to 55, "Golf" to 52, "Tennis" to 52, "MotoGP" to 50, "NBA" to 40, "NHL" to 35, "MLB" to 34,
+    "WWE" to 30, "MLS" to 25)
+private val REAL_MATCH = Regex("""\S\s+(?:v|vs\.?|@)\s+\S""", RegexOption.IGNORE_CASE)
+
+/** Which competition a title is from (the iPhone's classify), or null. */
+fun classifySport(title: String): String? = CLASSIFY.firstOrNull { it.second.containsMatchIn(title) }?.first
+
+/** How much a UK viewer is likely to care: the competition's weight (0 when unclassified), +4 for a real "X v Y" match. */
+fun importance(title: String, comp: String? = null): Int =
+    (IMPORTANCE[classifySport(title) ?: if (comp == "Formula 1") "F1" else comp] ?: 0) + (if (REAL_MATCH.containsMatchIn(title)) 4 else 0)
+
+private fun importance(it: SportItem) = importance(it.p.title, it.comp)

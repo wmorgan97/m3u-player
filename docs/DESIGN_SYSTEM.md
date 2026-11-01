@@ -1,5 +1,7 @@
 # Design System: Shield TV app
 
+> **Superseded (Phase 1 redesign):** the current tokens, components, focus and motion rules, and file ownership are in `android/docs/TV_DESIGN_SYSTEM.md`. The tables below describe the earlier design and are kept for history.
+
 **Source of truth.** The token definitions live in `tv/Theme.kt` (the `object Tv` block, lines 32–73). Paths are relative to `android/app/src/main/java/com/wmorgan97/m3uplayer/`, and line numbers refer to the audit working tree.
 
 **Theme.** `TvActivity` maps these tokens into tv-material3's `darkColorScheme`:

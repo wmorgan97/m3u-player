@@ -65,17 +65,35 @@ private const val PREVIEW_DELAY = 320L // ms the highlight must rest on a card b
 
 /** What the spotlight shows. */
 @Immutable
-data class Spot(val key: String, val kicker: String, val accent: Boolean, val title: String, val tags: List<String>, val rating: Double?, val plot: String, val backdrop: String)
+data class Spot(val key: String, val kicker: String, val accent: Boolean, val title: String, val tags: List<String>, val rating: Double?, val plot: String, val backdrop: String,
+                val quality: List<String> = emptyList())
+
+private val Q_UHD = Regex("""\b(4k|uhd|2160p?)\b|ᵁᴴᴰ""", RegexOption.IGNORE_CASE)
+private val Q_1080 = Regex("""\b(1080p?|fhd|full ?hd)\b""", RegexOption.IGNORE_CASE)
+private val Q_720 = Regex("""\b720p?\b""", RegexOption.IGNORE_CASE)
+private val Q_HD = Regex("""\bhd\b|ᴴᴰ""", RegexOption.IGNORE_CASE)
+private val Q_DV = Regex("""dolby ?vision|\bdv\b""", RegexOption.IGNORE_CASE)
+private val Q_HDR = Regex("""\bhdr(10\+?)?\b|ᴴᴰᴿ""", RegexOption.IGNORE_CASE)
+private val Q_ATMOS = Regex("""atmos""", RegexOption.IGNORE_CASE)
+private val Q_DOLBY = Regex("""dolby(?! ?vision)|\bddp\b|\beac3\b|\b[57]\.1\b""", RegexOption.IGNORE_CASE)
+
+/** The best picture and sound the playlist has for a title, read from its best copy's name and group (the catalogue
+ *  keeps the best-scoring copy as the title): "4K", "Dolby Vision" / "HDR", "Atmos" / "Dolby"; else "1080p" / "720p" /
+ *  "HD". Only what the names actually say; nothing when they say nothing. */
+fun qualityTags(name: String, group: String): List<String> {
+    val t = "$name $group"
+    val res = when { Q_UHD.containsMatchIn(t) -> "4K"; Q_1080.containsMatchIn(t) -> "1080p"; Q_720.containsMatchIn(t) -> "720p"; Q_HD.containsMatchIn(t) -> "HD"; else -> null }
+    val hdr = when { Q_DV.containsMatchIn(t) -> "Dolby Vision"; Q_HDR.containsMatchIn(t) -> "HDR"; else -> null }
+    val audio = when { Q_ATMOS.containsMatchIn(t) -> "Atmos"; Q_DOLBY.containsMatchIn(t) -> "Dolby"; else -> null }
+    return listOfNotNull(res, hdr, audio)
+}
+
+/** Premium formats get the accent tag; plain resolutions stay neutral. */
+private fun premium(q: String) = q == "4K" || q == "HDR" || q == "Dolby Vision" || q == "Atmos"
 
 private sealed interface Target {
     data object Hero : Target
     data class Card(val v: Vod, val p: Progress? = null) : Target
-}
-
-/** Rows settle with the picked card's row title just under the spotlight (the same place every time). */
-private class RowAnchor(private val anchorPx: Float) : BringIntoViewSpec {
-    override val scrollAnimationSpec: androidx.compose.animation.core.AnimationSpec<Float> = tween(220, easing = FastOutSlowInEasing)
-    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = offset - anchorPx
 }
 
 @Composable
@@ -111,6 +129,19 @@ fun HomeScreen(act: TvActivity) {
     val scope = rememberCoroutineScope()
     val playFocus = remember { FocusRequester() }
     val listState = rememberPageState()
+    HeldPace()
+    // Home opens on Play: the slides usually arrive a moment after the first frame, by which time the page has put the
+    // highlight on the first row. Once they're in, the highlight moves to Play, but only on the first visit, only if
+    // the remote hasn't been touched, and never when coming back to Home (Back restores the card you left).
+    var autoFocusDone by rememberSaveable { mutableStateOf(false) }
+    var pressed by remember { mutableStateOf(false) }
+    var heroFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(slides.isNotEmpty()) {
+        if (slides.isEmpty() || autoFocusDone) return@LaunchedEffect
+        autoFocusDone = true
+        if (Nav.restoreKey != null) return@LaunchedEffect
+        repeat(12) { delay(50); if (pressed || heroFocused) return@LaunchedEffect; runCatching { playFocus.requestFocus() } }
+    }
 
     // Every slide's backdrop is fetched up front, so a slide never appears blank and then pops in.
     LaunchedEffect(slides) { val l = coil.Coil.imageLoader(ctx); slides.forEach { l.enqueue(ImageRequest.Builder(ctx).data(it.backdrop).build()) } }
@@ -142,7 +173,7 @@ fun HomeScreen(act: TvActivity) {
     val nothing = loaded == 3 && movies == null && series == null && cw.isEmpty()
     if (nothing) { EmptyState(Icons.Default.Movie, "No films or series yet", "Add a playlist with films and series in Settings"); return }
     val heroMode = spot?.key?.startsWith("hero:") != false   // follows what the spotlight shows, so buttons and text change together
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown) pressed = true; false }) {
         Backdrop(spot?.backdrop ?: "", if (heroMode) 800 else 500, Modifier.align(Alignment.TopEnd).fillMaxWidth(.74f).aspectRatio(16f / 9f))
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxWidth().height(SPOT_H)) {
@@ -151,16 +182,16 @@ fun HomeScreen(act: TvActivity) {
                 else SpotText(s, heroMode)
                 if (slides.isNotEmpty()) {
                     val v = slides[index.coerceIn(0, slides.size - 1)]
-                    val alpha by animateFloatAsState(if (heroMode) 1f else 0f, tween(200), label = "buttons")
+                    val alpha by animateFloatAsState(if (heroMode) 1f else 0f, tween(Tv.durShort + 50, easing = Tv.easeMove), label = "buttons")
                     HeroButtons(act, v, refresh, playFocus, Modifier.align(Alignment.BottomStart).padding(start = Tv.margin, bottom = 10.dp).graphicsLayer { this.alpha = alpha }
-                        .onFocusChanged { if (it.hasFocus) target.value = Target.Hero },
+                        .onFocusChanged { heroFocused = it.hasFocus; if (it.hasFocus) target.value = Target.Hero },
                         onStep = { d -> index = (index + d + slides.size) % slides.size; touchedAt = System.currentTimeMillis(); d < 0 && index == 0 },
                         canStepBack = index > 0)
                     if (slides.size > 1) Dots(slides.size, index, Modifier.align(Alignment.BottomEnd).padding(end = Tv.margin, bottom = 22.dp).graphicsLayer { this.alpha = alpha })
                 }
             }
-            val anchor = with(LocalDensity.current) { (ROW_TOP + ROW_HEAD).toPx() }
-            CompositionLocalProvider(LocalBringIntoViewSpec provides remember(anchor) { RowAnchor(anchor) }) {
+            // Rows settle with the picked card's row title just under the spotlight (the same place every time).
+            WithScroll(rememberRowAnchor(ROW_TOP + ROW_HEAD)) {
                 LazyColumn(Modifier.fillMaxWidth().weight(1f).onFocusChanged { rowsFocused = it.hasFocus }, state = listState,
                     contentPadding = PaddingValues(top = ROW_TOP, bottom = 240.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     var first = true
@@ -184,7 +215,7 @@ fun HomeScreen(act: TvActivity) {
                     if (rows.isEmpty() && (movies == null || series == null)) item(key = "skel") { Column { SkeletonTitle(); SkeletonRow(width = Tv.poster) } }
                     val firstRow = if (first) rows.firstOrNull()?.id else null
                     items(rows, key = { it.id }) { r ->
-                        HomeRowFrame(r.title, upToHero(r.id == firstRow)) {
+                        HomeRowFrame(r.title, upToHero(r.id == firstRow), extra = if (r.ranked) "from TMDB" else null) {
                             CardRow(r.items, key = { "${it.kind}:${it.id}" }) { v, i ->
                                 PosterCard(v, Tv.poster, rank = if (r.ranked) i + 1 else null, restoreKey = "${r.id}|${v.kind}:${v.id}",
                                     onFocus = { target.value = Target.Card(v) }) { act.go(Screen.Details(v)) }
@@ -215,7 +246,7 @@ fun HomeScreen(act: TvActivity) {
 private val menuFor = mutableStateOf<Progress?>(null)
 
 private fun slideSpot(v: Vod, rank: Int) = Spot("hero:${v.kind}:${v.id}", "#$rank TRENDING ${if (v.kind == "series") "SERIES" else "MOVIE"}", true, v.title,
-    listOfNotNull(v.year?.toString()) + v.genres.take(2) + listOfNotNull(quality(v.name, v.group)), v.rating, v.overview, v.backdrop)
+    listOfNotNull(v.year?.toString()) + v.genres.take(2), v.rating, v.overview, v.backdrop, qualityTags(v.name, v.group))
 
 /** A card's spotlight: what the row already knows, with TMDB's backdrop, plot and genres filled in where it doesn't
  *  (saved on the TV for 30 days, so mostly instant). */
@@ -229,10 +260,11 @@ private suspend fun cardSpot(v: Vod, p: Progress?): Spot {
     if (p != null) {
         val m = vodMeta(p.item.optString("name"))
         val ep = if (p.item.optString("kind") == "episode" && m.episode != null) "S${m.season ?: 1} E${m.episode}" else null
-        return Spot("cw:${p.url}", "CONTINUE WATCHING", false, v.title, listOfNotNull(ep, "${clock((p.d - p.t).toLong())} left") + genres.take(2), rating, plot, backdrop)
+        return Spot("cw:${p.url}", "CONTINUE WATCHING", false, v.title, listOfNotNull(ep, "${clock((p.d - p.t).toLong())} left") + genres.take(2), rating, plot, backdrop,
+            qualityTags(p.item.optString("name"), p.item.optString("group")))
     }
     return Spot("${v.kind}:${v.id}", if (v.kind == "series") "SERIES" else "MOVIE", false, v.title,
-        listOfNotNull(year?.toString()) + genres.take(2) + listOfNotNull(quality(v.name, v.group)), rating, plot, backdrop)
+        listOfNotNull(year?.toString()) + genres.take(2), rating, plot, backdrop, qualityTags(v.name, v.group))
 }
 
 /** The backdrop: right-aligned, fading into the page on the left and at the bottom, cross-fading between titles. */
@@ -240,7 +272,7 @@ private suspend fun cardSpot(v: Vod, p: Progress?): Spot {
 private fun Backdrop(url: String, fadeMs: Int, modifier: Modifier) {
     val ctx = LocalContext.current
     Box(modifier) {
-        Crossfade(url, animationSpec = tween(fadeMs), label = "backdrop") { u ->
+        Crossfade(url, animationSpec = tween(fadeMs, easing = Tv.easeMove), label = "backdrop") { u ->
             if (u.isNotEmpty()) AsyncImage(remember(u) { ImageRequest.Builder(ctx).data(u).crossfade(false).build() }, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         }
         Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Tv.bg, .38f to Tv.bg.copy(alpha = .72f), .7f to Color.Transparent)))
@@ -250,17 +282,18 @@ private fun Backdrop(url: String, fadeMs: Int, modifier: Modifier) {
 
 @Composable
 private fun SpotText(s: Spot, heroMode: Boolean) {
-    Crossfade(s, animationSpec = tween(260), label = "spot") { sp ->
+    Crossfade(s, animationSpec = tween(Tv.durMed, easing = Tv.easeMove), label = "spot") { sp ->
         var titleLines by remember(sp.key) { mutableIntStateOf(1) }
         Column(Modifier.padding(start = Tv.margin, top = 22.dp).fillMaxWidth(.56f)) {
             Text(sp.kicker, fontSize = Tv.label, color = if (sp.accent) Tv.accent else Tv.muted, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, maxLines = 1)
             Spacer(Modifier.height(6.dp))
-            Text(sp.title, fontSize = Tv.display, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = if (heroMode) 1 else 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine,
+            Text(sp.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = if (heroMode) 1 else 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine,
                 onTextLayout = { titleLines = it.lineCount })
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 sp.tags.firstOrNull()?.let { Tag(it) }
                 sp.rating?.takeIf { it > 0 }?.let { Tag("★ %.1f".format(it), color = Tv.star) }
+                sp.quality.forEach { q -> if (premium(q)) Tag(q, color = Tv.text, bg = Tv.accentDeep) else Tag(q) }
                 sp.tags.drop(1).forEach { Tag(it, color = Tv.muted, bg = Color(0x14FFFFFF)) }
             }
             if (sp.plot.isNotBlank()) {
@@ -290,21 +323,15 @@ private fun HeroButtons(act: TvActivity, v: Vod, refresh: Int, playFocus: FocusR
         }
     }
     Row(modifier, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Button(onClick = {
+        TvButton(if (resumeAt != null) "Resume" else "Play", {
             if (v.kind == "movie") Repo.movieUrl(v)?.let { url -> act.play(listOf(movieItem(v, url, resumeAt ?: 0.0)), 0) }
             else scope.launch {
                 val all = runCatching { Repo.episodes(v) }.getOrNull()
                 val next = all?.let { nextEpisode(it) }
                 if (all != null && next != null) playEpisode(act, v, all, next.first, next.second) else act.go(Screen.Details(v))
             }
-        }, modifier = Modifier.focusRequester(playFocus).steps(left = true, right = false)) {
-            Icon(Icons.Default.PlayArrow, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp))
-            Text(if (resumeAt != null) "Resume" else "Play", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold)
-        }
-        OutlinedButton(onClick = { Nav.pending = null; act.go(Screen.Details(v)) }, modifier = Modifier.steps(left = false, right = true)) {
-            Icon(Icons.Default.Info, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
-            Text("More info", fontSize = Tv.bodySmall, fontWeight = FontWeight.SemiBold)
-        }
+        }, Modifier.focusRequester(playFocus).steps(left = true, right = false), icon = Icons.Default.PlayArrow, style = TvButtonStyle.Primary)
+        TvButton("More info", { Nav.pending = null; act.go(Screen.Details(v)) }, Modifier.steps(left = false, right = true), icon = Icons.Default.Info)
     }
 }
 
@@ -315,14 +342,15 @@ private fun Dots(count: Int, active: Int, modifier: Modifier) {
     }
 }
 
-/** A row: its title, then its cards (which scroll sideways with the app's usual quick ease). */
+/** A row: its title (and a quiet source, e.g. "from TMDB" on the Top 10s), then its cards (keyline scrolling: CardRow). */
 @Composable
-private fun HomeRowFrame(title: String, modifier: Modifier, content: @Composable () -> Unit) {
+private fun HomeRowFrame(title: String, modifier: Modifier, extra: String? = null, content: @Composable () -> Unit) {
     Column(modifier) {
-        Box(Modifier.height(ROW_HEAD).padding(start = Tv.margin, end = Tv.margin)) {
-            Text(title, fontSize = Tv.rowTitle, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(Modifier.height(ROW_HEAD).padding(start = Tv.margin, end = Tv.margin), verticalAlignment = Alignment.Top) {
+            Text(title, fontSize = Tv.rowTitle, lineHeight = Tv.rowTitleLine, fontWeight = Tv.wTitle, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            if (extra != null) Text(extra, fontSize = Tv.label, color = Tv.muted, maxLines = 1, modifier = Modifier.padding(start = 10.dp, top = 4.dp))
         }
-        CompositionLocalProvider(LocalBringIntoViewSpec provides QuickBringIntoView) { content() }
+        content()
     }
 }
 
