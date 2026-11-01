@@ -50,11 +50,18 @@ const COMPETITIONS = [
   ['LaLiga', 'football', /\bla ?liga\b/i],
   ['Serie A', 'football', /\bserie a\b/i],
   ['Bundesliga', 'football', /bundesliga/i],
+  ['MLS', 'football', /\bmls\b|major league soccer/i],
   // Motor racing without a series named: a Grand Prix is F1 unless it's darts / MotoGP (caught above).
   ['F1', 'f1', /grand prix\b/i],
 ];
 const SPORT_ORDER = new Map(SPORTS.map((s, i) => [s.id, i]));
 const COMP_ORDER = new Map(COMPETITIONS.map(([c], i) => [c, i]));
+/** How much a UK viewer is likely to care, for ordering "Live now": the Premier League above MLS and minor events. */
+const IMPORTANCE = { 'Premier League': 100, 'Champions League': 95, F1: 92, 'FA Cup': 88, 'Europa League': 85, 'Six Nations': 84,
+  Boxing: 80, UFC: 78, 'Carabao Cup': 76, 'Scottish Premiership': 74, EFL: 72, LaLiga: 70, 'Serie A': 66, Bundesliga: 65,
+  NFL: 62, Cricket: 60, Rugby: 58, Darts: 56, Snooker: 55, Golf: 52, Tennis: 52, MotoGP: 50, NBA: 40, NHL: 35, MLB: 34,
+  WWE: 30, MLS: 25 };
+export const importance = it => (IMPORTANCE[it.comp] ?? 0) + (/\S\s+(?:v|vs\.?|@)\s+\S/i.test(it.title || '') ? 4 : 0);
 
 /** Which competition a programme title is from: { comp, sport } or null (not one we follow). */
 export function classify(title) {
@@ -175,7 +182,7 @@ export function buildSports(results, nowList = [], now = Date.now()) {
     live.push({ channel, prog, title, comp: k?.comp || null, sport: k?.sport || null });
   }
   const rank = it => it.sport ? (SPORT_ORDER.get(it.sport) ?? 99) * 100 + (COMP_ORDER.get(it.comp) ?? 99) : 1e6;
-  live.sort((a, b) => rank(a) - rank(b) || a.prog[1] - b.prog[1]);
+  live.sort((a, b) => importance(b) - importance(a) || rank(a) - rank(b) || a.prog[1] - b.prog[1]);
   const have = new Set([...live, ...upcoming].map(it => it.sport).filter(Boolean));
   return { live, upcoming, sports: SPORTS.filter(s => have.has(s.id)).map(s => s.id) };
 }
