@@ -7,7 +7,8 @@ import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from 
 import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
-import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport } from './sports.js';
+import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport, importance } from './sports.js';
+import { fixtureTitle, isOn as fxIsOn, followMatches } from './fixtures.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
 
@@ -3513,12 +3514,14 @@ async function loadSports(force = false) {
   if (!canSync() || (!force && sportsHub.at && Date.now() - sportsHub.at < SPORTS_FRESH)) return;
   sportsHub.loading = (async () => {
     const results = [];
-    sportsHub.done = 0; sportsHub.total = SPORT_QUERIES.length * Math.max(1, sportsSources().length);
-    const football = SPORT_QUERIES.slice(0, 13), rest = SPORT_QUERIES.slice(13);
+    // With real fixtures, the guide is only searched for the sports the feed doesn't cover (darts, snooker, cricket…).
+    const queries = fxUsable() ? SPORT_QUERIES.filter(q => !FEED_SPORTS.has(classify(q)?.sport)) : SPORT_QUERIES;
+    sportsHub.done = 0; sportsHub.total = queries.length * Math.max(1, sportsSources().length);
+    const football = queries.slice(0, 13), rest = queries.slice(13);
     const publish = () => { sportsHub.results = results.slice(); renderSportsSoon(); };
     for (const p of sportsSources()) {
       const chans = sportsChannels(p);
-      if (!chans.length) { sportsHub.done += SPORT_QUERIES.length; continue; }
+      if (!chans.length) { sportsHub.done += queries.length; continue; }
       const urls = epgUrls(p);
       // A server that knows batched searches answers { found }; an older one only searches one word at a time.
       if (sportsHub.batch === undefined) {
@@ -3526,7 +3529,7 @@ async function loadSports(force = false) {
       }
       if (sportsHub.batch) {
         const w = wantedFor(chans);
-        await Promise.all([football, rest].map(async qs => {
+        await Promise.all([football, rest].filter(qs => qs.length).map(async qs => {
           try {
             const r = await fetch(serverApi('guide'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ urls, finds: qs, ids: [...w.ids], names: [...w.names] }) });
             const found = r.ok ? (await r.json()).found || {} : {};
@@ -3538,8 +3541,8 @@ async function loadSports(force = false) {
         const en = state.settings.vodLanguage !== 'all';
         let i = 0;
         await Promise.all([0, 1, 2].map(async () => {
-          while (i < SPORT_QUERIES.length) {
-            const q = SPORT_QUERIES[i++];
+          while (i < queries.length) {
+            const q = queries[i++];
             const l = await findOnTv(q).catch(() => []);
             results.push(...l.filter(x => srcOf(x.channel) === p.id && sportsLangOk(x.channel)));
             sportsHub.done++; publish();
@@ -3557,6 +3560,7 @@ async function loadSports(force = false) {
 async function loadTeams() {
   state.follows ||= (await db.get('follows').catch(() => null)) || [];
   await Promise.all(state.follows.map(async f => {
+    if (fxUsable() && fxTeam(f.q).length) return;   // the fixtures feed knows this team
     const l = await findOnTv(f.q).catch(() => []);
     const en = state.settings.vodLanguage !== 'all';
     // Real games only: marked live by the guide (not a replay or highlights), a match not "Made In Chelsea", the men's
@@ -3595,11 +3599,194 @@ function showSports() {
   view.onclick = sportsClick;
   renderSports();
   // On a cold start the server may not be found yet: wait for it (the page shows its loading state meanwhile).
-  const go = () => { if (location.hash !== '#/sports') return; loadSports(); loadTeams(); renderSports(); };
+  const go = () => { if (location.hash !== '#/sports') return; Promise.resolve(loadFixtures()).then(() => { loadFixtureChannels(); loadSports(); loadTeams(); renderSports(); }); renderSports(); };
   if (detectedServer) go(); else Promise.race([serverReady, new Promise(r => setTimeout(r, 10000))]).then(go);
 }
 const renderSportsSoon = debounce(() => renderSports(), 120);
-setInterval(() => { if (location.hash === '#/sports' && !document.hidden) renderSports(); }, MINUTE);   // progress lines, live → upcoming
+
+// ---------- Sports: real fixtures ----------
+// The server's fixture list (GET /fixtures, see server/fixtures.js) says what is actually being played; the guide is only
+// asked which of your channels shows each game (POST /fixtures/channels). An older server without /fixtures, or a feed
+// that fails, leaves the guide-only page above as it was. Sports the feed doesn't cover (darts, snooker, cricket, golf…)
+// still come from the guide search and sit in the same lists.
+const FEED_SPORTS = new Set(['football', 'f1', 'nfl', 'nba', 'ufc', 'rugby']);
+const FX_BIG = 70;   // Premier League … LaLiga: shown even when not on your channels; smaller ones only under their chip
+const fxHub = { at: 0, ok: undefined, list: null, loading: null, chAt: 0, chLoading: null, on: new Map() };   // fixture id -> [{ channel, prog, live }]
+const fxUsable = () => fxHub.ok === true && !!fxHub.list;
+const withQuery = (u, q) => u + (u.includes('?') ? '&' : '?') + q;
+
+async function loadFixtures(force = false) {
+  if (fxHub.loading) return fxHub.loading;
+  if (!canSync() || (!force && fxHub.at && Date.now() - fxHub.at < 10 * MINUTE)) return;
+  fxHub.loading = (async () => {
+    fxHub.at = Date.now();   // also after a failure: try again in 10 minutes, not on every render
+    try {
+      const r = await fetch(withQuery(serverApi('fixtures'), 'days=7'), { cache: 'no-store' });
+      if (r.status === 404 || r.status === 405) { fxHub.ok = false; return; }   // an older server: the guide-only page
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      if (!Array.isArray(d.fixtures)) throw new Error('bad reply');
+      // Keep the last good list if the feed has nothing at all right now (the server already keeps each competition's).
+      if (d.fixtures.length || !fxHub.list) fxHub.list = d.fixtures;
+      fxHub.ok = !!fxHub.list.length || Object.values(d.sources || {}).some(s => s.ok);
+    } catch { if (!fxHub.list) fxHub.ok = false; }
+  })().finally(() => { fxHub.loading = null; renderSportsSoon(); });
+  return fxHub.loading;
+}
+
+// Which of your channels shows each game: the server matches fixtures to the guide on your channels (UK ones unless you
+// chose otherwise); the best copy first — tagged live by the guide, then not a backup / SD, English group, HD.
+const fxChanIndex = new WeakMap();
+async function loadFixtureChannels(force = false) {
+  if (fxHub.chLoading || !fxUsable() || (!force && fxHub.chAt && Date.now() - fxHub.chAt < 10 * MINUTE)) return fxHub.chLoading;
+  fxHub.chLoading = (async () => {
+    const on = new Map();
+    for (const p of sportsSources()) {
+      const chans = sportsChannels(p);
+      if (!chans.length) continue;
+      let ix = fxChanIndex.get(chans);
+      if (!ix) {
+        ix = { byId: new Map(), byName: new Map() };
+        const add = (m, k, c) => { if (!k) return; const l = m.get(k); if (l) l.push(c); else m.set(k, [c]); };
+        for (const c of chans) { add(ix.byId, String(c.tvgId || '').trim().toLowerCase(), c); add(ix.byName, normName(c.tvgName || ''), c); add(ix.byName, normName(c.name || ''), c); }
+        fxChanIndex.set(chans, ix);
+      }
+      const w = wantedFor(chans);
+      try {
+        const r = await fetch(serverApi('fixtures/channels'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ urls: epgUrls(p), ids: [...w.ids], names: [...w.names], days: 3 }) });
+        if (!r.ok) continue;
+        for (const [id, list] of Object.entries((await r.json()).channels || {})) {
+          const out = on.get(id) || [];
+          for (const m of list) {
+            for (const c of ix.byId.get(String(m.id).toLowerCase()) || ix.byName.get(normName(m.name)) || []) {
+              if (!out.some(x => x.channel.url === c.url)) out.push({ channel: c, prog: [m.start, m.end, m.title, m.desc || ''], live: !!m.live });
+            }
+          }
+          on.set(id, out);
+        }
+      } catch {}
+    }
+    for (const l of on.values()) l.sort((a, b) => b.live - a.live || (isUkChannel(b.channel) - isUkChannel(a.channel)) || sportsPrefer(b.channel) - sportsPrefer(a.channel));
+    fxHub.on = on; fxHub.chAt = Date.now();
+  })().finally(() => { fxHub.chLoading = null; renderSportsSoon(); repaintSportsBells(); });
+  return fxHub.chLoading;
+}
+
+const fxTeam = q => (fxHub.list || []).filter(f => f.status !== 'final' && f.status !== 'postponed' && followMatches(q, f) && f.end > Date.now());
+const fxName = t => (t.name.length <= 16 || !t.short ? t.name : t.short);
+// Club crests from the feed's CDN, asked for at the size shown (a 4 KB picture instead of a 36 KB one).
+const crestSrc = u => /^https:\/\/a\.espncdn\.com\/i\//.test(u || '') ? `https://a.espncdn.com/combiner/i?img=${u.slice(22)}&w=64&h=64` : u || '';
+const crest = t => t?.crest ? `<img class="sp-crest" src="${esc(crestSrc(t.crest))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<span class="sp-crest"></span>';
+const fxBadge = f => `<span class="sp-crest sp-badge">${esc(f.sport === 'f1' ? 'F1' : f.sport === 'ufc' ? 'UFC' : (f.comp || '?').slice(0, 2))}</span>`;
+// One shown item, fixture or guide programme: { f?, channel, prog, live, title, comp, sport, start, rank }.
+function fxItem(f) {
+  const best = fxHub.on.get(f.id)?.[0];
+  return { f, channel: best?.channel || null, prog: best?.prog || null, live: !!best?.live, title: fixtureTitle(f), comp: f.comp, sport: f.sport, start: f.start, rank: f.compRank };
+}
+const guideItem = it => ({ ...it, start: it.prog[0], rank: importance(it) });
+// Until the channels are known, nothing (not a flash of "Not on your channels").
+const fxWhere = it => it.channel ? `<span class="sp-on">On ${esc(channelLabel(it.channel.name))}</span>` : fxHub.chAt || !it.f ? '<span class="sp-off">Not on your channels</span>' : '';
+const fxLines = it => it.f?.home
+  ? `<span class="sp-fx-team">${crest(it.f.home)}<span>${esc(fxName(it.f.home))}</span>${it.f.status !== 'scheduled' && it.f.home.score != null ? `<b>${esc(it.f.home.score)}</b>` : ''}</span>
+     <span class="sp-fx-team">${crest(it.f.away)}<span>${esc(fxName(it.f.away))}</span>${it.f.status !== 'scheduled' && it.f.away.score != null ? `<b>${esc(it.f.away.score)}</b>` : ''}</span>`
+  : it.f ? `<span class="sp-fx-team">${fxBadge(it.f)}<span>${esc(it.f.title)}</span></span><span class="sp-fx-team sp-fx-sub"><span class="sp-crest"></span><span>${esc(it.f.session || it.f.venue || '')}</span></span>`
+  : `<span class="sp-fx-team sp-fx-one"><span>${esc(it.title)}</span></span>`;
+const fxMeta = it => { const w = fxWhere(it), c = esc([it.comp, it.f?.round].filter(Boolean).join(' · ')); return c && w ? `${c} · ${w}` : c || w; };
+
+const spFxLive = (it, k) => {
+  const clock = it.f ? (it.f.status === 'live' ? it.f.minute || 'Live' : 'Starting') : `until ${fmtTime(it.prog[1])}`;
+  return `<li class="sp-fxl${it.channel ? '' : ' off'}" data-live="${k}"${it.channel ? ' role="button" tabindex="0"' : ''}>
+    <span class="sp-fxl-head"><i class="nc-dot"></i><span>${esc(clock)}</span><span class="muted">${esc(it.comp || channelLabel(it.channel?.name || ''))}</span></span>
+    <span class="sp-fxl-teams">${fxLines(it)}</span>
+    <span class="sp-fxl-ch">${fxWhere(it)}</span></li>`;
+};
+const spFxRow = (it, k, attr = 'data-up') => `<li class="sp-row sp-fx${it.channel ? '' : ' off'}" ${attr}="${k}"${it.channel ? ' role="button" tabindex="0"' : ''}>
+    <span class="sp-time">${fmtTime(it.start)}</span>
+    <span class="sp-text"><span class="sp-fx-teams">${fxLines(it)}</span><span class="sp-fx-meta">${fxMeta(it)}</span></span>
+    ${it.channel && it.prog[0] > Date.now() ? spBell(it, `data-bell="${attr}:${k}"`) : '<span class="sp-bell-gap"></span>'}</li>`;
+const spFxTeamCard = (fl, k) => {
+  const f = fxTeam(fl.q)[0], it = fxItem(f), on = fxIsOn(f);
+  const mine = [f.home, f.away].find(t => t && followMatches(fl.q, { home: t, away: { name: '' } })) || null;
+  const when = on ? `<i class="nc-dot"></i>${esc(f.status === 'live' && f.home ? `${f.minute || 'Live'} · ${f.home.score}–${f.away.score}` : 'Live now')}` : esc(`${shortDay(f.start)} ${fmtTime(f.start)}`);
+  const where = it.channel ? esc(channelLabel(it.channel.name)) : fxHub.chAt ? 'Not on your channels' : '';
+  return `<li class="sp-team" data-team="${k}" role="button" tabindex="0"><b>${mine ? crest(mine) : ''}<span>${esc(fl.q)}</span></b>
+    <span class="sp-team-title">${esc(it.title)}</span><span class="sp-team-when">${when}${where ? ` · ${where}` : ''}</span></li>`;
+};
+
+function renderFixtureSports(body, chipsEl) {
+  const now = Date.now(), until = now + 3 * DAY;
+  const all = (fxHub.list || []).filter(f => f.status !== 'postponed' && f.start < until);
+  const liveFx = all.filter(f => fxIsOn(f, now)), upFx = all.filter(f => f.status === 'scheduled' && f.start > now);
+  // Guide-only sports: what the feed doesn't cover, found the old way.
+  const g = buildSports(sportsHub.results, sportsNow(), now);
+  const gLive = g.live.filter(it => it.sport && !FEED_SPORTS.has(it.sport)).map(guideItem), gUp = g.upcoming.filter(it => !FEED_SPORTS.has(it.sport) && it.prog[0] < until).map(guideItem);
+  const have = new Set([...liveFx, ...upFx].map(f => f.sport).concat([...gLive, ...gUp].map(it => it.sport)));
+  const ids = SPORTS.filter(s => have.has(s.id)).map(s => s.id);
+  if (sportsFilter !== 'all' && !ids.includes(sportsFilter)) sportsFilter = 'all';
+  const x = chipsEl.scrollLeft;
+  chipsEl.innerHTML = (ids.length > 1 ? ['all', ...ids] : []).map(id => `<button type="button" class="chip${id === sportsFilter ? ' active' : ''}" data-sport="${id}" aria-pressed="${id === sportsFilter}">${esc(id === 'all' ? 'All' : SPORTS.find(s => s.id === id).label)}</button>`).join('');
+  chipsEl.hidden = ids.length <= 1;
+  chipsEl.scrollLeft = x;
+  // "All" keeps to the big competitions and whatever is on your channels; a sport's chip shows every game.
+  const shown = it => sportsFilter === 'all' ? it.channel || it.rank >= FX_BIG || !it.f : it.sport === sportsFilter;
+  const live = [...liveFx.map(fxItem), ...gLive].filter(shown).sort((a, b) => b.rank - a.rank || !!b.channel - !!a.channel || a.start - b.start).slice(0, 16);
+  const up = [...upFx.map(fxItem), ...gUp].filter(shown).sort((a, b) => a.start - b.start || b.rank - a.rank);
+  sportsHub.shown = { live, up };
+  const keep = [...body.querySelectorAll('[data-keep]')].map(el => [el.dataset.keep, el.scrollLeft]);
+
+  let html = '';
+  const follows = state.follows;
+  if (sportsFilter === 'all' && follows) {
+    html += follows.length
+      ? `<section class="hub-sec sp-teams"><div class="hub-head"><h2>My teams</h2><span class="hub-links"><button type="button" class="link" data-follow-new>Follow</button></span></div>
+          <ul class="shelf-row home-shelf sp-team-row" data-keep="teams">${follows.map(spTeamCard).join('')}</ul></section>`
+      : `<button type="button" class="sp-cta" data-follow-new><span class="sp-cta-ico">${icon('plus')}</span><span class="sp-cta-text"><b>Follow a team</b><span class="muted">Their next match shows here, with the channel</span></span>${icon('back', 'sp-chev')}</button>`;
+  }
+  if (live.length) html += `<section class="hub-sec sp-livesec"><div class="hub-head"><h2>Live now</h2></div>
+    <ul class="shelf-row home-shelf sp-fxl-row" data-keep="live">${live.map(spFxLive).join('')}</ul></section>`;
+  let k = 0;
+  for (const d of groupByDay(up.map(it => ({ ...it, prog: it.prog || [it.start] })), now)) {
+    const open = sportsOpenDays.has(d.key) || d.items.length <= 30;
+    const rows = (open ? d.items : d.items.slice(0, 25)).map((it, i) => spFxRow(up[k + i], k + i)).join('');
+    html += `<section class="hub-sec sp-day"><div class="hub-head"><h2>${esc(d.label)}</h2><span class="sp-date">${esc(d.date)}</span></div>
+      <ul class="sp-list">${rows}</ul>${open ? '' : `<button type="button" class="sp-more" data-more-day="${esc(d.key)}">Show all ${d.items.length}</button>`}</section>`;
+    k += d.items.length;
+  }
+  if (!live.length && !up.length) html += `<div class="empty sp-empty">${icon('trophy', 'big')}<p><b>No games in the next three days</b></p><p class="muted">${sportsFilter === 'all' ? 'Nothing from the big competitions or on your channels.' : 'Nothing in this sport.'}</p></div>`;
+  else if (fxHub.chLoading && !fxHub.chAt) html += '<p class="muted sp-status">Finding the channels…</p>';
+  html += `<p class="muted sp-scope">${sportsFilter === 'all' ? 'Big games and everything on your channels · ' : ''}${state.settings.sportsAll ? 'Channels from every country' : 'UK channels'} · <button type="button" class="link" data-sp-scope>${state.settings.sportsAll ? 'UK only' : 'Show all countries'}</button></p>`;
+  body.innerHTML = html;
+  for (const [key, left] of keep) { const el = body.querySelector(`[data-keep="${key}"]`); if (el) el.scrollLeft = left; }
+  addRowArrows(body);
+}
+
+function fixtureTeamSheet(fl) {
+  const now = Date.now();
+  teamSheetItems = fxTeam(fl.q).map(fxItem);
+  const live = teamSheetItems.filter(it => fxIsOn(it.f, now)), later = teamSheetItems.filter(it => !fxIsOn(it.f, now));
+  const days = groupByDay(later.map(it => ({ ...it, prog: [it.start] })), now);
+  const list = (live.length ? `<div class="section-title sp-sheet-day">Live now</div><ul class="sp-list">${live.map(it => spFxRow(it, teamSheetItems.indexOf(it), 'data-tm')).join('')}</ul>` : '')
+    + days.map(d => `<div class="section-title sp-sheet-day">${esc(d.label)} · ${esc(d.date)}</div><ul class="sp-list">${d.items.map(x => { const it = later.find(y => y.f.id === x.f.id); return spFxRow(it, teamSheetItems.indexOf(it), 'data-tm'); }).join('')}</ul>`).join('');
+  sheet(`<div class="sheet-title">${esc(fl.q)}</div>
+    <p class="muted sheet-intro">Their games in the next week, and the channel showing each one. Tap the bell for a reminder.</p>
+    <div class="sp-sheet-list">${list}</div>
+    <div class="form-actions"><button type="button" class="btn" data-unfollow>Unfollow ${esc(fl.q)}</button></div>`, {
+    onMount: el => {
+      el.onclick = e => {
+        const bell = e.target.closest('[data-bell]');
+        if (bell) { const it = sportsBellItem(bell.dataset.bell); if (it?.channel) toggleReminder(it.channel, it.prog).then(() => { paintBell(bell, it); repaintSportsBells(); }); return; }
+        const row = e.target.closest('[data-tm]');
+        if (row) { const it = teamSheetItems[+row.dataset.tm]; if (!it?.channel) return; if (it.prog[0] <= Date.now()) { closeSheet(); playChannel([it.channel], 0); } else programmeSheet(it.channel, it.prog); return; }
+        if (e.target.closest('[data-unfollow]')) { closeSheet(); toggleFollow(fl.q).then(() => { sportsHub.teams.delete(fl.q.toLowerCase()); renderSports(); }); }
+      };
+    },
+  });
+}
+setInterval(() => {   // progress lines, live → upcoming; scores every 2 minutes while a game is on
+  if (location.hash !== '#/sports' || document.hidden) return;
+  renderSports();
+  if (fxHub.ok && Date.now() - fxHub.at > ((fxHub.list || []).some(f => fxIsOn(f)) ? 2 * MINUTE : 10 * MINUTE)) Promise.resolve(loadFixtures(true)).then(() => loadFixtureChannels());
+}, MINUTE);
 
 const spLiveCard = (it, k) => {
   const { channel: c, prog } = it, pct = ((Date.now() - prog[0]) / (prog[1] - prog[0])) * 100;
@@ -3619,6 +3806,7 @@ const spRow = (it, k, attr = 'data-up') => `<li class="sp-row" ${attr}="${k}" ro
     <span class="sp-text"><span class="sp-title">${esc(it.title)}</span><span class="muted">${esc([it.comp && it.comp !== it.title ? it.comp : '', channelLabel(it.channel.name)].filter(Boolean).join(' · '))}</span></span>
     ${spBell(it, `data-bell="${attr}:${k}"`)}</li>`;
 const spTeamCard = (f, k) => {
+  if (fxUsable() && fxTeam(f.q).length) return spFxTeamCard(f, k);
   const list = sportsHub.teams.get(f.q.toLowerCase());
   const next = list?.[0], live = next && next.prog[0] <= Date.now();
   const when = !list ? '<span class="muted">Checking the guide…</span>'
@@ -3631,6 +3819,7 @@ function renderSports() {
   if (location.hash !== '#/sports') return;
   const body = $('#sp-body'), chipsEl = $('#sp-chips');
   if (!body) return;
+  if (fxUsable()) return renderFixtureSports(body, chipsEl);
   const now = Date.now(), loading = !!sportsHub.loading;
   const hub = buildSports(sportsHub.results, sportsNow(), now);
   if (sportsFilter !== 'all' && !hub.sports.includes(sportsFilter) && !loading) sportsFilter = 'all';
@@ -3654,7 +3843,7 @@ function renderSports() {
       html += follows.length
         ? `<section class="hub-sec sp-teams"><div class="hub-head"><h2>My teams</h2><span class="hub-links"><button type="button" class="link" data-follow-new>Follow</button></span></div>
             <ul class="shelf-row home-shelf sp-team-row" data-keep="teams">${follows.map(spTeamCard).join('')}</ul></section>`
-        : `<button type="button" class="sp-cta" data-follow-new><span class="sp-cta-ico">${icon('plus')}</span><span class="sp-cta-text"><b>Follow a team</b><span class="muted">Get a reminder before every match</span></span>${icon('back', 'sp-chev')}</button>`;
+        : `<button type="button" class="sp-cta" data-follow-new><span class="sp-cta-ico">${icon('plus')}</span><span class="sp-cta-text"><b>Follow a team</b><span class="muted">Their next match shows here, with the channel</span></span>${icon('back', 'sp-chev')}</button>`;
     }
     if (live.length) html += `<section class="hub-sec sp-livesec"><div class="hub-head"><h2>Live now</h2></div>
       <ul class="shelf-row home-shelf onnow-row sp-live-row" data-keep="live">${live.slice(0, 24).map(spLiveCard).join('')}</ul></section>`;
@@ -3706,6 +3895,7 @@ function sportsClick(e) {
     state.settings.sportsAll = !state.settings.sportsAll;
     db.set('settings', state.settings);
     Object.assign(sportsHub, { results: [], at: 0 }); sportsHub.teams.clear();
+    fxHub.on = new Map(); fxHub.chAt = 0; loadFixtureChannels(true);
     if (scrollY > 0) scrollTo({ top: 0 });
     loadSports(true); loadTeams(); renderSports();
     return;
@@ -3720,9 +3910,13 @@ function sportsClick(e) {
   const bell = e.target.closest('[data-bell]');
   if (bell) { const it = sportsBellItem(bell.dataset.bell); if (it) toggleReminder(it.channel, it.prog).then(() => paintBell(bell, it)); return; }
   const lv = e.target.closest('[data-live]');
-  if (lv) return playChannel(sportsHub.shown.live.map(x => x.channel), +lv.dataset.live);
+  if (lv) {
+    const it = sportsHub.shown.live[+lv.dataset.live], list = sportsHub.shown.live.filter(x => x.channel);
+    if (it?.channel) playChannel(list.map(x => x.channel), list.indexOf(it));
+    return;
+  }
   const up = e.target.closest('[data-up]');
-  if (up) { const it = sportsHub.shown.up[+up.dataset.up]; if (it) programmeSheet(it.channel, it.prog); return; }
+  if (up) { const it = sportsHub.shown.up[+up.dataset.up]; if (it?.channel) programmeSheet(it.channel, it.prog); return; }
   const tm = e.target.closest('[data-team]');
   if (tm) return teamSheet((state.follows || [])[+tm.dataset.team]);
   if (e.target.closest('[data-follow-new]')) return followTeamSheet();
@@ -3734,7 +3928,7 @@ function sportsClick(e) {
 }
 
 async function followTeamSheet() {
-  const v = await formSheet({ title: 'Follow a team', intro: 'Every match on your channels gets a reminder, for as long as you follow.', submit: 'Follow',
+  const v = await formSheet({ title: 'Follow a team', intro: 'Their next match shows at the top of Sports, with the channel it’s on.', submit: 'Follow',
     fields: [{ name: 'q', label: 'Team, player or event', placeholder: 'e.g. Arsenal, Ronnie O’Sullivan, Ryder Cup', required: true }] });
   const q = v?.q?.trim();
   if (!q || q.length < 2) return;
@@ -3747,6 +3941,7 @@ async function followTeamSheet() {
 
 function teamSheet(f) {
   if (!f) return;
+  if (fxUsable() && fxTeam(f.q).length) return fixtureTeamSheet(f);
   teamSheetItems = (sportsHub.teams.get(f.q.toLowerCase()) || []).map(x => ({ ...x, title: cleanTitle(x.prog[2]), comp: classify(x.prog[2])?.comp || null }));
   const now = Date.now(), live = teamSheetItems.filter(it => it.prog[0] <= now);
   const liveRow = it => `<li class="sp-row" data-tm="${teamSheetItems.indexOf(it)}" role="button" tabindex="0"><span class="sp-time sp-now"><i class="nc-dot"></i>Live</span><span class="sp-text"><span class="sp-title">${esc(it.title)}</span><span class="muted">${esc(channelLabel(it.channel.name))}</span></span></li>`;
@@ -3762,7 +3957,7 @@ function teamSheet(f) {
         const bell = e.target.closest('[data-bell]');
         if (bell) { const it = sportsBellItem(bell.dataset.bell); if (it) toggleReminder(it.channel, it.prog).then(() => { paintBell(bell, it); repaintSportsBells(); }); return; }
         const row = e.target.closest('[data-tm]');
-        if (row) { const it = teamSheetItems[+row.dataset.tm]; if (!it) return; if (it.prog[0] <= Date.now()) { closeSheet(); playChannel([it.channel], 0); } else programmeSheet(it.channel, it.prog); return; }
+        if (row) { const it = teamSheetItems[+row.dataset.tm]; if (!it?.channel) return; if (it.prog[0] <= Date.now()) { closeSheet(); playChannel([it.channel], 0); } else programmeSheet(it.channel, it.prog); return; }
         if (e.target.closest('[data-unfollow]')) { closeSheet(); toggleFollow(f.q).then(() => { sportsHub.teams.delete(f.q.toLowerCase()); renderSports(); }); }
       };
     },

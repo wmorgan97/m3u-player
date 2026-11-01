@@ -1299,6 +1299,50 @@ html:not(.mac) .ts-box kbd { display: none !important; }
   .sp-cta { max-width: 480px; }
 }
 
+/* Sports from real fixtures: crests, the two teams on their own lines, and the channel showing it (or not) */
+.sp-crest { flex: none; display: inline-block; width: 20px; height: 20px; object-fit: contain; }
+.sp-badge { display: inline-grid; place-items: center; border-radius: 6px; background: var(--surface-2); color: var(--text); font-size: 9px; font-weight: 700; letter-spacing: .02em; }
+.sp-fx { align-items: flex-start; }
+.sp-fx .sp-time { padding-top: 9px; }
+.sp-fx .sp-bell, .sp-bell-gap { align-self: center; }
+.sp-bell-gap { flex: none; width: 44px; margin-right: -8px; }
+.sp-fx-teams { display: flex; flex-direction: column; gap: 4px; }
+.sp-fx-team { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--fs-callout); font-weight: 600; line-height: 1.25; }
+.sp-fx-team > span:not(.sp-crest) { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sp-fx-team b { flex: none; min-width: 1.2em; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+.sp-fx-sub { font-size: var(--fs-subhead); font-weight: 500; color: var(--muted); }
+.sp-fx-one > span { white-space: normal !important; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.sp-fx-meta { margin-top: 3px; font-size: var(--fs-footnote); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sp-on { color: var(--text); }
+.sp-off { color: var(--muted); }
+.sp-fx.off { cursor: default; }
+.sp-fx.off:active { background: none; }
+.sp-fx.off .sp-fx-team, .sp-fx.off .sp-time { color: color-mix(in srgb, var(--text) 70%, var(--bg)); }
+
+/* Live now: score card — minute and competition, the two teams with the score, the channel */
+.sp-fxl-row { gap: var(--gap); }
+.sp-fxl { flex: none; width: clamp(240px, 68vw, 300px); display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 13px; border-radius: var(--r-md);
+  background: var(--surface); border: 1px solid var(--line); cursor: pointer; scroll-snap-align: start; }
+.sp-fxl:active { background: var(--surface-2); }
+.sp-fxl.off { cursor: default; }
+.sp-fxl.off:active { background: var(--surface); }
+.sp-fxl-head { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-caption); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sp-fxl-head .nc-dot { flex: none; }
+.sp-fxl-head .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.sp-fxl-head .muted::before { content: '·'; margin-right: 6px; }
+.sp-fxl-teams { display: flex; flex-direction: column; gap: 6px; }
+.sp-fxl .sp-fx-team b { font-size: var(--fs-headline); }
+.sp-fxl-ch { font-size: var(--fs-footnote); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* My teams: the club's crest by its name */
+.sp-team b { display: flex; align-items: center; gap: 8px; }
+.sp-team b > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+@media (hover: hover) and (pointer: fine) {
+  .sp-fxl:not(.off):hover { background: var(--surface-2); }
+  .sp-fx.off:hover { background: none; }
+}
+@media (min-width: 900px) { .sp-fxl { width: 300px; } }
+
 /* Sports: which channels are shown, and the switch */
 .sp-scope { margin: 22px 0 8px; text-align: center; font-size: var(--fs-small, 13px); }
 .sp-scope .link { font-size: inherit; padding: 10px 4px; }

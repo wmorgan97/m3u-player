@@ -24,6 +24,7 @@ import { handleGuide } from './guide.js';
 import { handleCatalog } from './catalog.js';
 import { handleTmdb } from './tmdb.js';
 import { handleImg } from './img.js';
+import { handleFixtures } from './fixtures.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const port = Number(process.env.PORT) || 8080;
@@ -182,6 +183,8 @@ export function createAppServer() {
     if (url.pathname === '/vod') return handleCatalog(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
       .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/guide') return handleGuide(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
+      .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
+    if (url.pathname === '/fixtures' || url.pathname === '/fixtures/channels') return handleFixtures(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
       .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, 'Method not allowed');
     const handler = url.pathname === '/proxy' ? handleProxy

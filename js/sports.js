@@ -57,7 +57,7 @@ const COMPETITIONS = [
 const SPORT_ORDER = new Map(SPORTS.map((s, i) => [s.id, i]));
 const COMP_ORDER = new Map(COMPETITIONS.map(([c], i) => [c, i]));
 /** How much a UK viewer is likely to care, for ordering "Live now": the Premier League above MLS and minor events. */
-const IMPORTANCE = { 'Premier League': 100, 'Champions League': 95, F1: 92, 'FA Cup': 88, 'Europa League': 85, 'Six Nations': 84,
+export const IMPORTANCE = { 'Premier League': 100, 'Champions League': 95, F1: 92, 'FA Cup': 88, 'Europa League': 85, 'Six Nations': 84,
   Boxing: 80, UFC: 78, 'Carabao Cup': 76, 'Scottish Premiership': 74, EFL: 72, LaLiga: 70, 'Serie A': 66, Bundesliga: 65,
   NFL: 62, Cricket: 60, Rugby: 58, Darts: 56, Snooker: 55, Golf: 52, Tennis: 52, MotoGP: 50, NBA: 40, NHL: 35, MLB: 34,
   WWE: 30, MLS: 25 };
@@ -74,11 +74,19 @@ const SUPERSCRIPT = /[ᴬ-ᵪᶜ-ᶿ²³¹⁰-₟ⱽ]+/g;   // provider tags: �
 // Not an event: highlights, magazines, studio shows, repeats of old games.
 const NOT_EVENT = /\b(show|stories|years|netbusters|reload|weekly|episode|special|extra|talk|soccer saturday|goals on sunday|highlights?|hls|magazine|review|preview|reloaded|rewind|classics?|best (?:goals|of)|goals|gold(?! cup)|en 60|compacto|resumo|top 10|power rankings|fantasy|report|re-?airs?|stock exchange|countdown|draw|press conference|documentary|anthology|replay|encore|retro|in 90|recap|wrap|wins the|story of|look ?back|legends|greatest|the debate|news|daily|tonight show|podcast|uncut|central|centre|center)\b/i;
 // Event-channel placeholders: "### PREMIER LEAGUE ###", "- NO EVENT STREAMING -", "NEXT | MEXICO: RACE | Sun 01 Nov …".
-const PLACEHOLDER = /^[\s#*=_~-]{2,}|no event|^next\s*\||^\W*$|off ?air|to be announced|^tba$|^tbc$|stream (?:offline|starts)/i;
+const PLACEHOLDER = /^[\s#*=_~-]{2,}|no event|^(?:next|end|ended)\s*\||^\W*$|off ?air|to be announced|^tba$|^tbc$|stream (?:offline|starts)/i;
 
 const fold = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(SUPERSCRIPT, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 
 /** True for programmes that aren't worth listing: highlights, placeholders, 24-hour blocks, old repeats. */
+/** Not a game whatever the channel: highlights, magazines, placeholders, matches from years ago. */
+export function isNotGame(rawTitle, now = Date.now()) {
+  const title = String(rawTitle || '').replace(SUPERSCRIPT, '').trim();
+  if (!title || PLACEHOLDER.test(title) || NOT_EVENT.test(title)) return true;
+  const years = (title.match(/\b(?:19|20)\d\d\b/g) || []).map(Number);
+  return years.length > 0 && Math.max(...years) < new Date(now).getFullYear() - 1;
+}
+
 export function isNoise(prog, channel = {}, now = Date.now()) {
   const title = String(prog[2] || '').replace(SUPERSCRIPT, '').trim();
   if (!title || PLACEHOLDER.test(title) || NOT_EVENT.test(title)) return true;

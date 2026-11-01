@@ -78,6 +78,14 @@ function indexFor(urls) {
   return ix;
 }
 
+/** The built guide for these links (building it if needed), for other features (Sports fixtures): { at, chans, names, display }. */
+export async function guideIndex(urls, allow) {
+  if (allow) allowed = allow;
+  const ix = indexFor(urls);
+  if (!ix.chans) { try { await ix.job; } catch { return null; } }
+  return ix;
+}
+
 async function remember(urls) {
   try {
     const known = JSON.parse(await fs.readFile(URLS_FILE, 'utf8').catch(() => '[]'));
