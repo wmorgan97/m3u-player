@@ -4562,17 +4562,35 @@ function applyContent(content, channels) {
 
 // A refresh takes the provider's new list but keeps what you changed: your order, renamed or moved
 // channels (edited), and deletions. New channels are added at the end.
+// The same stream link can be listed in several groups ("TV Guide (UK)" re-lists 136 channels from other groups):
+// each listing is its own entry, matched by link + group (then by link alone, for a channel you moved).
 function mergeRefresh(p, fresh) {
   const deleted = new Set(p.deletedUrls || []);
-  const byUrl = new Map(fresh.map(c => [c.url, c]));
-  const seen = new Set(), out = [];
-  for (const old of p.channels) {
-    const n = byUrl.get(old.url);
-    if (!n || seen.has(old.url)) continue;
-    seen.add(old.url);
-    out.push(old.edited ? { ...n, id: old.id, name: old.name, group: old.group, logo: old.logo || n.logo, tvgId: old.tvgId || n.tvgId, edited: true } : { ...n, id: old.id });
+  const key = (url, group) => `${url}\0${group || ''}`;
+  const byKey = new Map(), byUrl = new Map();
+  for (const n of fresh) {
+    if (!byKey.has(key(n.url, n.group))) byKey.set(key(n.url, n.group), n);
+    if (!byUrl.has(n.url)) byUrl.set(n.url, []);
+    byUrl.get(n.url).push(n);
   }
-  for (const n of fresh) if (!seen.has(n.url) && !deleted.has(n.url)) out.push(n);
+  const used = new Map(), out = [];   // fresh entry -> the kept entry made from it
+  for (const old of p.channels) {
+    let n = byKey.get(key(old.url, old.group));
+    if (!n || used.has(n)) n = (byUrl.get(old.url) || []).find(x => !used.has(x));
+    if (!n) continue;
+    const kept = old.edited ? { ...n, id: old.id, name: old.name, group: old.group, logo: old.logo || n.logo, tvgId: old.tvgId || n.tvgId, edited: true } : { ...n, id: old.id };
+    used.set(n, kept);
+    out.push(kept);
+  }
+  // New entries go in after the entry the provider lists before them, so a group stays in the provider's order.
+  let prev = null;
+  for (const n of fresh) {
+    if (used.has(n)) { prev = used.get(n); continue; }
+    if (deleted.has(n.url)) continue;
+    const at = prev ? out.indexOf(prev) + 1 : 0;
+    out.splice(at, 0, n);
+    prev = n;
+  }
   return out;
 }
 // Backup copies of a merged channel (same group, id and name) follow its edits and deletions.
@@ -4618,6 +4636,11 @@ function keepFresh() {
 }
 
 async function backgroundRefresh() {
+  // Once: earlier refreshes kept one copy per link and emptied groups that re-list channels; refresh to restore them.
+  if ((state.settings.refreshFix || 0) < 1) {
+    state.settings.refreshFix = 1; await db.set('settings', state.settings);
+    for (const p of state.playlists) if (!p.virtual && (p.kind === 'xtream' || p.sourceUrl)) p.refreshedAt = 0;
+  }
   for (const p of state.playlists) {
     // Playlist links refresh daily unless you turned that off for one (Xtream logins always do).
     const auto = p.kind === 'xtream' || (p.autoRefresh !== false && p.sourceUrl);
