@@ -288,7 +288,7 @@ private fun LiveNowNext(fc: Channel?, guideTick: Int, place: String, modifier: M
         val (n, nx) = remember(fc, guideTick) { Repo.nowNext(fc) }
         Text(n?.title ?: fc.name, fontSize = Tv.title, lineHeight = Tv.titleLine, fontWeight = Tv.wTitle, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
         Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (n != null) { Box(Modifier.size(6.dp).background(Tv.live, androidx.compose.foundation.shape.CircleShape)); Spacer(Modifier.width(8.dp)) }
+            if (n != null) { Box(Modifier.size(Tv.liveDot).background(Tv.live, androidx.compose.foundation.shape.CircleShape)); Spacer(Modifier.width(8.dp)) }
             Text(listOfNotNull(fc.name, n?.let { "${hhmm(it.start)}–${hhmm(it.end)}" }, n?.let { liveLeftLabel(it, t) }).joinToString("  ·  "),
                 fontSize = Tv.bodySmall, lineHeight = Tv.bodySmallLine, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }

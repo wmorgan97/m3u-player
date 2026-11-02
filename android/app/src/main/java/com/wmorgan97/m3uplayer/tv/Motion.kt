@@ -111,10 +111,14 @@ fun HeldPace(verticalMs: Long = Tv.heldRowMs) {
 @Composable
 fun rememberPageState() = androidx.compose.foundation.lazy.rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = 3, nested = 10) })
 
-/** A row of cards: keeps four cards built beyond each end of what's showing, so a held Left/Right never has to build
- *  a poster in the frame it slides in (those were the slow frames left on a Shield). */
+/** A row of cards: keeps six cards built beyond each end of what's showing, so a held Left/Right never has to build
+ *  a poster in the frame it slides in (those were the slow frames left on a Shield). Cards are built in the gaps
+ *  between frames, and only when one fits in the gap (Compose times each kind of item), so the buffer is what a held
+ *  key spends first: six cards is ~0.6 s of holding at the held pace before a card could be built in-frame, and a
+ *  poster card is now cheap enough (see [PosterCard]) to be rebuilt in the gaps while the row keeps moving. */
 @Composable
-fun rememberRowState() = androidx.compose.foundation.lazy.rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = 4, nested = 10) })
+fun rememberRowState() = androidx.compose.foundation.lazy.rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = ROW_AHEAD, nested = 10) })
+internal const val ROW_AHEAD = 6
 
 /** Wraps a row's last card: Right there does nothing. Otherwise a held Right at the end of a row sends focus looking
  *  beyond the row, which lays out off-screen content every repeat (the slow frames when holding Right on a Shield). */

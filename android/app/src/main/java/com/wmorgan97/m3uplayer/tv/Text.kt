@@ -96,7 +96,8 @@ private val BRACKETS = Regex("""\[[^\]]*\]|\([^)]*\)""")
 private val QUALITY_WORDS = Regex("""\b(4k|uhd|hdr|fhd|hd|sd|2160p?|3840p?|1080p?|720p?|backup|raw|hevc)\b""", RegexOption.IGNORE_CASE)
 private val NOT_ALNUM = Regex("""[^a-z0-9:]+""")
 fun isUhdName(name: String) = IS_UHD.containsMatchIn(name)
-fun liveBase(name: String): String = name.replace(SUPERSCRIPTS, " ").replace(BRACKETS, " ").replace(QUALITY_WORDS, " ").lowercase().replace(NOT_ALNUM, "")
+// "+" is kept as "plus": "Sky Sports +" is its own channel, not another copy of "Sky Sports …"
+fun liveBase(name: String): String = name.replace(SUPERSCRIPTS, " ").replace(BRACKETS, " ").replace(QUALITY_WORDS, " ").replace("+", " plus ").lowercase().replace(NOT_ALNUM, "")
 
 fun quality(name: String, group: String): String? {
     val t = "$name $group"

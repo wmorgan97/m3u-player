@@ -214,6 +214,44 @@ object Repo {
         if (changed) follows = l
     }
 
+    // ---------- Watch later: films and series saved for later, shared through /sync (WatchLater.kt has the rules) ----------
+    // Kept here as the whole map, removals included, so an edit made offline still goes up with the next sync.
+    private fun wlFromJson(k: String, o: JSONObject) = WatchLaterEntry(k, o.optString("kind", k.substringBefore(':')), o.optString("id"), o.optString("name"),
+        o.optString("logo"), o.optInt("year").takeIf { it > 0 }, o.optDouble("rating").takeIf { !it.isNaN() && it > 0 }, o.optString("group"), o.optString("ext"),
+        o.optLong("at"), o.optBoolean("deleted"))
+    private fun wlToJson(e: WatchLaterEntry): JSONObject = if (e.deleted) JSONObject().put("deleted", true).put("at", e.at) else JSONObject().apply {
+        put("kind", e.kind); put("name", e.name); put("at", e.at)
+        e.id.toLongOrNull()?.let { put("id", it) } ?: e.id.takeIf { it.isNotEmpty() }?.let { put("id", it) }
+        if (e.logo.isNotEmpty()) put("logo", e.logo); e.year?.let { put("year", it) }; e.rating?.let { put("rating", it) }
+        if (e.group.isNotEmpty()) put("group", e.group); if (e.ext.isNotEmpty()) put("ext", e.ext)
+    }
+    private fun wlMap(o: JSONObject?): Map<String, WatchLaterEntry> = o?.let { m -> m.keys().asSequence().mapNotNull { k -> m.optJSONObject(k)?.let { k to wlFromJson(k, it) } }.toMap() } ?: emptyMap()
+    private var watchLaterAll: Map<String, WatchLaterEntry>
+        get() = runCatching { wlMap(JSONObject(prefs.getString("watchlater", "{}") ?: "{}")) }.getOrDefault(emptyMap())
+        set(v) { prefs.edit().putString("watchlater", JSONObject().also { o -> v.forEach { (k, e) -> o.put(k, wlToJson(e)) } }.toString()).apply(); version++ }
+    private fun localWatchLater() = JSONObject().also { o -> watchLaterAll.forEach { (k, e) -> o.put(k, wlToJson(e)) } }
+    /** The Watch later row: newest first; films finished since they were added have dropped off. */
+    fun watchLater(): List<WatchLaterEntry> = WatchLater.visible(watchLaterAll.values, WatchLater.finished(progress().map { Triple(it.url, it.done, it.at) }))
+    fun isWatchLater(v: Vod) = WatchLater.key(v).let { k -> watchLater().any { it.key == k } }
+    /** Adds [v] to Watch later (or takes it off); returns whether it's now on the list. Every device sees it. */
+    fun toggleWatchLater(v: Vod, on: Boolean = !isWatchLater(v)): Boolean {
+        val now = System.currentTimeMillis(); val k = WatchLater.key(v)
+        val e = if (on) WatchLater.entry(v, now) else WatchLater.removal(k, now)
+        watchLaterAll = watchLaterAll + (k to e)
+        guideScope.launch {
+            try { val d = JSONObject(http(api("sync"), JSONObject().put("watchlater", JSONObject().put(k, wlToJson(e))).toString())); syncData = d; adoptWatchLater(d) }
+            catch (e: Exception) { warn("saving watch later failed", e) }   // sent again with the next sync
+        }
+        return on
+    }
+    /** Takes in what the other devices added to (or took off) Watch later. */
+    private fun adoptWatchLater(d: JSONObject) {
+        val r = d.optJSONObject("watchlater") ?: return
+        val mine = watchLaterAll
+        val next = WatchLater.prune(WatchLater.adopt(mine, wlMap(r)), System.currentTimeMillis())
+        if (next != mine) watchLaterAll = next
+    }
+
     /** Takes in reminders set (or removed) on the other devices. */
     private fun adoptReminders(d: JSONObject) {
         val r = d.optJSONObject("reminders") ?: return
@@ -332,7 +370,7 @@ object Repo {
 
     @Volatile var syncData: JSONObject = JSONObject()
     suspend fun sync(): JSONObject = withContext(Dispatchers.IO) {
-        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).toString(), timeout = 15_000)) } catch (e: Exception) {
+        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).put("watchlater", localWatchLater()).toString(), timeout = 15_000)) } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             warn("sync failed", e)
             lastSyncErrorState.value = if (e is org.json.JSONException) "Your server's reply couldn't be read." else describe(e, "your server")
@@ -342,6 +380,7 @@ object Repo {
         syncData = d
         adoptReminders(d)
         adoptFollows(d)
+        adoptWatchLater(d)
         version++
         File(app.filesDir, "sync.json").writeText(d.toString())
         d
@@ -484,7 +523,9 @@ object Repo {
         }
         liveErrorState.value = if (tried > 0 && loaded == 0) (firstError ?: "Your playlists couldn't be loaded.") else null
         val groups = LinkedHashSet<String>(); all.forEach { groups += it.group }
-        Live(all, groups.toList(), epg.distinct()).also { live = it
+        // Not kept when the sync hasn't arrived yet (no playlists known): an empty list cached then would show "No live
+        // channels" until the next reload, though the playlists are only moments away.
+        Live(all, groups.toList(), epg.distinct()).also { if (syncData.has("sources")) live = it
             val m = HashMap<String, Channel>()
             for (c in all) if (isUhdName(c.name) && !c.name.trimStart().startsWith("#")) liveBase(c.name).takeIf { it.isNotEmpty() }?.let { m.putIfAbsent(it, c) }
             uhdIndex = m }

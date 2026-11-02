@@ -2,6 +2,7 @@ package com.wmorgan97.m3uplayer.tv
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,20 +20,28 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.tv.material3.Text
 import kotlinx.coroutines.delay
+import androidx.compose.material.icons.filled.Check
 
 // Shared pop-ups: options (hold OK), a programme's details, the PIN pad, small forms. All are a [TvDialogCard]: options
 // are [TvListRow]s, actions are [TvButton]s (the first one Primary), so a dialog reads like the rest of the app.
 
-/** A short list of choices (hold OK on a card or row, a playlist's menu). "Remove …" entries are in the danger colour. */
+/** A short list of choices (hold OK on a card or row, a playlist's menu). "Remove …" entries are in the danger colour.
+ *  [selected]: for a chooser (a language, a quality), the label of the current choice: it's marked with an accent tick
+ *  and the highlight starts on it. */
 @Composable
-fun Options(title: String, options: List<Pair<String, () -> Unit>>, onDismiss: () -> Unit) {
+fun Options(title: String, options: List<Pair<String, () -> Unit>>, onDismiss: () -> Unit) = Options(title, options, null, onDismiss)
+
+@Composable
+fun Options(title: String, options: List<Pair<String, () -> Unit>>, selected: String?, onDismiss: () -> Unit) {
     val first = remember { FocusRequester() }
+    val start = options.indexOfFirst { it.first == selected }.coerceAtLeast(0)
     Dialog(onDismissRequest = onDismiss) {
         TvDialogCard(440.dp) {
             Text(title, fontSize = Tv.body, lineHeight = Tv.bodyLine, fontWeight = Tv.wStrong, color = Tv.text, modifier = Modifier.padding(start = 12.dp, bottom = 12.dp), maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            // (Scrolls when a long chooser is taller than the screen: the highlight brings the rest into view.)
+            Column(Modifier.weight(1f, fill = false).verticalScroll(androidx.compose.foundation.rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 options.forEachIndexed { i, (label, fn) ->
-                    OptionRow(label, if (i == 0) Modifier.focusRequester(first) else Modifier, danger = label.startsWith("Remove"), onClick = fn)
+                    OptionRow(label, if (i == start) Modifier.focusRequester(first) else Modifier, danger = label.startsWith("Remove"), current = selected != null && label == selected, onClick = fn)
                 }
                 OptionRow("Cancel", Modifier, onClick = onDismiss)
             }
@@ -42,9 +51,13 @@ fun Options(title: String, options: List<Pair<String, () -> Unit>>, onDismiss: (
 }
 
 @Composable
-private fun OptionRow(label: String, modifier: Modifier, danger: Boolean = false, onClick: () -> Unit) {
-    TvListRow(onClick, modifier.fillMaxWidth().height(44.dp), contentPadding = PaddingValues(horizontal = 12.dp), label = label) { f ->
-        Text(label, fontSize = Tv.bodySmall, fontWeight = Tv.wLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (danger && !f) Tv.danger else androidx.tv.material3.LocalContentColor.current)
+private fun OptionRow(label: String, modifier: Modifier, danger: Boolean = false, current: Boolean = false, onClick: () -> Unit) {
+    TvListRow(onClick, modifier.fillMaxWidth().height(44.dp), contentPadding = PaddingValues(horizontal = 12.dp), label = if (current) "$label, selected" else label) { f ->
+        Text(label, fontSize = Tv.bodySmall, fontWeight = if (current) Tv.wStrong else Tv.wLabel, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            color = if (danger && !f) Tv.danger else androidx.tv.material3.LocalContentColor.current, modifier = if (current) Modifier.weight(1f) else Modifier)
+        if (current) {   // the current choice: a quiet accent tick at the end (dark on the white highlight)
+            androidx.tv.material3.Icon(androidx.compose.material.icons.Icons.Default.Check, null, Modifier.padding(start = 12.dp).size(Tv.iconS), tint = if (f) Tv.onFocus else Tv.accent)
+        }
     }
 }
 

@@ -7,6 +7,8 @@
 //               { deleted } marker until the programme has passed, so other devices drop it too
 //   follows     teams and shows followed, per lower-cased name ({ q, at }), newest edit wins; an unfollow stays as a
 //               { deleted } marker (for 90 days) so other devices drop it too
+//   watchlater  films and series saved for later, per "<movie|series>:<id>" ({ kind, id, name, logo, … at }), newest
+//               edit wins; a removed one stays as a { deleted } marker (for 90 days) so other devices drop it too
 //
 //   POST /sync?key=<PROXY_KEY>   body: the device's state -> the merged state
 
@@ -85,7 +87,29 @@ export function merge(a, b) {
     const keys = Object.keys(f);
     out.follows = keys.length > 200 ? Object.fromEntries(keys.sort((x, y) => f[y].at - f[x].at).slice(0, 200).map(k => [k, f[k]])) : f;
   }
+  if (b.watchlater && typeof b.watchlater === 'object' && !Array.isArray(b.watchlater)) out.watchlater = mergeWatchLater(a.watchlater, b.watchlater);
   return out;
+}
+
+const MAX_WATCHLATER = 300, WL_FIELDS = ['kind', 'id', 'name', 'logo', 'year', 'rating', 'group', 'ext', 'url'];
+// Watch later: newest edit (at) per key wins; removals are kept 90 days so a device that was offline drops them too.
+export function mergeWatchLater(a0, b) {
+  const w = { ...(a0 && typeof a0 === 'object' ? a0 : {}) }, old = Date.now() - 90 * 86400_000;
+  for (const [k0, v] of Object.entries(b)) {
+    const k = String(k0).trim();
+    if (!/^(movie|series):\S{1,120}$/.test(k) || !v || typeof v !== 'object') continue;
+    let e;
+    if (v.deleted) e = { deleted: true, at: +v.at || 0 };
+    else {
+      e = { at: +v.at || 0 };
+      for (const f of WL_FIELDS) if (v[f] !== undefined && v[f] !== null && v[f] !== '') e[f] = typeof v[f] === 'string' ? v[f].slice(0, 600) : v[f];
+      if (!e.name) continue;
+    }
+    if (!w[k] || e.at > (w[k].at || 0)) w[k] = e;
+  }
+  for (const [k, v] of Object.entries(w)) if (v?.deleted && !(v.at > old)) delete w[k];
+  const keys = Object.keys(w);
+  return keys.length > MAX_WATCHLATER ? Object.fromEntries(keys.sort((x, y) => (w[y].at || 0) - (w[x].at || 0)).slice(0, MAX_WATCHLATER).map(k => [k, w[k]])) : w;
 }
 
 export async function handleSync(req, res, url, send) {

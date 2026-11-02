@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarViewWeek
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -166,7 +167,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                 val bits = listOfNotNull(selC.name, selP?.let { "${dayLabel(it.start, now)}${hhmm(it.start)}–${hhmm(it.end)}" }, selP?.let { "${(it.end - it.start) / 60_000} min" },
                     selP?.let { p -> when { onAir -> liveLeftLabel(p, now) ?: "On now"; p.end <= now && Repo.catchupUrl(selC, p.start, p.end) != null -> "Catch-up"; Repo.hasReminder(selC.url, p.start) -> "Reminder set"; else -> liveStartsIn(p, now) } })
                 Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (onAir) { Box(Modifier.size(6.dp).background(Tv.live, CircleShape)); Spacer(Modifier.width(8.dp)) }   // (red only as a dot)
+                    if (onAir) { Box(Modifier.size(Tv.liveDot).background(Tv.live, CircleShape)); Spacer(Modifier.width(8.dp)) }   // (red only as a dot)
                     Text(bits.joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (onAir) ProgressLine(liveFraction(selP!!, now), Modifier.padding(start = 14.dp).width(120.dp), 3.dp)
                 }
@@ -177,7 +178,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
         LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             // "Now": back to the present from anywhere in the guide (also the guide button, or Back once you've moved away).
             item(key = "\u0000now") {
-                TvChip("Now", selected = false, onClick = { jumpToNow(); scope.launch { delay(60); runCatching { gridFocus.requestFocus() } } })
+                TvChip("Now", selected = false, onClick = { jumpToNow(); scope.launch { delay(60); runCatching { gridFocus.requestFocus() } } }, icon = Icons.Default.Schedule)
             }
             item(key = "\u0000sep") { Box(Modifier.padding(horizontal = 4.dp).width(1.dp).height(20.dp).background(Tv.line)) }
             // Group tabs: the shared chip (the open group in accent, the highlight white).
@@ -253,7 +254,7 @@ private fun GuideRuler(viewStart: Long, now: Long, perMin: Dp) {
                 fontSize = Tv.label, lineHeight = Tv.labelLine, color = if (t + HALF_HOUR <= now) Tv.muted else Tv.text2, fontWeight = FontWeight.Medium)
         }
         if (now >= viewStart && now < viewStart + SPAN_MIN * 60_000L)
-            Box(Modifier.offset(x = perMin * ((now - viewStart) / 60_000f) - 3.dp).align(Alignment.BottomStart).size(6.dp).background(Tv.live, CircleShape))
+            Box(Modifier.offset(x = perMin * ((now - viewStart) / 60_000f) - Tv.liveDot / 2).align(Alignment.BottomStart).size(Tv.liveDot).background(Tv.live, CircleShape))
     }
 }
 

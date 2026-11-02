@@ -25,8 +25,11 @@ android {
             // Installed on the Shield from this machine (no store): signed with the debug key so adb can install it.
             // Release matters for feel: debug Compose runs its layout and draw with checks on and no optimisation.
             signingConfig signingConfigs.debug
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // R8 on: Compose runs noticeably faster optimised (its runtime is written to be shrunk). Names are kept
+            // (proguard-rules.pro: -dontobfuscate) so logs and traces stay readable.
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 }

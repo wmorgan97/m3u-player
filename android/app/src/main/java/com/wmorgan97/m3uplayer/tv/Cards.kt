@@ -67,7 +67,7 @@ fun Modifier.restorable(key: String): Modifier {
 @Composable
 fun FocusCard(modifier: Modifier, scale: Float = Tv.scaleCard, restoreKey: String? = null, label: String = "", onLongClick: (() -> Unit)? = null, onFocus: (() -> Unit)? = null,
               focused: MutableState<Boolean>? = null, onClick: () -> Unit, content: @Composable BoxScope.() -> Unit) {
-    val style = remember(scale) { FocusStyle.card(scale) }
+    val style = when (scale) { Tv.scaleCard -> FocusStyle.Card; Tv.scaleWide -> FocusStyle.CardWide; Tv.scaleLarge -> FocusStyle.CardLarge; else -> remember(scale) { FocusStyle.card(scale) } }
     Box(modifier.let { if (restoreKey != null) it.restorable(restoreKey) else it }
         .onFocusChanged { focused?.value = it.isFocused; if (it.isFocused) onFocus?.invoke() }
         .graphicsLayer { }   // (its own display list: the frame and halo animating redraw this card only, not the row)
@@ -88,12 +88,13 @@ fun Picture(url: String?, modifier: Modifier = Modifier, scale: ContentScale = C
     val src = remember(url, tries) { if (tries == 1) Repo.imgOriginal(url) else url }
     val failed = tries >= 2 || (tries == 1 && src == null)
     val ctx = LocalContext.current
-    Box(modifier.background(Tv.surface2)) {
-        if (src.isNullOrBlank() || failed) fallback()
-        else AsyncImage(remember(src) { ImageRequest.Builder(ctx).data(src).crossfade(if (fade) FADE_MS else 0).build() }, null, contentScale = scale, modifier = Modifier.fillMaxSize(),
-            placeholder = ColorPainter(Tv.surface2), error = ColorPainter(Color.Transparent), onError = { tries = if (tries == 0 && Repo.imgOriginal(url) != null) 1 else 2 })
-    }
+    // The picture is the node itself (no wrapping Box): one layout node per picture, built in every poster of a row.
+    if (src.isNullOrBlank() || failed) Box(modifier.background(Tv.surface2), content = fallback)
+    else AsyncImage(remember(src) { ImageRequest.Builder(ctx).data(src).crossfade(if (fade) FADE_MS else 0).build() }, null, contentScale = scale, modifier = modifier.background(Tv.surface2),
+        placeholder = PLACEHOLDER, error = NO_PICTURE, onError = { tries = if (tries == 0 && Repo.imgOriginal(url) != null) 1 else 2 })
 }
+private val PLACEHOLDER = ColorPainter(Tv.surface2)
+private val NO_PICTURE = ColorPainter(Color.Transparent)
 
 @Composable
 fun <T> CardRow(items: List<T>, key: ((T) -> Any)? = null, card: @Composable (T, Int) -> Unit) = traced("CardRow") {
@@ -110,11 +111,18 @@ fun <T> CardRow(items: List<T>, key: ((T) -> Any)? = null, card: @Composable (T,
  *  is applied to each line as it's drawn, never through an offscreen layer: ~30 captions on screen would each need one.) */
 @Composable
 fun Caption(title: String, sub: String?, width: Dp, label: String = title, focused: State<Boolean>? = null) = traced("Caption") {
+    // (FastText: the plain-string text node with no offscreen layer each; tv-material's Text cost ~2x here.)
     Column(Modifier.width(width).padding(top = 8.dp).clearAndSetSemantics { }.let { m -> if (focused == null) m else m.graphicsLayer { alpha = if (focused.value) 1f else .8f; compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha } }) {
-        Text(title, fontSize = Tv.caption, lineHeight = Tv.captionLine, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
-        Text(sub ?: " ", fontSize = Tv.label, lineHeight = Tv.captionLine, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        FastText(title, CAPTION_TITLE)
+        FastText(sub ?: " ", CAPTION_SUB)
     }
 }
+private val CAPTION_TITLE = androidx.compose.ui.text.TextStyle(fontSize = Tv.caption, lineHeight = Tv.captionLine, color = Tv.text, fontWeight = FontWeight.Medium)
+private val CAPTION_SUB = androidx.compose.ui.text.TextStyle(fontSize = Tv.label, lineHeight = Tv.captionLine, color = Tv.muted)
+
+/** "★ 7.4": formatted once per distinct rating (String.format is slow, and ran for every poster built). Main thread. */
+private val ratingLabels = HashMap<Double, String>()
+fun ratingLabel(r: Double): String = ratingLabels.getOrPut(r) { "★ %.1f".format(r) }
 
 /** A poster (2:3) with its title and year underneath. */
 @Composable
@@ -122,25 +130,28 @@ fun PosterCard(v: Vod, width: Dp = Tv.poster, rank: Int? = null, restoreKey: Str
     val key = restoreKey ?: "${v.kind}:${v.id}:${rank ?: ""}:${width.value}"
     val focused = remember { mutableStateOf(false) }
     Column(Modifier.width(width)) {
+        // (The card's own Box holds the picture and its overlays directly: one layout node fewer per poster.)
         FocusCard(Modifier.width(width).aspectRatio(2f / 3f), restoreKey = key, label = v.label, onLongClick = onLong, onFocus = onFocus, focused = focused, onClick = onClick) {
-            Box(Modifier.fillMaxSize()) {
-                Picture(Repo.img(v.poster, 300), Modifier.fillMaxSize()) {
-                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
-                        Text(v.title, Modifier.padding(10.dp), fontSize = Tv.caption, color = Tv.text2, maxLines = 4, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
-                    }
+            Picture(Repo.img(v.poster, 300), Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().background(POSTER_FALLBACK), contentAlignment = Alignment.Center) {
+                    Text(v.title, Modifier.padding(10.dp), fontSize = Tv.caption, color = Tv.text2, maxLines = 4, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
                 }
-                // Top 10: the number top-left, where it shows even when the row only peeks in at the bottom of the screen.
-                if (rank != null) {
-                    Box(Modifier.align(Alignment.TopStart).fillMaxWidth().height(64.dp).background(Brush.verticalGradient(listOf(Color(0xB3000000), Color.Transparent))))
-                    Text("$rank", Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 2.dp), fontSize = Tv.rank, fontWeight = FontWeight.Black, color = Tv.text, lineHeight = Tv.rank,
-                        style = androidx.compose.ui.text.TextStyle(platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false)))
-                }
-                if (v.rating != null) TvBadge("★ %.1f".format(v.rating), Modifier.align(Alignment.TopEnd).padding(6.dp), BadgeTone.Star)
             }
+            // Top 10: the number top-left, where it shows even when the row only peeks in at the bottom of the screen.
+            if (rank != null) {
+                Box(Modifier.align(Alignment.TopStart).fillMaxWidth().height(64.dp).background(RANK_SHADE))
+                Text("$rank", Modifier.align(Alignment.TopStart).padding(start = 8.dp, top = 2.dp), fontSize = Tv.rank, fontWeight = FontWeight.Black, color = Tv.text, lineHeight = Tv.rank,
+                    style = RANK_STYLE)
+            }
+            if (v.rating != null) TvBadge(ratingLabel(v.rating), Modifier.align(Alignment.TopEnd).padding(6.dp), BadgeTone.Star)
         }
         Caption(v.title, v.year?.toString(), width, label = v.label, focused = focused)
     }
 }
+
+private val POSTER_FALLBACK = Brush.verticalGradient(listOf(Tv.surface3, Tv.surface))
+private val RANK_SHADE = Brush.verticalGradient(listOf(Color(0xB3000000), Color.Transparent))
+private val RANK_STYLE = androidx.compose.ui.text.TextStyle(platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false))
 
 /** Continue watching / episodes: a 16:9 picture with a progress line, title and detail beneath. */
 @Composable

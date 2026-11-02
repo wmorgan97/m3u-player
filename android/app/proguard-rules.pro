@@ -19,3 +19,12 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# --- R8 (release) ---
+-dontobfuscate
+# Capacitor finds its bridge, plugins and their methods by reflection.
+-keep class com.getcapacitor.** { *; }
+-keep @com.getcapacitor.annotation.CapacitorPlugin class * { *; }
+-keepclassmembers class * { @com.getcapacitor.PluginMethod <methods>; }
+-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }
+-keep class com.wmorgan97.m3uplayer.** { *; }

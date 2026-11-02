@@ -294,9 +294,11 @@ fun TvIconButton(icon: ImageVector, contentDescription: String, onClick: () -> U
     }
 }
 
-/** A pill for a choice among a few (seasons, guide groups, UK / all countries). Selected: accent outline and tint. */
+/** A pill for a choice among a few (seasons, guide groups, UK / all countries). Selected: accent outline and tint.
+ *  [icon]: an optional small icon before the text, in the text's colour (the guide's "Now"). */
 @Composable
-fun TvChip(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier, onFocus: ((Boolean) -> Unit)? = null, onLongClick: (() -> Unit)? = null) {
+fun TvChip(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier, onFocus: ((Boolean) -> Unit)? = null, onLongClick: (() -> Unit)? = null,
+           icon: ImageVector? = null) {
     var focused by remember { mutableStateOf(false) }
     Box(modifier.height(Tv.chipHeight)
         .background(if (selected) Tv.accent.copy(alpha = .16f) else Tv.surface2.copy(alpha = .72f), Tv.pill)
@@ -304,11 +306,29 @@ fun TvChip(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modif
         .onFocusedChange { focused = it; onFocus?.invoke(it) }
         .tvFocus(FocusStyle.Pill.copy(scale = 1.03f))
         .tvClickable(onClick, onLongClick, label = text, selected = selected)
-        .padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
-        Text(text, style = TvType.label, fontWeight = if (focused || selected) Tv.wStrong else Tv.wLabel, maxLines = 1,
-            color = when { focused -> Tv.onFocus; selected -> Tv.text; else -> Tv.text2 })
+        .padding(start = if (icon != null) 12.dp else 16.dp, end = 16.dp), contentAlignment = Alignment.Center) {
+        val ink = when { focused -> Tv.onFocus; selected -> Tv.text; else -> Tv.text2 }
+        if (icon == null) Text(text, style = TvType.label, fontWeight = if (focused || selected) Tv.wStrong else Tv.wLabel, maxLines = 1, color = ink)
+        else Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, Modifier.size(Tv.iconS), tint = ink)
+            Spacer(Modifier.width(6.dp))
+            Text(text, style = TvType.label, fontWeight = if (focused || selected) Tv.wStrong else Tv.wLabel, maxLines = 1, color = ink)
+        }
     }
 }
+
+/** A small on/off switch (settings rows, anywhere a toggle sits at the end of a [TvListRow]). On: accent track, white
+ *  knob at the end. Off: quiet track, knob at the start. On a [focused] (white) row the off track darkens so it still reads. */
+@Composable
+fun TvSwitch(on: Boolean, focused: Boolean, modifier: Modifier = Modifier) {
+    val track = when { on -> Tv.accent; focused -> Color.Black.copy(alpha = .22f); else -> Tv.surface3 }
+    val knob = when { on -> Tv.onAccent; focused -> Tv.onFocus.copy(alpha = .55f); else -> Tv.muted }
+    Box(modifier.size(Tv.switchWidth, Tv.switchHeight).background(track, Tv.pill).padding(SWITCH_PAD),
+        contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart) {
+        Box(Modifier.size(Tv.switchHeight - SWITCH_PAD * 2).background(knob, Tv.pill))
+    }
+}
+private val SWITCH_PAD = 3.dp
 
 /** A list row (channels, groups, settings, menu options): transparent, white when focused with content in
  *  [Tv.onFocus] (also given to [content] and as tv-material's LocalContentColor). [selected]: the open one, a quiet
@@ -324,7 +344,8 @@ fun TvListRow(onClick: () -> Unit, modifier: Modifier = Modifier, selected: Bool
         .tvFocus(FocusStyle.Row)
         .tvClickable(onClick, onLongClick, label = label, selected = if (selected) true else null)) {
         if (selected && !focused) Box(Modifier.align(Alignment.CenterStart).padding(start = 3.dp).size(3.dp, 16.dp).background(Tv.accent, Tv.pill))
-        CompositionLocalProvider(LocalContentColor provides if (focused) Tv.onFocus else Tv.text) {
+        val ink = if (focused) Tv.onFocus else Tv.text
+        CompositionLocalProvider(LocalContentColor provides ink, LocalRowInk provides ink) {
             Row(Modifier.fillMaxSize().padding(contentPadding), verticalAlignment = Alignment.CenterVertically) { content(focused) }
         }
     }
@@ -358,17 +379,27 @@ fun TvBadge(text: String, modifier: Modifier = Modifier, tone: BadgeTone = Badge
         BadgeTone.Live -> Tv.live.copy(alpha = .25f) to Tv.text
         BadgeTone.Star -> Tv.scrim to Tv.star
     }
+    // (Most badges sit on cards in rows, so a plain badge is one text node: no Row, no tv-material Text layer.)
+    if (tone != BadgeTone.Live) { FastText(text, badgeStyle(fg), modifier.background(bg, Tv.shapeS).padding(horizontal = 6.dp, vertical = 2.dp), inherit = false); return }
     Row(modifier.background(bg, Tv.shapeS).padding(horizontal = 6.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (tone == BadgeTone.Live) { Box(Modifier.size(6.dp).clip(CircleShape).background(Tv.live)); Spacer(Modifier.width(5.dp)) }
-        Text(text, style = TvType.micro, fontWeight = Tv.wStrong, color = fg, maxLines = 1)
+        Box(Modifier.size(Tv.liveDot).clip(CircleShape).background(Tv.live)); Spacer(Modifier.width(5.dp))
+        FastText(text, badgeStyle(fg), inherit = false)
     }
 }
+private val badgeStyles = HashMap<Color, androidx.compose.ui.text.TextStyle>()
+private fun badgeStyle(fg: Color) = badgeStyles.getOrPut(fg) { TvType.micro.merge(androidx.compose.ui.text.TextStyle(color = fg, fontWeight = Tv.wStrong)) }
+
+/** The content colour of the [TvListRow] around (white, or dark on a focused row); null outside one. */
+internal val LocalRowInk = compositionLocalOf<Color?> { null }
+private val TRACK = Color(0x59FFFFFF)
 
 /** A thin progress line (under a picture, in a row). Accent; [live] in the live red (a thin line is the one place it's
- *  used besides a dot). 4dp unless the modifier sets a height. */
+ *  used besides a dot). 4dp unless the modifier sets a height. The track is white at 35%; inside a focused (white)
+ *  [TvListRow] it follows the row's dark content colour instead, so it never vanishes into the highlight. */
 @Composable
 fun TvProgress(fraction: Float, modifier: Modifier = Modifier, live: Boolean = false) {
-    Box(modifier.height(4.dp).background(Color(0x59FFFFFF))) {
+    val track = LocalRowInk.current?.copy(alpha = .35f) ?: TRACK
+    Box(modifier.height(4.dp).background(track)) {
         Box(Modifier.fillMaxHeight().fillMaxWidth(fraction.coerceIn(0f, 1f)).background(if (live) Tv.live else Tv.accent))
     }
 }
@@ -436,3 +467,31 @@ fun SkeletonTitle() {
 fun Modifier.onFocusedChange(onChange: (Boolean) -> Unit): Modifier = this.onFocusChanged { onChange(it.isFocused) }
 
 private fun Modifier.graphicsAlpha(a: Float) = this.graphicsLayer { alpha = a; compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha }
+
+// ---------- Text for hot paths ----------
+
+/**
+ * Plain one-style text, as tv-material's `Text` draws it, for things built many times a second (card captions, badges):
+ *  - tv-material 1.0's Text always passes an onTextLayout callback, which sends every string down the AnnotatedString
+ *    path (TextAnnotatedStringNode, MultiParagraph), and wraps each one in an OFFSCREEN graphics layer. This uses the
+ *    plain-string node (TextStringSimpleNode) and no layer. For opaque text the pixels are the same.
+ *  - [style] is the whole look (size, line height, weight, colour). With [inherit] it's merged over the theme's text
+ *    style exactly as `Text(fontSize = …, …)` would be (merged once per style, not per call); without, it's used as is,
+ *    as `Text(style = …)` would. [color], when given, is read at draw time (a colour change never recomposes).
+ */
+@Composable
+fun FastText(text: String, style: androidx.compose.ui.text.TextStyle, modifier: Modifier = Modifier, maxLines: Int = 1, overflow: TextOverflow = TextOverflow.Ellipsis,
+             inherit: Boolean = true, color: androidx.compose.ui.graphics.ColorProducer? = null) {
+    val s = if (inherit) MergedStyles.of(androidx.tv.material3.LocalTextStyle.current, style) else style
+    androidx.compose.foundation.text.BasicText(text, modifier, s, overflow = overflow, maxLines = maxLines, color = color)
+}
+
+/** Theme style + a call site's style, merged once and kept (styles are constants, so the map stays tiny). Main thread only. */
+private object MergedStyles {
+    private var base: androidx.compose.ui.text.TextStyle? = null
+    private val merged = java.util.IdentityHashMap<androidx.compose.ui.text.TextStyle, androidx.compose.ui.text.TextStyle>()
+    fun of(theme: androidx.compose.ui.text.TextStyle, style: androidx.compose.ui.text.TextStyle): androidx.compose.ui.text.TextStyle {
+        if (theme != base) { base = theme; merged.clear() }
+        return merged.getOrPut(style) { theme.merge(style) }
+    }
+}

@@ -64,6 +64,7 @@ fun SettingsScreen(act: TvActivity) {
     LaunchedEffect(toastSeq) { if (toast != null) { delay(2600); toast = null } }
 
     var menu by remember { mutableStateOf<Pair<String, List<Pair<String, () -> Unit>>>?>(null) }
+    var menuSelected by remember { mutableStateOf<String?>(null) }   // a chooser's current choice (marked in the list)
     var pinAsk by remember { mutableStateOf<PinAsk?>(null) }
     var pinSeq by remember { mutableIntStateOf(0) }
     var form by remember { mutableStateOf<FormAsk?>(null) }
@@ -87,14 +88,14 @@ fun SettingsScreen(act: TvActivity) {
     LaunchedEffect(Unit) { delay(80); runCatching { secReqs.getValue(Sec.Playlists).requestFocus() } }
     LaunchedEffect(enterPane) {
         if (enterPane == 0) return@LaunchedEffect
-        repeat(6) { delay(16); if (runCatching { paneReq.requestFocus() }.isSuccess) return@LaunchedEffect }
+        repeat(30) { delay(16); if (runCatching { paneReq.requestFocus() }.isSuccess) return@LaunchedEffect }   // (up to ~0.5 s: a slow frame building the new section no longer leaves Right doing nothing)
     }
     fun goPane(s: Sec) { shown = s; enterPane++ }
     fun backToSections() { runCatching { secReqs.getValue(shown).requestFocus() } }
     // Back in the pane returns to the section column; Back there falls through to the app (act.back(), then the menu).
     BackHandler(enabled = inPane && menu == null && pinAsk == null) { backToSections() }
 
-    val rows = sectionRows(act, shown, v + tick, ::say, { t, o -> menu = t to o }, ::askPin, { choosePin() }, ::ask, tmdbOn) { tick++ }
+    val rows = sectionRows(act, shown, v + tick, ::say, { t, o -> menuSelected = null; menu = t to o }, { t, o, sel -> menuSelected = sel; menu = t to o }, ::askPin, { choosePin() }, ::ask, tmdbOn) { tick++ }
 
     Column(Modifier.fillMaxSize()) {
         PageTitle("Settings", "Shared with your phone and computer through your server")
@@ -115,7 +116,9 @@ fun SettingsScreen(act: TvActivity) {
                 }, state = paneState, contentPadding = PaddingValues(bottom = Tv.s12), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     item(key = "head-${shown.name}") { SettingsPaneTitle(shown.title) }
                     itemsIndexed(rows, key = { i, _ -> "${shown.name}-$i" }) { i, r ->
-                        SettingRowView(r, if (i == firstFocusable) Modifier.focusRequester(paneReq) else Modifier, first = i == 0)
+                        // The first row brings the pane's title back in; a row under a group heading brings the heading.
+                        val reach = when { i == firstFocusable -> SettingsDims.toTop; i > 0 && rows[i - 1] is SettingRow.Header -> headerReach(first = i - 1 == 0); else -> 0.dp }
+                        SettingRowView(r, (if (i == firstFocusable) Modifier.focusRequester(paneReq) else Modifier).revealAbove(reach), first = i == 0)
                     }
                 }
             }
@@ -135,7 +138,7 @@ fun SettingsScreen(act: TvActivity) {
             }) { form = null }
         }
     }
-    menu?.let { (title, options) -> Options(title, options.map { (l, fn) -> l to { menu = null; fn() } }) { menu = null } }
+    menu?.let { (title, options) -> Options(title, options.map { (l, fn) -> l to { menu = null; fn() } }, selected = menuSelected) { menu = null } }
     pinAsk?.let { ask ->
         key(ask.seq) {
             PinDialog(ask.title) { pin ->
@@ -159,7 +162,9 @@ fun SettingsScreen(act: TvActivity) {
 /** The rows of one section. */
 private fun sectionRows(
     act: TvActivity, sec: Sec, @Suppress("UNUSED_PARAMETER") stamp: Int, say: (String) -> Unit,
-    menu: (String, List<Pair<String, () -> Unit>>) -> Unit, askPin: (String, Boolean, (String) -> Unit) -> Unit,
+    menu: (String, List<Pair<String, () -> Unit>>) -> Unit,
+    chooser: (String, List<Pair<String, () -> Unit>>, String?) -> Unit,   // a menu of choices with the current one marked
+    askPin: (String, Boolean, (String) -> Unit) -> Unit,
     choosePin: () -> Unit, ask: (FormAsk) -> Unit, tmdbOn: Boolean?, changed: () -> Unit,
 ): List<SettingRow> {
     fun refreshLists() { Repo.clearCache(); say("Channel lists will download again") }
@@ -208,8 +213,9 @@ private fun sectionRows(
             val subLang = player.getString("textLang", null)
             val audioLang = player.getString("audioLang", null)
             fun langName(l: String?) = l?.let { java.util.Locale.forLanguageTag(it).getDisplayLanguage(java.util.Locale.UK).ifBlank { it } } ?: "Automatic"
-            fun langMenu(title: String, prefKey: String) = menu(title, listOf("Automatic" to { player.edit().remove(prefKey).apply(); changed() }) +
-                listOf("en", "fr", "de", "es", "it", "pl", "pt", "ar", "tr", "nl").map { l -> langName(l) to { player.edit().putString(prefKey, l).apply(); changed() } })
+            fun langMenu(title: String, prefKey: String) = chooser(title, listOf("Automatic" to { player.edit().remove(prefKey).apply(); changed() }) +
+                listOf("en", "fr", "de", "es", "it", "pl", "pt", "ar", "tr", "nl").map { l -> langName(l) to { player.edit().putString(prefKey, l).apply(); changed() } },
+                langName(player.getString(prefKey, null)))
             listOf(
                 SettingRow.Header("Subtitles & audio"),
                 SettingRow.Toggle(Icons.Default.ClosedCaption, "Subtitles", "Turn subtitles on for every film and episode that has them", subs) { player.edit().putBoolean("textOn", it).apply(); changed() },

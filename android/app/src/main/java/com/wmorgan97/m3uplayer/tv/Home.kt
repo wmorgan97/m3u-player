@@ -66,6 +66,9 @@ fun HomeScreen(act: TvActivity) {
     val series by produceState(Repo.cachedOverview("series"), Repo.version) { if (value == null) value = runCatching { Repo.overview("series") }.getOrNull(); loaded = loaded or 2 }
     // Continue watching: films and episodes only.
     val cw = remember(refresh) { Repo.continueWatching().filter(::isVodProgress) }
+    // Watch later: films and series you saved, newest first (hidden when empty).
+    val wl = remember(refresh) { Repo.watchLater() }
+    var posterMenu by remember { mutableStateOf<Vod?>(null) }
     // Built off the main thread and cached (HomeFeed): the quick rows at once, the rest when their lists are in.
     val rows by produceState(HomeFeed.cached() ?: emptyList(), movies, series, refresh) {
         val m = movies; val s = series
@@ -103,7 +106,7 @@ fun HomeScreen(act: TvActivity) {
     // Back from deep in the rows: to the top first (Back again opens the menu).
     BackHandler(enabled = rowsFocused && slides.isNotEmpty()) { scope.launch { listState.animateScrollToItem(0) }; runCatching { playFocus.requestFocus() } }
 
-    val nothing = loaded == 3 && movies == null && series == null && cw.isEmpty()
+    val nothing = loaded == 3 && movies == null && series == null && cw.isEmpty() && wl.isEmpty()
     if (nothing) { EmptyState(Icons.Default.Movie, "No films or series yet", "Add a playlist with films and series in Settings"); return }
     Box(Modifier.fillMaxSize().onPreviewKeyEvent { if (it.type == KeyEventType.KeyDown) pressed = true; false }) {
         SpotlightBackdrop(spot, Modifier.align(Alignment.TopEnd).fillMaxWidth(.74f).aspectRatio(16f / 9f))
@@ -118,12 +121,16 @@ fun HomeScreen(act: TvActivity) {
                         val f = first; first = false
                         item(key = "cw") { ContinueRow(act, cw, spot, Modifier.upToPlay(f && slides.isNotEmpty(), playFocus)) }
                     }
+                    if (wl.isNotEmpty()) {
+                        val f = first; first = false
+                        item(key = "wl") { WatchLaterRow(act, wl, spot, Modifier.upToPlay(f && slides.isNotEmpty(), playFocus)) }
+                    }
                     if (rows.isEmpty() && (movies == null || series == null)) item(key = "skel") { Column { SkeletonTitle(); SkeletonRow(width = Tv.poster) } }
                     val firstRow = if (first) rows.firstOrNull()?.id else null
                     items(rows, key = { it.id }) { r ->
                         SpotRow(r.title, Modifier.upToPlay(r.id == firstRow && slides.isNotEmpty(), playFocus), extra = if (r.ranked) "from TMDB" else null) {
                             CardRow(r.items, key = { "${it.kind}:${it.id}" }) { v, i ->
-                                PosterCard(v, Tv.poster, rank = if (r.ranked) i + 1 else null, restoreKey = "${r.id}|${v.kind}:${v.id}",
+                                PosterCard(v, Tv.poster, rank = if (r.ranked) i + 1 else null, restoreKey = "${r.id}|${v.kind}:${v.id}", onLong = { posterMenu = v },
                                     onFocus = { spot.preview(v) }) { act.go(Screen.Details(v)) }
                             }
                         }
@@ -134,5 +141,39 @@ fun HomeScreen(act: TvActivity) {
         // The rows dissolve into the page at the bottom edge instead of being cut off.
         Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(28.dp).background(Brush.verticalGradient(listOf(Color.Transparent, Tv.bg))))
     }
+    posterMenu?.let { v -> PosterOptions(act, v) { posterMenu = null } }
+}
+
+// ---------- Watch later ----------
+
+/** Watch later, on Home, Movies and Series (after Continue watching): posters, newest first. OK opens the title;
+ *  holding OK offers More info / Take off Watch later. */
+@Composable
+fun WatchLaterRow(act: TvActivity, items: List<WatchLaterEntry>, spot: SpotlightState?, modifier: Modifier = Modifier) {
+    var menu by remember { mutableStateOf<WatchLaterEntry?>(null) }
+    val vods = remember(items) { items.map { it to it.toVod() } }
+    SpotRow("Watch later", modifier) {
+        CardRow(vods, key = { it.first.key }) { (e, v), _ ->
+            PosterCard(v, Tv.poster, restoreKey = "wl|" + e.key, onLong = { menu = e }, onFocus = { spot?.preview(v) }) { act.go(Screen.Details(v)) }
+        }
+    }
+    menu?.let { e ->
+        val v = e.toVod()
+        PosterOptions(act, v, onRemove = {
+            // The highlight moves to the next poster (or the one before), not off the row.
+            val i = items.indexOf(e); Nav.restoreKey = (items.getOrNull(i + 1) ?: items.getOrNull(i - 1))?.let { "wl|" + it.key }
+        }) { menu = null }
+    }
+}
+
+/** Hold OK on a film or series poster: More info, and Add to / Take off Watch later. (Options colours entries that
+ *  start with "Remove" as dangerous; taking a title off a list isn't, so it's worded calmly.) */
+@Composable
+fun PosterOptions(act: TvActivity, v: Vod, onRemove: () -> Unit = {}, onDismiss: () -> Unit) {
+    val on = remember(v) { Repo.isWatchLater(v) }
+    Options(v.label, listOf(
+        "More info" to { onDismiss(); act.go(Screen.Details(v)) },
+        (if (on) "Take off Watch later" else "Add to Watch later") to { onDismiss(); if (on) onRemove(); Repo.toggleWatchLater(v, !on) },
+    ), onDismiss)
 }
 

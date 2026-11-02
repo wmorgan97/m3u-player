@@ -109,6 +109,9 @@ object Tv {
     val settingRow = 48.dp      // settings row
     val chipHeight = 32.dp
     val buttonHeight = 40.dp
+    val switchWidth = 36.dp     // the on/off switch at the end of a settings row ([TvSwitch])
+    val switchHeight = 20.dp
+    val liveDot = 6.dp          // the red "on now" dot drawn inline beside text (Live TV, the guide, live badges)
 
     // ---------- Elevation / glow ----------
     val focusFrame = 3.dp       // white frame on a focused picture
@@ -228,3 +231,23 @@ fun Clock(modifier: Modifier = Modifier) {
 /** Progress bar under a picture (see [TvProgress]). */
 @Composable
 fun ProgressLine(progress: Float, modifier: Modifier = Modifier, height: Dp = 4.dp) = TvProgress(progress, modifier.height(height))
+
+/** Premium formats get the accent tag; plain resolutions stay neutral. */
+fun premiumQuality(q: String) = q == "4K" || q == "HDR" || q == "Dolby Vision" || q == "Atmos"
+
+/** A quality tag drawn the one way everywhere (spotlight, details). */
+@Composable
+fun QualityTag(q: String) = if (premiumQuality(q)) Tag(q, color = Tv.text, bg = Tv.accentDeep) else Tag(q)
+
+/** A row under the spotlight: its title (and a quiet note, e.g. "from TMDB" on the Top 10s, or a count), then its cards. */
+@Composable
+fun SpotRow(title: String, modifier: Modifier = Modifier, extra: String? = null, count: Int? = null, content: @Composable () -> Unit) {
+    Column(modifier) {
+        Row(Modifier.fillMaxWidth().height(SPOT_ROW_HEAD).padding(start = Tv.margin, end = Tv.margin), verticalAlignment = Alignment.Top) {
+            Text(title, fontSize = Tv.rowTitle, lineHeight = Tv.rowTitleLine, fontWeight = Tv.wTitle, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            if (extra != null) Text(extra, fontSize = Tv.label, color = Tv.muted, maxLines = 1, modifier = Modifier.padding(start = 10.dp, top = 4.dp))
+            if (count != null) { Spacer(Modifier.weight(1f)); Text("$count", fontSize = Tv.label, color = Tv.muted, maxLines = 1, modifier = Modifier.padding(top = 4.dp)) }
+        }
+        content()
+    }
+}

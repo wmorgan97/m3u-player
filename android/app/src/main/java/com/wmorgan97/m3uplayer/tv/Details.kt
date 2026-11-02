@@ -102,6 +102,11 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
     val tmEps by produceState<Pair<Int, Map<Int, JSONObject>>?>(null, v.id, shownSeason) { val s = shownSeason ?: return@produceState; value = s to runCatching { Repo.tmdbEpisodes(v, s) }.getOrElse { emptyMap() } }
     val merged = remember(eps, tmEps, shownSeason) { eps?.let { all -> val t = tmEps?.takeIf { it.first == shownSeason }?.second
         if (shownSeason == null || t.isNullOrEmpty()) all else all + (shownSeason to (all[shownSeason] ?: emptyList()).map { Repo.withTmdb(it, t[it.num]) }) } }
+    // Every episode watched: the series is finished, so it leaves Watch later (on every device).
+    LaunchedEffect(eps) {
+        val all = eps?.values?.flatten().orEmpty()
+        if (all.isNotEmpty() && Repo.isWatchLater(v) && all.all { e -> Repo.episodeUrl(e)?.let { Repo.progressFor(it)?.done } == true }) Repo.toggleWatchLater(v, on = false)
+    }
     val multiSeason = (merged?.size ?: 0) > 1
     val hasEpisodes = merged?.get(shownSeason)?.isNotEmpty() == true
     Box(Modifier.fillMaxSize()) {
@@ -156,16 +161,21 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
                                 TvButton(if (p != null) "Resume  ·  ${clock((p.d - p.t).toLong().coerceAtLeast(0))} left" else "Play", { act.play(listOf(movieItem(v, url, p?.t ?: 0.0)), 0) },
                                     Modifier.focusRequester(playFocus), icon = Icons.Default.PlayArrow, style = TvButtonStyle.Primary)
                                 if (p != null) TvButton("Start over", { act.play(listOf(movieItem(v, url, 0.0)), 0) }, icon = Icons.Default.Replay)
+                                WatchLaterButton(v)
                             }
                             if (p != null && p.d > 0) TvProgress((p.t / p.d).toFloat().coerceIn(0f, 1f), Modifier.padding(top = 12.dp).width(240.dp))
                         } else {
                             val all = eps
                             val next = remember(all, refresh) { all?.let { nextEpisode(it) } }
                             // Down always lands on the season shown (never whichever chip happens to be nearest).
+                            val down = Modifier.focusProperties { down = if (multiSeason) seasonFocus else if (hasEpisodes) firstEpFocus else FocusRequester.Default }
+                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             TvButton(when { all == null -> "Loading episodes…"; next == null -> "No episodes"; next.second > 0 -> "Continue S${next.first.season} E${next.first.num}"; else -> "Play S${next.first.season} E${next.first.num}" },
                                 { next?.let { (e, start) -> playEpisode(act, v, all!!, e, start) } },
-                                Modifier.focusRequester(playFocus).focusProperties { down = if (multiSeason) seasonFocus else if (hasEpisodes) firstEpFocus else FocusRequester.Default },
+                                Modifier.focusRequester(playFocus).then(down),
                                 icon = Icons.Default.PlayArrow, style = TvButtonStyle.Primary, enabled = next != null)
+                            WatchLaterButton(v, down)
+                            }
                         }
                     }
                 }
@@ -192,6 +202,13 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
         }
         }
     }
+}
+
+/** Adds the title to Watch later or takes it off: a plus, then a tick once it's on the list (calm, never red). */
+@Composable
+private fun WatchLaterButton(v: Vod, modifier: Modifier = Modifier) {
+    val on = remember(v.kind, v.id, Repo.version) { Repo.isWatchLater(v) }
+    TvButton("Watch later", { Repo.toggleWatchLater(v, !on) }, modifier, icon = if (on) Icons.Default.Check else Icons.Default.Add)
 }
 
 /** A row of posters under the page. The page's own 48dp margins are the row's padding (it's widened by them), so the

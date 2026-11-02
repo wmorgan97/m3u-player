@@ -8,10 +8,10 @@ Paths are relative to `android/app/src/main/java/com/wmorgan97/m3uplayer/tv/`.
 
 | File | What it holds |
 |---|---|
-| `Theme.kt` | Tokens (`object Tv`), text styles (`TvType`), `holdOk` / `freshOkOnly`, `RowTitle`, `PageTitle`, `Tag`, `Clock`, `ProgressLine` |
-| `Components.kt` | Focus (`FocusStyle`, `Modifier.tvFocus`, `Modifier.tvClickable`), buttons, chips, list rows, panels, dialogs, badges, progress, empty/error states, skeletons |
+| `Theme.kt` | Tokens (`object Tv`), text styles (`TvType`), `holdOk` / `freshOkOnly`, `RowTitle`, `SpotRow`, `PageTitle`, `Tag`, `QualityTag`, `Clock`, `ProgressLine` |
+| `Components.kt` | Focus (`FocusStyle`, `Modifier.tvFocus`, `Modifier.tvClickable`), buttons, chips, switches, list rows, panels, dialogs, badges, progress, empty/error states, skeletons, `FastText` |
 | `Cards.kt` | Picture cards (`FocusCard`, `PosterCard`, `WideCard`, `ChannelCard`), `Picture`, `CardRow`, `Caption`, `LogoTile`, `Nav` restore |
-| `Motion.kt` | Scrolling (`TvScroll`, `rememberRowKeyline`, `rememberRowAnchor`, `WithScroll`), held-key pace (`KeyPace`, `HeldPace`), `rememberPageState` / `AheadPrefetch` |
+| `Motion.kt` | Scrolling (`TvScroll`, `rememberRowKeyline`, `rememberRowAnchor`, `WithScroll`), held-key pace (`KeyPace`, `HeldPace`), `rememberPageState` / `rememberRowState` / `AheadPrefetch`, `RowEnd` |
 | `Dialogs.kt` | Shared pop-ups: `Options`, `ProgrammeDialog`, `PinDialog`, `FormDialog` / `FormField` |
 
 ## Tokens (`Tv` in Theme.kt)
@@ -87,6 +87,8 @@ The grid is 4 dp: `s1`=4, `s2`=8, `s3`=12, `s4`=16, `s5`=20, `s6`=24, `s8`=32, `
 | `listRow` | 40 |
 | `settingRow` | 48 |
 | `chipHeight` | 32 |
+| `switchWidth` / `switchHeight` | 36 / 20 |
+| `liveDot` | 6 (the inline red on-now dot) |
 | `buttonHeight` | 40 |
 | Icons `iconS` / `icon` / `iconM` / `iconL` / `iconXL` | 16 / 20 / 24 / 32 / 56 |
 
@@ -138,7 +140,7 @@ The focus language is unified but contextual. The vocabulary is shared everywher
 | Icon button | Dark disc; selected: accent disc | White disc, grows to 1.05 | `TvIconButton` (`FocusStyle.Disc`) |
 | Text field (search, forms) | `surface` with a hairline | Lifts to `surface2`/`surface3` with a 2 dp white outline, no fill, so the text stays readable | Inline in Search and `FormDialog` |
 | Guide cell (drawn, not focusable) | Grey; on-air in deep accent | Solid white, text `onFocus` | `Guide.kt Cell` |
-| Banner (Movies/Series) | Picture | 2 dp white line; its action pill turns white | `Vod.kt Hero` (Phase 3 replaces it) |
+| Banner (Home/Movies/Series) | Backdrop and text | Its buttons take the pill focus (white) | `Spotlight.kt` (`SpotlightHeader`, `HeroButtons`) |
 
 Why the treatments differ:
 - Pictures keep their picture. They grow a little and gain a frame, so the art is never covered.
@@ -177,12 +179,14 @@ fun Modifier.tvFocus(style: FocusStyle, interaction: MutableInteractionSource? =
 @Composable fun Modifier.tvClickable(onClick: () -> Unit, onLongClick: (() -> Unit)? = null, enabled: Boolean = true, label: String? = null, selected: Boolean? = null): Modifier
 @Composable fun TvButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, icon: ImageVector? = null, style: TvButtonStyle = TvButtonStyle.Secondary, enabled: Boolean = true, onLongClick: (() -> Unit)? = null)
 @Composable fun TvIconButton(icon: ImageVector, contentDescription: String, onClick: () -> Unit, modifier: Modifier = Modifier, size: Dp = 48.dp, selected: Boolean = false)
-@Composable fun TvChip(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier, onFocus: ((Boolean) -> Unit)? = null, onLongClick: (() -> Unit)? = null)
+@Composable fun TvChip(text: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier, onFocus: ((Boolean) -> Unit)? = null, onLongClick: (() -> Unit)? = null, icon: ImageVector? = null)
+@Composable fun TvSwitch(on: Boolean, focused: Boolean, modifier: Modifier = Modifier)   // at the end of a TvListRow; darkens on the white row
 @Composable fun TvListRow(onClick: () -> Unit, modifier: Modifier = Modifier, selected: Boolean = false, onLongClick: (() -> Unit)? = null, contentPadding: PaddingValues = PaddingValues(horizontal = 12.dp), label: String? = null, onFocus: ((Boolean) -> Unit)? = null, content: @Composable RowScope.(focused: Boolean) -> Unit)
 @Composable fun TvPanel(modifier: Modifier = Modifier, title: String? = null, content: @Composable ColumnScope.() -> Unit)
 @Composable fun TvDialogCard(width: Dp, modifier: Modifier = Modifier, horizontalAlignment: Alignment.Horizontal = Alignment.Start, content: @Composable ColumnScope.() -> Unit)
 @Composable fun TvBadge(text: String, modifier: Modifier = Modifier, tone: BadgeTone = BadgeTone.Neutral)   // Neutral | Accent | Live | Star
-@Composable fun TvProgress(fraction: Float, modifier: Modifier = Modifier, live: Boolean = false)
+@Composable fun TvProgress(fraction: Float, modifier: Modifier = Modifier, live: Boolean = false)   // track: white 35%; inside a focused TvListRow it follows the row's dark content colour
+@Composable fun FastText(text: String, style: TextStyle, modifier: Modifier = Modifier, maxLines: Int = 1, overflow: TextOverflow = Ellipsis, inherit: Boolean = true, color: ColorProducer? = null)   // hot paths only
 @Composable fun EmptyState(icon: ImageVector, title: String, message: String, action: Pair<String, () -> Unit>? = null)
 @Composable fun ErrorState(title: String, message: String, retry: (() -> Unit)? = null)
 @Composable fun shimmerBrush(): Brush;  @Composable fun Modifier.shimmer(): Modifier
@@ -206,9 +210,16 @@ object TvScroll { val default; val edge; fun keyline(px, spec); fun anchor(px); 
 @Composable fun WithScroll(spec: BringIntoViewSpec, content: @Composable () -> Unit)
 @Composable fun HeldPace(verticalMs: Long = Tv.heldRowMs)
 @Composable fun rememberPageState(): LazyListState
+@Composable fun rememberRowState(): LazyListState   // card rows: 6 cards built ahead (ROW_AHEAD)
+@Composable fun RowEnd(last: Boolean, content: @Composable () -> Unit)
+
+// Theme.kt (shared rows and tags)
+@Composable fun SpotRow(title: String, modifier: Modifier = Modifier, extra: String? = null, count: Int? = null, content: @Composable () -> Unit)
+@Composable fun QualityTag(q: String);  fun premiumQuality(q: String): Boolean
 
 // Dialogs.kt
 @Composable fun Options(title: String, options: List<Pair<String, () -> Unit>>, onDismiss: () -> Unit)
+@Composable fun Options(title: String, options: List<Pair<String, () -> Unit>>, selected: String?, onDismiss: () -> Unit)   // chooser: tick on the current choice, highlight starts there; long lists scroll
 @Composable fun ProgrammeDialog(act: TvActivity, c: Channel, p: Programme, now: Long, chans: List<Channel>, teams: List<String> = emptyList(), onDismiss: () -> Unit)
 @Composable fun PinDialog(title: String, verify: ((String) -> Boolean)? = null, onResult: (String?) -> Unit)
 @Composable fun FormDialog(title: String, intro: String?, fields: List<FormField>, submit: String = "Save", busy: Boolean = false, error: String? = null, onSubmit: (List<String>) -> Unit, onDismiss: () -> Unit)
@@ -243,3 +254,9 @@ These are additive and source-compatible unless marked otherwise.
 - **`focusSpring`:** stiffness 400, matching the contract's "medium-low". The frame and halo use a quicker spring (1400) so focus reads instantly.
 - **New components:** `TvDialogCard`, `Modifier.tvClickable`, `SkeletonBlock`.
 - **Retired names:** `Bg`, `Surface1`, `Surface2`, `Accent` and `Muted` aliases, plus `cardBorder`, `cardGlow` and `cardScale`. All were unused or superseded.
+
+## Performance notes (cards)
+
+- tv-material 1.0's `Text` always passes an `onTextLayout` callback (so every string takes the AnnotatedString path) and wraps each text in an offscreen graphics layer. Card captions and badges use `FastText` (plain-string text node, no layer, theme style merged once). Use it in anything built per card or per cell; elsewhere `Text` is fine.
+- A `PosterCard` is 8 layout nodes (was 10) and has no offscreen layers (was 3): the picture is the card's own child (no wrapper Boxes), rating labels are formatted once per value (`ratingLabel`), and focus styles, brushes and placeholder painters are constants.
+- Card rows prefetch 6 cards beyond each end (`rememberRowState`). Compose only builds a prefetched card in the gap between frames when its average build time fits, so a cheaper card is what lets prefetch keep up while a key is held.

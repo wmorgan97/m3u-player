@@ -69,6 +69,7 @@ fun VodScreen(act: TvActivity, kind: String) {
     val o = ov
     val refresh = act.refresh + Repo.version
     val cw = remember(refresh, kind) { Repo.continueWatching().filter { isVodProgress(it) && belongsTo(it, kind) } }
+    val wl = remember(refresh, kind) { Repo.watchLater().filter { it.kind == (if (kind == "series") "series" else "movie") } }
     // The slides: this week's six most-watched with a backdrop; each ranked within the trending list.
     val slides = remember(o) { o?.trending.orEmpty().filter { it.backdrop.isNotEmpty() }.take(6) }
     val ranks = remember(o) { o?.trending.orEmpty().withIndex().associate { (i, v) -> "${v.kind}:${v.id}" to (i + 1) } }
@@ -90,7 +91,7 @@ fun VodScreen(act: TvActivity, kind: String) {
     // Back from deep in the rows: to the top first (Back again opens the menu), as on Home.
     BackHandler(enabled = rowsFocused && slides.isNotEmpty()) { scope.launch { listState.animateScrollToItem(0) }; runCatching { playFocus.requestFocus() } }
 
-    if (loaded && o == null && cw.isEmpty()) {
+    if (loaded && o == null && cw.isEmpty() && wl.isEmpty()) {
         EmptyState(if (kind == "series") Icons.Default.VideoLibrary else Icons.Default.Movie, "No $what yet", "Add a playlist with $what in Settings")
         return
     }
@@ -104,6 +105,7 @@ fun VodScreen(act: TvActivity, kind: String) {
                     var first = slides.isNotEmpty()   // the first row's Up goes to Play
                     fun up(): Modifier { val f = first; first = false; return Modifier.upToPlay(f, playFocus) }
                     if (cw.isNotEmpty()) { val m = up(); item(key = "cw") { ContinueRow(act, cw, spot, m) } }
+                    if (wl.isNotEmpty()) { val m = up(); item(key = "wl") { WatchLaterRow(act, wl, spot, m) } }
                     if (o == null) { item(key = "skel") { Column { SkeletonTitle(); SkeletonRow(width = Tv.poster) } }; return@LazyColumn }
                     if (o.trending.isNotEmpty()) { val m = up(); item(key = "top10") { PosterShelf(act, "top10", "Top 10 $what this week", o.trending.take(10), spot, m, extra = "from TMDB", ranked = true) } }
                     if (o.top.isNotEmpty()) { val m = up(); item(key = "popular") { PosterShelf(act, "popular", "Popular now", o.top.take(40), spot, m) } }
@@ -123,11 +125,13 @@ val PAGE_ROW_TOP = Tv.topMargin + 62.dp
 /** A shelf of posters under the spotlight; ranked shelves carry the Top 10 numerals. */
 @Composable
 private fun PosterShelf(act: TvActivity, id: String, title: String, items: List<Vod>, spot: SpotlightState, modifier: Modifier, extra: String? = null, ranked: Boolean = false) {
+    var menu by remember { mutableStateOf<Vod?>(null) }
     SpotRow(title, modifier, extra = extra) {
         CardRow(items, key = { "${it.kind}:${it.id}" }) { v, i ->
-            PosterCard(v, Tv.poster, rank = if (ranked) i + 1 else null, restoreKey = "$id|${v.kind}:${v.id}", onFocus = { spot.preview(v) }) { act.go(Screen.Details(v)) }
+            PosterCard(v, Tv.poster, rank = if (ranked) i + 1 else null, restoreKey = "$id|${v.kind}:${v.id}", onLong = { menu = v }, onFocus = { spot.preview(v) }) { act.go(Screen.Details(v)) }
         }
     }
+    menu?.let { v -> PosterOptions(act, v) { menu = null } }
 }
 
 private const val SHELF_MAX = 20
@@ -139,11 +143,13 @@ fun GroupRow(act: TvActivity, kind: String, id: String, name: String, spot: Spot
     val items by produceState(Repo.cachedGroup(kind, id), id, Repo.version) { if (value == null) value = runCatching { Repo.group(kind, id) }.getOrElse { emptyList() } }
     val l = items
     if (l != null && l.isEmpty()) return@traced   // an empty shelf is left out, not shown as a bare title
+    var menu by remember { mutableStateOf<Vod?>(null) }
+    menu?.let { v -> PosterOptions(act, v) { menu = null } }
     SpotRow(name, modifier, count = l?.size) {
         if (l == null) SkeletonRow()
         else WithScroll(rememberRowKeyline()) { LazyRow(state = rememberRowState(), contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
             val shown = l.take(SHELF_MAX)
-            itemsIndexed(shown, key = { _, v -> v.id }) { i, v -> RowEnd(i == shown.lastIndex && l.size <= SHELF_MAX) { PosterCard(v, Tv.poster, restoreKey = "g$id|${v.kind}:${v.id}", onFocus = spot?.let { s -> { s.preview(v) } }) { act.go(Screen.Details(v)) } } }
+            itemsIndexed(shown, key = { _, v -> v.id }) { i, v -> RowEnd(i == shown.lastIndex && l.size <= SHELF_MAX) { PosterCard(v, Tv.poster, restoreKey = "g$id|${v.kind}:${v.id}", onLong = { menu = v }, onFocus = spot?.let { s -> { s.preview(v) } }) { act.go(Screen.Details(v)) } } }
             if (l.size > SHELF_MAX) item(key = "all") { RowEnd(true) { SeeAllTile(l.size, kind) { act.go(Screen.Grid(kind, id, name)) } } }
         } }
     }
@@ -190,6 +196,8 @@ fun GridScreen(act: TvActivity, kind: String, id: String, title: String) {
     val what = if (kind == "series") "series" else "films"
     val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
+    var menu by remember { mutableStateOf<Vod?>(null) }
+    menu?.let { v -> PosterOptions(act, v) { menu = null } }
     HeldPace()
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(end = Tv.margin), verticalAlignment = Alignment.Bottom) {
@@ -206,7 +214,7 @@ fun GridScreen(act: TvActivity, kind: String, id: String, title: String) {
             // Fixed-size cells: every poster the same size in every grid, whatever the screen width.
             else -> LazyVerticalGrid(GridCells.FixedSize(Tv.posterWide), state = gridState, contentPadding = PaddingValues(start = Tv.margin, end = Tv.margin, top = Tv.s2, bottom = 56.dp),
                 horizontalArrangement = Arrangement.spacedBy(Tv.gap), verticalArrangement = Arrangement.spacedBy(Tv.s5)) {
-                items(l, key = { it.id }) { v -> PosterCard(v, width = Tv.posterWide, restoreKey = "grid|${v.kind}:${v.id}") { act.go(Screen.Details(v)) } }
+                items(l, key = { it.id }) { v -> PosterCard(v, width = Tv.posterWide, restoreKey = "grid|${v.kind}:${v.id}", onLong = { menu = v }) { act.go(Screen.Details(v)) } }
             }
         }
     }

@@ -14,6 +14,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.ui.layout.onSizeChanged
+import kotlinx.coroutines.launch
 import androidx.tv.material3.*
 
 // Building blocks of the TV settings screen (TiviMate-style): a section column on the left, dense 48dp rows on the
@@ -88,7 +91,7 @@ private fun Line(icon: ImageVector, title: String, desc: String, value: String, 
         }
         if (toggle != null) {
             Spacer(Modifier.width(Tv.s4))
-            SettingSwitch(toggle, focused)
+            TvSwitch(toggle, focused)
         } else if (value.isNotEmpty()) {
             Spacer(Modifier.width(Tv.s4))
             Text(value, fontSize = Tv.bodySmall, fontWeight = Tv.wLabel, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -101,17 +104,24 @@ private fun Line(icon: ImageVector, title: String, desc: String, value: String, 
     }
 }
 
-/** A small on/off switch at the end of a toggle row. On: accent track, white knob at the end. Off: quiet track, knob at
- *  the start. On a focused (white) row the off track darkens so it still reads. */
+/** On a row that sits under a group heading: when it takes focus, what's scrolled into view reaches [above] higher, so
+ *  moving up onto the group's first row brings its heading in with it (edge scrolling alone stopped at the row and
+ *  left the heading cut off at the top). One request through the same scroll spec, so it's still one smooth move. */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun SettingSwitch(on: Boolean, focused: Boolean) {
-    val track = when { on -> Tv.accent; focused -> Color.Black.copy(alpha = .22f); else -> Tv.surface3 }
-    val knob = when { on -> Tv.onAccent; focused -> Tv.onFocus.copy(alpha = .55f); else -> Tv.muted }
-    Box(Modifier.size(SettingsDims.switchW, SettingsDims.switchH).background(track, Tv.pill).padding(SettingsDims.switchPad),
-        contentAlignment = if (on) Alignment.CenterEnd else Alignment.CenterStart) {
-        Box(Modifier.size(SettingsDims.switchH - SettingsDims.switchPad * 2).background(knob, Tv.pill))
+fun Modifier.revealAbove(above: androidx.compose.ui.unit.Dp): Modifier {
+    if (above <= 0.dp) return this
+    val req = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
+    val px = with(androidx.compose.ui.platform.LocalDensity.current) { above.toPx() }
+    var size by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    return this.bringIntoViewRequester(req).onSizeChanged { size = it }.onFocusChanged { f ->
+        if (f.isFocused) scope.launch { req.bringIntoView(androidx.compose.ui.geometry.Rect(0f, -px, size.width.toFloat(), size.height.toFloat())) }
     }
 }
+
+/** How much of a [SettingRow.Header] sits above the row after it (its text and padding, plus the list's 2dp spacing). */
+fun headerReach(first: Boolean) = Tv.labelLine.value.dp + Tv.s1 + (if (first) Tv.s2 else Tv.s5) + 2.dp
 
 /** Sizes used only by the settings screen (kept together rather than inline). */
 internal object SettingsDims {
@@ -122,10 +132,8 @@ internal object SettingsDims {
     val titleLine = Tv.bodySmallLine
     val valueMax = 260.dp
     val infoValueMax = 420.dp
-    val switchW = 36.dp
-    val switchH = 20.dp
-    val switchPad = 3.dp
     val dot = 6.dp
+    val toTop = 400.dp     // "reveal everything above": the pane's first row scrolls the list back to its top
     val headerTracking = androidx.compose.ui.unit.TextUnit(0.08f, androidx.compose.ui.unit.TextUnitType.Em)
 }
 

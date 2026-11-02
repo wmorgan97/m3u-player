@@ -7,6 +7,7 @@ import { loadEpg, Guide, wantedFor, archiveDays, m3uCatchupUrl, normName } from 
 import { groupSeries, vodMeta, displayTitle } from './vod.js';
 import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
+import { wlKey, wlEntry, watchLaterList, adoptWatchLater } from './watchlater.js';
 import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport, importance } from './sports.js';
 import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup, isEventGroup, eventChannelsFor } from './fixtures.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
@@ -88,6 +89,7 @@ async function init() {
     db.allPlaylists(), db.get('favorites'), db.get('recents'), db.get('settings'), db.get('progress'), db.get('syncMeta'), db.get('reminders'),
   ]);
   state.reminders = reminders || [];
+  state.watchlater = (await db.get('watchlater').catch(() => null)) || {};
   state.intros = (await db.get('intros')) || {};
   state.downloads = (await db.get('downloads')) || {};
   for (const m of Object.values(state.downloads)) if (!m.done && !m.error) m.error = 'Interrupted';   // the app was closed mid-download
@@ -216,7 +218,7 @@ async function syncNow() {
   syncing = (async () => {
     try {
       const res = await fetch(serverApi('sync'), { method: 'POST', cache: 'no-store', body: JSON.stringify({
-        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows() }) });
+        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {} }) });
       if (!res.ok) return;
       const d = await res.json();
       const urls = list => (list || []).map(c => c.url).join('\n');
@@ -230,6 +232,12 @@ async function syncNow() {
       if (d.sources) adoptSources(d.sources);
       if (d.reminders) await adoptReminders(d.reminders);
       if (d.follows) await adoptFollows(d.follows);
+      if (d.watchlater) {
+        const before = JSON.stringify(watchLaterList(state.watchlater, state.progress).map(e => e.key));
+        state.watchlater = adoptWatchLater(state.watchlater, d.watchlater);
+        db.set('watchlater', state.watchlater).catch(() => {});
+        if (JSON.stringify(watchLaterList(state.watchlater, state.progress).map(e => e.key)) !== before) changed = true;
+      }
       Object.assign(syncMeta, { favAt: d.favAt || syncMeta.favAt, recReset: d.recReset || syncMeta.recReset });
       db.set('syncMeta', syncMeta).catch(() => {});
       // Never redraw Home under a playing channel or while you're typing; keep the scroll position.
@@ -295,6 +303,45 @@ async function adoptFollows(remote) {
   if (changed) { await db.set('follows', state.follows); sportsHub.teams.clear(); }
 }
 const syncLater = debounce(syncNow, 20000);   // watch progress ticks every few seconds
+
+// ---------- Watch later: films and series saved for later, shared with your other devices (js/watchlater.js) ----------
+const watchLater = () => watchLaterList(state.watchlater, state.progress);
+const isWatchLater = it => { const k = wlKey(it); return !!k && watchLater().some(e => e.key === k); };
+async function toggleWatchLater(it, { quiet = false } = {}) {
+  const k = wlKey(it);
+  if (!k) return false;
+  const on = !isWatchLater(it);
+  state.watchlater = { ...(state.watchlater || {}), [k]: on ? wlEntry(it) : { deleted: true, at: Date.now() } };
+  await db.set('watchlater', state.watchlater).catch(() => {});
+  syncSoon();
+  if (!quiet) toast(on ? 'Added to Watch later' : 'Removed from Watch later');
+  if (!state.playing) rerender();
+  return on;
+}
+// A saved entry back into an item this device can open: the film's link (or the series' id) on your playlist.
+function watchLaterItem(e) {
+  const tab = e.kind === 'series' ? 'series' : 'movies';
+  const p = vodSource(tab);
+  const base = { name: e.name, logo: e.logo || '', group: e.group || '', year: e.year || '', rating: Number(e.rating) || 0, kind: e.kind, src: p?.id };
+  if (e.id !== undefined && e.id !== '') {
+    const x = xtOf(p);
+    if (e.kind === 'series') return { ...base, id: `s${e.id}`, sid: Number(e.id) || e.id };
+    return { ...base, id: `m${e.id}`, sid: Number(e.id) || e.id, url: x ? x.movieUrl(e.id, e.ext) : e.url || '' };
+  }
+  // A plain playlist's title: find it by name in this device's own list.
+  const k = m3uKinds(p)?.[tab]?.find(v => wlKey(v) === e.key);
+  return k ? { ...k, src: k.src || p?.id } : { ...base, id: e.key, url: e.url || '' };
+}
+function watchLaterItems(kind) {
+  return watchLater().filter(e => !kind || e.kind === kind).map(e => ({ ...watchLaterItem(e), wlKey: e.key }));
+}
+function watchLaterShelf(kind, asHome) {
+  const items = watchLaterItems(kind);
+  if (!items.length) return '';
+  shelfItems.set('wl', items);
+  if (asHome) return homeRowHtml({ key: 'wl', title: 'Watch later', items });
+  return shelfHtml('Watch later', 'wl', items);
+}
 function favoritesChanged() { syncMeta.favAt = Date.now(); syncSoon(); }
 
 // ---------- TMDB: trending, backdrops, plots, cast, trailers (the key lives on your server) ----------
@@ -1328,6 +1375,7 @@ function showHome() {
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
     ${hub.hero.length ? heroHtml(hub.hero) : ''}
     ${cw.length ? `<section class="hub-sec hrow"><div class="row-head"><h3>Continue watching</h3></div><div class="cont-row">${cw.map(cwCard).join('')}</div></section>` : ''}
+    ${watchLaterShelf(null, true)}
     ${hub.rows.map(homeRowHtml).join('')}
     ${hub.loading && !hub.rows.length ? '<p class="muted hub-loading">Loading films and series…</p>' : ''}
     ${servicesHtml(hub.services) ? `<section class="hub-sec hrow">${servicesHtml(hub.services)}</section>` : ''}
@@ -1941,6 +1989,7 @@ function renderDiscover() {
   const saved = shelfPrev.get(vodKey(p, tab));
   list.innerHTML = `
     ${heroItems.length ? `<li class="disc-hero">${heroHtml(heroItems)}</li>` : ''}
+    ${watchLaterShelf(tab === 'series' ? 'series' : 'movie', false)}
     ${top10.length ? `<li class="shelf"><div class="shelf-head"><h3>Top 10 ${what} this week</h3><span class="muted">from TMDB</span></div><ul class="shelf-row top10">${top10.map((it, k) => `<li class="scard t10" data-shelf="t10" data-k="${k}"><span class="t10-n">${k + 1}</span>${cardHtml(it, 't10', k).replace(/^<li[^>]*>|<\/li>$/g, '')}</li>`).join('')}</ul></li>` : ''}
     ${entry.top?.length ? shelfHtml('Popular now', 'top', art(entry.top).slice(0, 40)) : ''}
     ${fresh.length ? shelfHtml(art(entry.fresh).length >= 8 ? 'New releases' : 'Recently added', 'recent', fresh.slice(0, 40)) : ''}
@@ -2843,6 +2892,8 @@ function download(file) {
 // ---------- movies & series ----------
 // "01:49:03" / "00:52:10" from the provider reads as a clock: show it as "1h 49m" / "52m".
 const niceRuntime = d => String(d || '').replace(/^(\d+):(\d\d):\d\d$/, (_, h, mm) => (+h ? `${+h}h ` : '') + `${+mm}m`);
+// The Watch later toggle on a film's or series' details: a plus, or a calm accent tick once it's on the list.
+const wlButton = it => wlKey(it) ? (on => `<button data-wl aria-pressed="${on}">${icon(on ? 'check' : 'plus', on ? 'wl-on' : '')}<span>Watch later</span></button>`)(isWatchLater(it)) : '';
 function detailHtml(m, info = {}) {
   const i = withTmdb(info.info || {}, info.tmdb);
   const pr = state.progress[m.url];
@@ -2868,6 +2919,7 @@ function detailHtml(m, info = {}) {
     </div>
     <div class="film-tools">
       <button data-fav>${icon('star', favUrls.has(m.url) ? 'on' : '')}<span>${favUrls.has(m.url) ? 'Saved' : 'Save'}</span></button>
+      ${wlButton(m)}
       ${canSync() && !m.offline ? `<button data-dl>${icon('download')}<span>Download</span></button>` : ''}
       ${i.youtube_trailer ? `<button data-trailer>${icon('film')}<span>Trailer</span></button>` : ''}
       <button data-more>${icon('more')}<span>More</span></button>
@@ -2968,6 +3020,7 @@ async function movieSheet(m) {
       el.querySelector('[data-versions]')?.addEventListener('click', () => { closeSheet(); playBestVersion(m); });
       el.querySelector('[data-restart]')?.addEventListener('click', () => { delete state.progress[m.url]; closeSheet(); playChannel([m], 0); });
       el.querySelector('[data-fav]').onclick = async () => { await toggleFavorite(m, null); open(true); };
+      el.querySelector('[data-wl]')?.addEventListener('click', async () => { await toggleWatchLater(m); open(true); });
       el.querySelector('[data-dl]')?.addEventListener('click', () => downloadMenu(m, { onCancel: () => open() }));
       el.querySelector('[data-trailer]')?.addEventListener('click', () => { const k = withTmdb(info.info || {}, info.tmdb).youtube_trailer; if (k) window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(k)}`, '_blank'); });
       el.querySelector('[data-more]').onclick = () => menu(niceName(m), externalItems(m), { onCancel: () => open() });
@@ -3039,6 +3092,8 @@ async function seriesSheet(s, { play = false } = {}) {
   // "Continue": the most recently watched unfinished episode, else the first unwatched one.
   const allEps = seasons.flatMap(se => episodesOf(se));
   const continueEp = (last && !state.progress[last.item.url]?.done ? allEps.find(e => e.url === last.item.url) : null) || allEps.find(e => !state.progress[e.url]?.done) || allEps[0];
+  // Every episode watched: the series has been finished, so it leaves Watch later (on every device).
+  if (allEps.length && allEps.every(e => state.progress[e.url]?.done) && isWatchLater(s)) toggleWatchLater(s, { quiet: true });
   // Play (Home's featured series): straight into the episode you're on, or the first one.
   if (play && continueEp) { const se = seasons.find(x => episodesOf(x).some(y => y.url === continueEp.url)); const l = episodesOf(se); closeSheet(); return playChannel(l, l.findIndex(y => y.url === continueEp.url)); }
   const render = (keepScroll = false) => {
@@ -3057,7 +3112,7 @@ async function seriesSheet(s, { play = false } = {}) {
         </div>
       </div>
       ${continueEp ? `<div class="detail-actions film-play"><button class="btn primary" data-continue>${icon('play')} ${state.progress[continueEp.url]?.t > 30 && !state.progress[continueEp.url]?.done ? 'Continue' : 'Play'} S${esc(continueEp.season ?? seasons.find(se => episodesOf(se).includes(continueEp)))} E${esc(continueEp.num)}</button></div>` : ''}
-      <div class="film-tools"><button data-sfav>${icon('star', favUrls.has(s.url || s.id) ? 'on' : '')}<span>${favUrls.has(s.url || s.id) ? 'Saved' : 'Save'}</span></button>${i.youtube_trailer ? `<button data-trailer>${icon('film')}<span>Trailer</span></button>` : ''}</div>
+      <div class="film-tools"><button data-sfav>${icon('star', favUrls.has(s.url || s.id) ? 'on' : '')}<span>${favUrls.has(s.url || s.id) ? 'Saved' : 'Save'}</span></button>${wlButton(s)}${i.youtube_trailer ? `<button data-trailer>${icon('film')}<span>Trailer</span></button>` : ''}</div>
       ${i.plot || s.plot ? `<p class="detail-plot clamp3" data-plot>${esc(i.plot || s.plot)}</p>` : ''}
       ${seasons.length > 1 ? `<div class="chips season-chips">${seasons.map(se => `<button class="chip ${se === season ? 'active' : ''}" data-season="${esc(se)}">Season ${esc(se)}</button>`).join('')}</div>` : ''}
       ${list.length ? `<ul class="eps cards-eps">${list.map((e, k) => {
@@ -3078,6 +3133,7 @@ async function seriesSheet(s, { play = false } = {}) {
           if (e.target.closest('[data-continue]')) { const se = seasons.find(x => episodesOf(x).some(y => y.url === continueEp.url)) || season; const l = episodesOf(se); closeSheet(); return playChannel(l, l.findIndex(y => y.url === continueEp.url)); }
           if (e.target.closest('[data-trailer]')) return window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(i.youtube_trailer)}`, '_blank');
           if (e.target.closest('[data-sfav]')) { toggleFavorite({ ...s, url: s.url || s.id }, null).then(() => render(true)); return; }
+          if (e.target.closest('[data-wl]')) { toggleWatchLater(s).then(() => render(true)); return; }
           const ep = e.target.closest('[data-e]');
           if (ep) { closeSheet(); playChannel(list, +ep.dataset.e); }
         };
@@ -5938,6 +5994,13 @@ if (isTV) {
       ]);
     }
     if (el.matches('.row') && el.dataset.i !== undefined && state.filtered[+el.dataset.i]) return channelMenu(state.filtered[+el.dataset.i]);
+    if (el.matches('.scard, .hero-slide')) {
+      const it = shelfItems.get(el.dataset.shelf)?.[+el.dataset.k];
+      if (it && wlKey(it)) return menu(displayTitle(it.name), [
+        { label: 'More info', fn: () => el.click() },
+        { label: isWatchLater(it) ? 'Remove from Watch later' : 'Add to Watch later', fn: () => toggleWatchLater(it) },
+      ]);
+    }
     const inner = [...el.querySelectorAll('button')].map(b => ({ b, label: b.getAttribute('aria-label') || b.textContent.trim() })).filter(x => x.label);
     if (inner.length) return menu(null, [...(el.matches('button') ? [] : [{ label: 'Open', fn: () => el.click() }]), ...inner.map(x => ({ label: x.label, fn: () => x.b.click() }))]);
     el.click();
