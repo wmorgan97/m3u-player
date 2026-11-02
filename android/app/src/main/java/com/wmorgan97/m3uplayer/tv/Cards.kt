@@ -100,8 +100,8 @@ fun <T> CardRow(items: List<T>, key: ((T) -> Any)? = null, card: @Composable (T,
     // Keyed rows show each key once: a duplicate key (the same stream listed twice, one match on two lists) crashes a LazyRow.
     val list = if (key == null) items else remember(items) { items.distinctBy(key) }
     WithScroll(rememberRowKeyline()) {
-        LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
-            itemsIndexed(list, key = key?.let { k -> { _, it -> k(it) } }) { i, it -> card(it, i) }
+        LazyRow(state = rememberRowState(), contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
+            itemsIndexed(list, key = key?.let { k -> { _, it -> k(it) } }) { i, it -> RowEnd(i == list.lastIndex) { card(it, i) } }
         }
     }
 }

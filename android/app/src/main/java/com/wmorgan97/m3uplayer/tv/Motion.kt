@@ -1,6 +1,8 @@
 package com.wmorgan97.m3uplayer.tv
 
 import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.key.*
 import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.lazy.LazyListLayoutInfo
@@ -49,7 +51,15 @@ object TvScroll {
     }
 
     /** Pages of rows: the focused item's top settles [anchorPx] below the page top (the row title sits above it). */
-    fun anchor(anchorPx: Float): BringIntoViewSpec = keyline(anchorPx, Tv.rowScrollSpring)
+    // A row already within a few px of the anchor stays put: moving sideways re-asks the page to bring the new card
+    // into view, and poster rows sit ~13 px off the anchor, so every sideways step nudged the page and sprang back.
+    fun anchor(anchorPx: Float): BringIntoViewSpec = object : BringIntoViewSpec {
+        @Suppress("OVERRIDE_DEPRECATION") override val scrollAnimationSpec: AnimationSpec<Float> = Tv.rowScrollSpring
+        override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
+            val d = if (size >= containerSize) offset else offset - anchorPx
+            return if (kotlin.math.abs(d) < 32f) 0f else d
+        }
+    }
 
     /** The focused item settles just above the middle (episode lists: what's next stays in view). */
     val centered: BringIntoViewSpec = object : BringIntoViewSpec {
@@ -100,6 +110,18 @@ fun HeldPace(verticalMs: Long = Tv.heldRowMs) {
  *  above and below what's showing, so rows you scroll back to are still there. */
 @Composable
 fun rememberPageState() = androidx.compose.foundation.lazy.rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = 3, nested = 10) })
+
+/** A row of cards: keeps four cards built beyond each end of what's showing, so a held Left/Right never has to build
+ *  a poster in the frame it slides in (those were the slow frames left on a Shield). */
+@Composable
+fun rememberRowState() = androidx.compose.foundation.lazy.rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = 4, nested = 10) })
+
+/** Wraps a row's last card: Right there does nothing. Otherwise a held Right at the end of a row sends focus looking
+ *  beyond the row, which lays out off-screen content every repeat (the slow frames when holding Right on a Shield). */
+@Composable
+fun RowEnd(last: Boolean, content: @Composable () -> Unit) =
+    if (!last) content()
+    else androidx.compose.foundation.layout.Box(Modifier.onPreviewKeyEvent { it.key == Key.DirectionRight }) { content() }
 
 /** Keeps rows built above and below what's on screen, and prefetches each of a row's first cards as its own small unit
  *  (a whole row is more than a frame's worth, which Compose's prefetcher won't attempt; one poster is not). */

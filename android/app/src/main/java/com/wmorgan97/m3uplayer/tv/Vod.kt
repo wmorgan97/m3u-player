@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -140,9 +141,10 @@ fun GroupRow(act: TvActivity, kind: String, id: String, name: String, spot: Spot
     if (l != null && l.isEmpty()) return@traced   // an empty shelf is left out, not shown as a bare title
     SpotRow(name, modifier, count = l?.size) {
         if (l == null) SkeletonRow()
-        else WithScroll(rememberRowKeyline()) { LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
-            items(l.take(SHELF_MAX), key = { it.id }) { v -> PosterCard(v, Tv.poster, restoreKey = "g$id|${v.kind}:${v.id}", onFocus = spot?.let { s -> { s.preview(v) } }) { act.go(Screen.Details(v)) } }
-            if (l.size > SHELF_MAX) item(key = "all") { SeeAllTile(l.size, kind) { act.go(Screen.Grid(kind, id, name)) } }
+        else WithScroll(rememberRowKeyline()) { LazyRow(state = rememberRowState(), contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(Tv.gap)) {
+            val shown = l.take(SHELF_MAX)
+            itemsIndexed(shown, key = { _, v -> v.id }) { i, v -> RowEnd(i == shown.lastIndex && l.size <= SHELF_MAX) { PosterCard(v, Tv.poster, restoreKey = "g$id|${v.kind}:${v.id}", onFocus = spot?.let { s -> { s.preview(v) } }) { act.go(Screen.Details(v)) } } }
+            if (l.size > SHELF_MAX) item(key = "all") { RowEnd(true) { SeeAllTile(l.size, kind) { act.go(Screen.Grid(kind, id, name)) } } }
         } }
     }
 }

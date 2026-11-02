@@ -1,6 +1,7 @@
 package com.wmorgan97.m3uplayer.tv
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -138,7 +139,7 @@ fun rememberSpotlight(slides: List<Vod>, ranks: Map<String, Int>): SpotlightStat
 /** The backdrop layer: right-aligned, fading into the page on the left and at the bottom. Put it first in the page's Box. */
 @Composable
 fun SpotlightBackdrop(state: SpotlightState, modifier: Modifier) =
-    CinematicBackdrop(state.spot?.backdrop ?: "", if (state.heroMode) Tv.durCrossfade else 500, modifier)
+    CinematicBackdrop(state.spot?.backdrop ?: "", if (state.heroMode) Tv.durCrossfade else 300, modifier)
 
 /** The spotlight's text and, on the slides, [Play] [More info] and the slide dots. [onHeroFocus] reports focus on the buttons. */
 @Composable
@@ -200,9 +201,14 @@ fun CinematicBackdrop(url: String, fadeMs: Int, modifier: Modifier) {
 
 @Composable
 private fun SpotText(s: Spot, heroMode: Boolean) {
-    Crossfade(s, animationSpec = tween(Tv.durMed, easing = Tv.easeMove), label = "spot") { sp ->
-        var titleLines by remember(sp.key) { mutableIntStateOf(1) }
-        Column(Modifier.padding(start = Tv.margin, top = 22.dp).fillMaxWidth(.56f)) {
+    // One copy at a time, faded in. A Crossfade composes and lays out two copies, which landed on the first frames of
+    // the next move along a row (Shield trace: 20–25 ms recomposes).
+    key(s.key) {
+        val sp = s
+        val fade = remember { Animatable(0f) }
+        LaunchedEffect(Unit) { fade.animateTo(1f, tween(Tv.durMed, easing = Tv.easeMove)) }
+        var titleLines by remember { mutableIntStateOf(1) }
+        Column(Modifier.graphicsLayer { alpha = fade.value }.padding(start = Tv.margin, top = 22.dp).fillMaxWidth(.56f)) {
             Text(sp.kicker, fontSize = Tv.label, color = if (sp.accent) Tv.accent else Tv.muted, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, maxLines = 1)
             Spacer(Modifier.height(6.dp))
             Text(sp.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = if (heroMode) 1 else 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine,
