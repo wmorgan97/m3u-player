@@ -80,7 +80,18 @@ private const val FADE_MS = 200
 
 /** A picture on a quiet grey until it arrives, then a short fade in (pictures already in memory show at once); the fallback shows when there is none or it fails.
  *  (Plain AsyncImage with a colour placeholder: one layout node per picture and no animation while loading, which is
- *  what keeps a row of 30 posters smooth to scroll.) */
+ *  what keeps a row of 30 posters smooth to scroll.)
+ *
+ *  Decode cost (Shield trace, D7): `AsyncImage` resolves its decode size from the Compose layout's measured
+ *  constraints by default, so Coil's memory-cache key includes that pixel size. The same poster shown at a very
+ *  slightly different measured size on a later recomposition (Lazy prefetch recomposing an off-screen row, a card
+ *  rebuilt after scrolling back) missed the cache and was decoded again: 1,394 `decodeBitmap` calls for ~15-20
+ *  pictures on screen during one Home scroll (5.2 s of cumulative decode time), and the Lazy prefetch frames that
+ *  triggered most of those rebuilds ran up to 136 ms. Our own `/img` proxy already shrinks every picture to a fixed
+ *  width before it reaches the device (server/img.js), so asking Coil to size it again buys nothing but an unstable
+ *  cache key. `Size.ORIGINAL` decodes the picture at the size it already arrived at and keys the cache on the URL
+ *  alone. Only for our own resized copies: a raw external logo or the original-size fallback (the proxy's own
+ *  picture unreachable) still sizes from layout, so a large original is never decoded further than the screen needs. */
 @Composable
 fun Picture(url: String?, modifier: Modifier = Modifier, scale: ContentScale = ContentScale.Crop, fade: Boolean = true, fallback: @Composable BoxScope.() -> Unit = {}) = traced("Picture") {
     // If the server's resized copy fails (server away), the picture is fetched from where it really lives.
@@ -88,9 +99,13 @@ fun Picture(url: String?, modifier: Modifier = Modifier, scale: ContentScale = C
     val src = remember(url, tries) { if (tries == 1) Repo.imgOriginal(url) else url }
     val failed = tries >= 2 || (tries == 1 && src == null)
     val ctx = LocalContext.current
+    // Our own proxy already sized this: decode at its arrived size, not a layout-resolved one, so the memory
+    // cache hits across recompositions instead of redecoding the same bytes.
+    val ownResize = remember(src) { tries == 0 && src?.startsWith("${Repo.server}/img?") == true }
     // The picture is the node itself (no wrapping Box): one layout node per picture, built in every poster of a row.
     if (src.isNullOrBlank() || failed) Box(modifier.background(Tv.surface2), content = fallback)
-    else AsyncImage(remember(src) { ImageRequest.Builder(ctx).data(src).crossfade(if (fade) FADE_MS else 0).build() }, null, contentScale = scale, modifier = modifier.background(Tv.surface2),
+    else AsyncImage(remember(src) { ImageRequest.Builder(ctx).data(src).crossfade(if (fade) FADE_MS else 0).apply { if (ownResize) size(coil.size.Size.ORIGINAL) }.build() },
+        null, contentScale = scale, modifier = modifier.background(Tv.surface2),
         placeholder = PLACEHOLDER, error = NO_PICTURE, onError = { tries = if (tries == 0 && Repo.imgOriginal(url) != null) 1 else 2 })
 }
 private val PLACEHOLDER = ColorPainter(Tv.surface2)

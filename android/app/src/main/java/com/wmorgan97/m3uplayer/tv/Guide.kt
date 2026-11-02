@@ -65,7 +65,9 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     var group by rememberSaveable { mutableStateOf(startGroup?.takeIf { it in groups } ?: groups.firstOrNull() ?: "") }
     var unlockTick by remember { mutableIntStateOf(0) }
     val locked = remember(group, v, unlockTick) { Repo.isLocked(group) }
-    val chans = remember(group, l, favUrls, hiddenCh) { (if (group == "★ Favourites") l.channels.filter { it.url in favUrls } else byGroup[group] ?: emptyList()).filter { it.url !in hiddenCh } }   // every channel of the group (rows are lazy); a 600 cap cut big groups like "24/7 Channels" (2,600+) short
+    // A group (favourited or not) can hold the same channel twice - merged from more than one playlist, or a stream
+    // and its backup both named the same: one row per URL, the first kept, same as CardRow's own duplicate-key rule.
+    val chans = remember(group, l, favUrls, hiddenCh) { ((if (group == "★ Favourites") l.channels.filter { it.url in favUrls } else byGroup[group] ?: emptyList()).distinctBy { it.url }.filter { it.url !in hiddenCh }) }   // every channel of the group (rows are lazy); a 600 cap cut big groups like "24/7 Channels" (2,600+) short
 
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = System.currentTimeMillis() } }
