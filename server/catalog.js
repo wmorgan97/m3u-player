@@ -33,11 +33,21 @@ const slimSeries = s => ({ series_id: s.series_id, name: str(s.name, 200), cover
   rating: rate(s.rating), releaseDate: str(s.releaseDate || s.release_date, 12), plot: str(s.plot, 240), genre: str(s.genre, 60), added: num(s.last_modified) });
 // "4K-TOP - Dune (2021)" and "TOP - Dune (2021)" are the same title for a shelf: keep the first.
 // Every leading tag goes ("4K-D+ - ", "EN | ", "TOP - "), and country tags like "(US)".
+const QUALITY_WORDS = /\b(?:4k|uhd|2160p?|1080p?|720p?|fhd|hdr10\+?|hdr|dolby ?vision|dv|sd|hevc|h\.?265)\b|[ᵁᴴᴰᴿ]+/gi;   // quality tags: copies of one film share a title key
 const titleKey = it => String(it.name || '').replace(/^(?:[A-Za-z0-9+&]{1,5}(?:-[A-Za-z0-9+&]{1,5})*\s*[-|:]\s+)+/, '').replace(/^\d{1,3}\.\s+(?=\D)/, '')
-  .replace(/\((?:[A-Z]{2}(?:\/[A-Z]{2})?)\)/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  .replace(/\((?:[A-Z]{2}(?:\/[A-Z]{2})?)\)/g, '')
+  .replace(QUALITY_WORDS, ' ').toLowerCase().replace(/[^a-z0-9]+/g, '');
 const yearIn = it => Number(String(it.year || '').match(/(19|20)\d\d/)?.[0]) || Number((String(it.name || '').match(/(?:^|\D)((?:19|20)\d\d)(?!.*(?:19|20)\d\d)/) || [])[1]) || 0;
 const bareKey = it => titleKey(it).replace(/(19|20)\d\d$/, '');
-const uniq = (list, n) => { const seen = new Set(), out = []; for (const it of list) { const k = titleKey(it); if (k && !seen.has(k)) { seen.add(k); out.push(it); if (out.length >= n) break; } } return out; };
+// One card per film, in the list's order, showing its best copy: a 4K / UHD copy over 1080p over HD over the rest
+// (the same film listed in several qualities must never open the 1080p one from a row while Search finds the 4K).
+let catNameOf = () => '';   // set per build: a copy's category often carries its quality ("4K Movies")
+const qualityRank = it => { const t = `${it.name || ''} ${it.category_name || catNameOf(it.category_id) || ''}`; return /\b(4k|uhd|2160p?)\b|ᵁᴴᴰ/i.test(t) ? 3 : /\b(1080p?|fhd)\b/i.test(t) ? 2 : /\b(720p?|hd)\b|ᴴᴰ/i.test(t) ? 1 : 0; };
+const uniq = (list, n) => {
+  const best = new Map(), order = [];
+  for (const it of list) { const k = titleKey(it); if (!k) continue; const b = best.get(k); if (!b) { best.set(k, it); order.push(k); } else if (qualityRank(it) > qualityRank(b)) best.set(k, it); }
+  return order.slice(0, n).map(k => best.get(k));
+};
 
 // A provider blip (dropped connection, a 5xx while it's busy) is retried twice before it counts.
 async function api(base, user, pass, action) {
@@ -82,6 +92,7 @@ async function build(server, user, pass, kind) {
   }
   const byCat = new Map();
   for (const it of items) { const k = String(it.category_id ?? ''); if (!byCat.has(k)) byCat.set(k, []); byCat.get(k).push(it); }
+  { const m = new Map(cats.map(c => [String(c.category_id), String(c.category_name || '')])); catNameOf = id => m.get(String(id)) || ''; }
   const catList = cats.map(c => ({ category_id: c.category_id, category_name: str(c.category_name, 120), count: byCat.get(String(c.category_id))?.length || 0 })).filter(c => c.count);
   const byAdded = items.some(it => it.added) ? [...items].sort((a, b) => (b.added || 0) - (a.added || 0)) : [...items].reverse();
   const recent = uniq(byAdded, 300);

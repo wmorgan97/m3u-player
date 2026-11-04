@@ -926,8 +926,14 @@ function card(target, ic, title, sub, menuId) {
   </li>`;
 }
 
+// One card per film or episode: copies in other qualities (4K / 1080p / HD) are the same thing, the latest one wins.
+const CW_QUALITY = /\b(?:4k|uhd|2160p?|1080p?|720p?|fhd|hdr10\+?|hdr|dolby ?vision|dv|sd|hevc|h\.?265)\b|[ᵁᴴᴰᴿ]+/gi;
+const cwKey = e => (e.item?.kind || '') + ':' + String(e.item?.name || e.url || '').replace(/^(?:[A-Za-z0-9+&]{1,5}(?:-[A-Za-z0-9+&]{1,5})*\s*[-|:]\s+)+/, '')
+  .replace(CW_QUALITY, ' ').toLowerCase().replace(/[^a-z0-9]+/g, '');
 function continueWatching() {
-  return Object.values(state.progress).filter(e => !e.done && !e.hidden && e.t > 30).sort((a, b) => b.at - a.at).slice(0, 20);
+  const seen = new Set();
+  return Object.values(state.progress).filter(e => !e.done && !e.hidden && e.t > 5).sort((a, b) => b.at - a.at)
+    .filter(e => { const k = cwKey(e); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 20);
 }
 
 // A display name for a playlist — never a raw URL/host (which is what a nameless

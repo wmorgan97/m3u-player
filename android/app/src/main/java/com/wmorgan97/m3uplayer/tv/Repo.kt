@@ -423,7 +423,12 @@ object Repo {
         }
         return out.sortedByDescending { it.at }
     }
-    fun continueWatching() = progress().filter { !it.done && it.t > 5 && !it.item.optBoolean("hidden") && it.item.optString("url").isNotEmpty() }.take(20)
+    // One card per film or episode: copies in other qualities (4K / 1080p / HD) are the same thing; the latest one wins.
+    fun continueWatching() = progress().filter { !it.done && it.t > 5 && !it.item.optBoolean("hidden") && it.item.optString("url").isNotEmpty() }
+        .distinctBy { cwKey(it.item) }.take(20)
+    private val CW_QUALITY = Regex("""\b(?:4k|uhd|2160p?|1080p?|720p?|fhd|hdr10\+?|hdr|dolby ?vision|dv|sd|hevc|h\.?265)\b|[ᵁᴴᴰᴿ]+""", RegexOption.IGNORE_CASE)
+    private val CW_PREFIX = Regex("""^(?:[A-Za-z0-9+&]{1,5}(?:-[A-Za-z0-9+&]{1,5})*\s*[-|:]\s+)+""")
+    private fun cwKey(o: JSONObject) = o.optString("kind") + ":" + o.optString("name").replace(CW_PREFIX, "").replace(CW_QUALITY, " ").lowercase().replace(Regex("[^a-z0-9]+"), "")
     fun progressFor(url: String): Progress? = progress().firstOrNull { it.url == url }
 
     fun recentChannels(): List<JSONObject> {

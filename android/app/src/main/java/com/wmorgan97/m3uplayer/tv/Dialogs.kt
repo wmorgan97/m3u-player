@@ -172,9 +172,19 @@ fun FormDialog(title: String, intro: String?, fields: List<FormField>, submit: S
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(autoCorrectEnabled = false,
                             keyboardType = when { f.secret -> androidx.compose.ui.text.input.KeyboardType.Password; f.url -> androidx.compose.ui.text.input.KeyboardType.Uri; else -> androidx.compose.ui.text.input.KeyboardType.Text },
                             imeAction = if (i < fields.lastIndex) androidx.compose.ui.text.input.ImeAction.Next else androidx.compose.ui.text.input.ImeAction.Done),
-                        keyboardActions = androidx.compose.foundation.text.KeyboardActions(onNext = { focus.moveFocus(androidx.compose.ui.focus.FocusDirection.Down) }, onDone = { kb?.hide(); focus.moveFocus(androidx.compose.ui.focus.FocusDirection.Down) }),
+                        // Fire TV's full-screen keyboard stays up after Next/Done unless it's closed first: close it, move on,
+                        // and (Next) open it again on the next box; Done on the last box submits the form.
+                        keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                            onNext = { kb?.hide(); focus.moveFocus(androidx.compose.ui.focus.FocusDirection.Down); kb?.show() },
+                            onDone = { kb?.hide(); if (!busy) onSubmit(values.map { it.trim() }) }),
                         modifier = Modifier.fillMaxWidth().let { if (i == 0 && fields.first().value.isEmpty()) it.focusRequester(first) else it }.onFocusChanged { on = it.isFocused }
                             .onPreviewKeyEvent { e ->
+                                // OK opens the keyboard on release, not press: opened on the press, the release went to the
+                                // keyboard and typed its highlighted key (a stray "a" on Fire TV).
+                                if (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter) {
+                                    if (e.type == KeyEventType.KeyUp) kb?.show()
+                                    return@onPreviewKeyEvent true
+                                }
                                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                                 when (e.key) {
                                     Key.DirectionDown -> { kb?.hide(); focus.moveFocus(androidx.compose.ui.focus.FocusDirection.Down); true }
