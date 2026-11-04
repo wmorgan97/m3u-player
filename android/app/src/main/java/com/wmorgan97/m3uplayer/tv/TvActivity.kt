@@ -116,6 +116,7 @@ class TvActivity : ComponentActivity() {
         lifecycleScope.launch { delay(1500); runCatching { Repo.overview("movies") }; runCatching { Repo.overview("series") } }   // rows ready before Movies / Series are opened
         lifecycleScope.launch { delay(2500); com.wmorgan97.m3uplayer.PlayerHolder.warm(this@TvActivity) }   // a player ready before play is pressed
         Repo.loadSavedGuide()
+        Handoff.start(this)   // "Play on TV" from the phone: checks for a request every few seconds while open (Handoff.kt)
         lifecycleScope.launch { while (true) { checkReminders(); delay(15_000) } }
         // Every 10 min, pick up what the other devices changed (reminders set on the phone, favourites) while the app stays open.
         lifecycleScope.launch { while (true) { delay(10 * 60_000L); if (Repo.hasKey()) runCatching { Repo.sync() } } }
@@ -199,6 +200,10 @@ class TvActivity : ComponentActivity() {
         return false
     }
     fun root(s: Screen) { stack.clear(); stack += s }
+    /** Opens the side menu with the highlight on the section you're in (Back at a page's top level, or a page asking).
+     *  Setting the drawer open alone left the highlight in the page: the menu showed, but the remote still drove the page. */
+    private var menuTick by mutableIntStateOf(0)
+    fun openMenu() { menuTick++ }
     fun openWeb(hash: String = "") { startActivity(Intent(this, MainActivity::class.java).putExtra("hash", hash)) }
 
     // Number keys zap to a channel, as on any TV: the digits show for a moment, then it tunes.
@@ -242,7 +247,13 @@ class TvActivity : ComponentActivity() {
                 if (System.currentTimeMillis() - backAt < 2000) finish() else { backAt = System.currentTimeMillis(); android.widget.Toast.makeText(this@TvActivity, "Press Back again to exit", android.widget.Toast.LENGTH_SHORT).show() }
                 return@BackHandler
             }
-            if (back()) { drawer.setValue(DrawerValue.Closed); focusTick++ } else drawer.setValue(DrawerValue.Open)
+            if (back()) { drawer.setValue(DrawerValue.Closed); focusTick++ } else openMenu()
+        }
+        val current = remember { FocusRequester() }   // moving into the menu lands on the section you're in
+        LaunchedEffect(menuTick) {
+            if (menuTick == 0) return@LaunchedEffect
+            drawer.setValue(DrawerValue.Open)
+            repeat(10) { if (runCatching { current.requestFocus() }.isSuccess) return@LaunchedEffect; delay(16) }
         }
         val section = stack.firstOrNull() ?: Screen.Home
         var railPx by remember { mutableIntStateOf(0) }   // the closed menu's width: the page starts after it (the open menu lies over the page)
@@ -252,7 +263,6 @@ class TvActivity : ComponentActivity() {
         ModalNavigationDrawer(scrimBrush = androidx.compose.ui.graphics.SolidColor(androidx.compose.ui.graphics.Color(0x99000000)),   // over the page (TiviMate), so opening it never re-lays the page out
             drawerState = drawer,
             drawerContent = {
-                val current = remember { FocusRequester() }   // moving into the menu lands on the section you're in
                 // Hidden during the preview's grow/shrink. Read in the layer (drawing only): reading it here in composition
                 // re-composed the whole screen on the first frame of the zoom (~55 ms).
                 Column(Modifier.fillMaxHeight().graphicsLayer { alpha = if (Preview.zooming || Preview.unzooming) 0f else 1f }.background(Tv.rail).onSizeChanged { if (drawer.currentValue == DrawerValue.Closed && it.width > 0) railPx = it.width }

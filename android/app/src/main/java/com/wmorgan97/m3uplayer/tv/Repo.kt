@@ -370,7 +370,9 @@ object Repo {
 
     @Volatile var syncData: JSONObject = JSONObject()
     suspend fun sync(): JSONObject = withContext(Dispatchers.IO) {
-        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).put("watchlater", localWatchLater()).toString(), timeout = 15_000)) } catch (e: Exception) {
+        // tvs: this TV says it exists, so the phone offers "Play on TV" (Handoff.kt).
+        val me = JSONObject().put(tvName, JSONObject().put("name", tvName).put("at", System.currentTimeMillis()))
+        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).put("watchlater", localWatchLater()).put("tvs", me).toString(), timeout = 15_000)) } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             warn("sync failed", e)
             lastSyncErrorState.value = if (e is org.json.JSONException) "Your server's reply couldn't be read." else describe(e, "your server")
@@ -384,6 +386,19 @@ object Repo {
         version++
         File(app.filesDir, "sync.json").writeText(d.toString())
         d
+    }
+    // ---------- Play on TV (Handoff.kt): the phone's latest request, polled while the app is open ----------
+    /** This TV's name as the phone shows it ("Playing on SHIELD"): the name set in Android's settings, else the model. */
+    val tvName: String by lazy {
+        (runCatching { android.provider.Settings.Global.getString(app.contentResolver, "device_name") }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            ?: android.os.Build.MODEL.orEmpty().ifEmpty { "TV" }).take(40)
+    }
+    /** GET /sync?handoff=1: just { handoff, now } (a few hundred bytes), and marks this TV as open right now. */
+    fun handoffPoll(): JSONObject = JSONObject(http("${api("sync")}&handoff=1&tv=${enc(tvName)}", timeout = 6_000))
+    /** Tells the server (and so the phone) that this TV is playing request [id]. */
+    fun handoffTaken(id: String) {
+        try { syncData = JSONObject(http(api("sync"), JSONObject().put("handoff", JSONObject().put("id", id).put("taken", tvName).put("takenAt", System.currentTimeMillis())).toString(), timeout = 10_000)) }
+        catch (e: Exception) { warn("handoff ack failed", e) }
     }
     fun cachedSync(): JSONObject = try { JSONObject(File(app.filesDir, "sync.json").readText()).also { syncData = it } } catch (e: Exception) { JSONObject() }
 
@@ -421,11 +436,25 @@ object Repo {
         val f = syncData.optJSONArray("favorites") ?: return emptyList()
         return (0 until f.length()).mapNotNull { f.optJSONObject(it) }
     }
-    fun isFavourite(url: String) = favorites().any { it.optString("url") == url }
+    fun isFavourite(url: String) = favorites().any { it.optString("url") == url } || favouriteUrls().contains(url)
+    /** The live channels that are favourites (see Favourites.kt: exact link, other link forms, tvg-id + name, name), the
+     *  same set for Live TV, the Guide and Home. Films and series in the list (the web app's My List) are left out. */
+    fun favouriteChannels(l: Live? = live): List<Channel> {
+        val ch = l?.channels ?: return emptyList()
+        val f = syncData.optJSONArray("favorites")?.toString() ?: ""
+        favMemo?.let { (k, ll, v) -> if (k == f && ll === l) return v }
+        val refs = favorites().filter { it.optString("kind") !in setOf("movie", "series", "episode") }.map { FavRef(it.optString("url"), it.optString("name"), it.optString("tvgId")) }
+        return matchFavourites(refs, ch).also { favMemo = Triple(f, l, it) }
+    }
+    fun favouriteUrls(l: Live? = live): Set<String> = favouriteChannels(l).mapTo(HashSet()) { it.url }
+    @Volatile private var favMemo: Triple<String, Live, List<Channel>>? = null
     /** Adds or removes a channel from the favourites every device shares. */
     suspend fun toggleFavourite(c: Channel) = withContext(Dispatchers.IO) {
-        val list = favorites().filter { it.optString("url") != c.url }.toMutableList()
-        if (!isFavourite(c.url)) list += JSONObject().put("kind", "live").put("name", c.name).put("url", c.url).put("logo", c.logo).put("group", c.group).put("tvgId", c.tvgId)
+        val was = isFavourite(c.url)
+        // (removing also drops a favourite saved in another link form that matched this channel)
+        val list = favorites().filter { f -> f.optString("url") != c.url && !(was && f.optString("kind") !in setOf("movie", "series", "episode") &&
+            matchFavourites(listOf(FavRef(f.optString("url"), f.optString("name"), f.optString("tvgId"))), listOf(c)).isNotEmpty()) }.toMutableList()
+        if (!was) list += JSONObject().put("kind", "live").put("name", c.name).put("url", c.url).put("logo", c.logo).put("group", c.group).put("tvgId", c.tvgId)
         val body = JSONObject().put("favorites", JSONArray(list)).put("favAt", System.currentTimeMillis())
         syncData.put("favorites", JSONArray(list)).put("favAt", System.currentTimeMillis())
         try { syncData = JSONObject(http(api("sync"), body.toString())) } catch (e: Exception) { warn("saving favourites failed", e) }
@@ -469,10 +498,31 @@ object Repo {
         val urls: Set<String> by lazy { channels.mapTo(HashSet()) { it.url } }
     }
     @Volatile var live: Live? = null
+        private set(v) { field = v; liveTickState.intValue++ }
+    /** Bumped whenever [live] changes: screens key on it, so a list finished by another caller's load still shows. */
+    private val liveTickState = androidx.compose.runtime.mutableIntStateOf(0)
+    val liveTick: Int get() = liveTickState.intValue
+    /** True while the channel lists are being loaded: screens show their loading skeleton, never "No live channels". */
+    private val liveLoadingState = androidx.compose.runtime.mutableIntStateOf(0)
+    val liveLoading: Boolean get() = liveLoadingState.intValue > 0
+    private val liveLock = kotlinx.coroutines.sync.Mutex()
+    /** Before the first sync there are no playlists yet; while they load, an empty list means "loading", not "none". */
+    fun liveSettling(l: Live?): Boolean = l == null || l.channels.isEmpty() && (liveLoading || (syncData.optJSONObject("sources") == null && lastSyncError == null))
 
     /** The live channels of every playlist: the saved copy at once, a fresh download when it's over 12 hours old. */
     suspend fun liveChannels(refresh: Boolean = false): Live = withContext(Dispatchers.IO) {
         live?.takeIf { !refresh }?.let { return@withContext it }
+        // One load at a time: the start-up warm-up and each screen used to download and parse the lists side by side.
+        liveLoadingState.intValue++
+        try {
+        // Straight after a cold start the sync (which names the playlists) may not be here yet: wait for it (or for it
+        // to fail) rather than build an empty list that nothing would ever build again.
+        val until = System.currentTimeMillis() + 30_000
+        while (!syncData.has("sources") && lastSyncError == null && System.currentTimeMillis() < until) kotlinx.coroutines.delay(150)
+        liveLock.lock() ; try { live?.takeIf { !refresh }?.let { return@withContext it }; loadLive() } finally { liveLock.unlock() } }
+        finally { liveLoadingState.intValue-- }
+    }
+    private fun loadLive(): Live {
         val sources = syncData.optJSONObject("sources") ?: JSONObject()
         val all = ArrayList<Channel>(); val epg = ArrayList<String>()
         var tried = 0; var loaded = 0; var firstError: String? = null
@@ -525,7 +575,7 @@ object Repo {
         val groups = LinkedHashSet<String>(); all.forEach { groups += it.group }
         // Not kept when the sync hasn't arrived yet (no playlists known): an empty list cached then would show "No live
         // channels" until the next reload, though the playlists are only moments away.
-        Live(all, groups.toList(), epg.distinct()).also { if (syncData.has("sources")) live = it
+        return Live(all, groups.toList(), epg.distinct()).also { if (syncData.has("sources")) live = it
             val m = HashMap<String, Channel>()
             for (c in all) if (isUhdName(c.name) && !c.name.trimStart().startsWith("#")) liveBase(c.name).takeIf { it.isNotEmpty() }?.let { m.putIfAbsent(it, c) }
             uhdIndex = m }

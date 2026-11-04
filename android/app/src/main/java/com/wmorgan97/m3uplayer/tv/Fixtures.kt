@@ -270,6 +270,7 @@ object FixturesHub {
         }.onFailure { Log.w(TAG, "fixtures cache unreadable: ${it.javaClass.simpleName}") }
         runCatching { val f = chFile(c); if (f.exists() && channels.value == null) channels.value = FixtureRules.parseChannels(f.readText()) }
         version.intValue++
+        SportsPerf.mark("fixtures cache read (${list.value?.size} fixtures, channels ${channels.value?.size})")
     } }
 
     fun anyOn(now: Long) = list.value.orEmpty().any { it.isOn(now) || (it.status == "scheduled" && it.start in now..now + LIVE_FRESH) }
@@ -287,7 +288,7 @@ object FixturesHub {
                 // Keep the last good list if the feed has nothing at all right now.
                 if (l.isNotEmpty() || list.value == null) { list.value = l; runCatching { file(c).writeText(text) } }
                 ok.value = !list.value.isNullOrEmpty() || FixtureRules.anySourceOk(text)
-                Log.i(TAG, "fixtures: ${l.size} (${l.count { it.isOn(now) }} on now)")
+                Log.i(TAG, "fixtures: ${l.size} (${l.count { it.isOn(now) }} on now)"); SportsPerf.mark("fixtures fetched (${l.size})")
             } catch (e: Exception) {
                 val code = (e as? HttpCode)?.code
                 Log.w(TAG, "fixtures failed: ${code ?: e.javaClass.simpleName}")
@@ -312,7 +313,7 @@ object FixturesHub {
                     val text = post(Repo.api("fixtures/channels"), body)
                     channels.value = FixtureRules.parseChannels(text); chAt = System.currentTimeMillis(); chFor = sig
                     runCatching { chFile(c).writeText(text) }
-                    Log.i(TAG, "fixture channels: ${channels.value?.size} games on your channels")
+                    Log.i(TAG, "fixture channels: ${channels.value?.size} games on your channels"); SportsPerf.mark("fixture channels back (${channels.value?.size})")
                 } catch (e: Exception) {
                     Log.w(TAG, "fixture channels failed: ${(e as? HttpCode)?.code ?: e.javaClass.simpleName}")
                     chAt = now - CH_FRESH + 2 * 60_000L; chFor = sig   // try again in 2 minutes, not in a loop

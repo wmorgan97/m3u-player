@@ -95,18 +95,22 @@ fun liveFromSync(o: JSONObject): Channel = Repo.channelByUrl(o.optString("url"))
 
 @Composable
 fun LiveScreen(act: TvActivity, startGroup: String? = null) {
-    val live by produceState<Repo.Live?>(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: Repo.Live(emptyList(), emptyList(), emptyList()) }
+    val live by produceState<Repo.Live?>(Repo.live, Repo.version, Repo.liveTick) {
+        // A failed or interrupted load keeps what was there (it used to put up an empty list: "No live channels" while
+        // the playlists were still loading after a cold start).
+        value = try { Repo.liveChannels() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { value ?: Repo.Live(emptyList(), emptyList(), emptyList()) }
+    }
     val l = live
-    if (l == null) { LiveSkeleton(); return }
-    // Before the first sync arrives there are no playlists yet: that's loading, not "no channels".
-    if (l.channels.isEmpty() && Repo.syncData.optJSONObject("sources") == null && Repo.lastSyncError == null) { LiveSkeleton(); return }
+    // Before the first sync arrives, or while the playlists load: that's loading, not "no channels".
+    if (l == null || Repo.liveSettling(l)) { LiveSkeleton(); return }
     if (l.channels.isEmpty()) { Repo.liveError?.let { ErrorState("Couldn't load your channels", "$it Check the playlist in Settings, or try again later.") } ?: EmptyState(Icons.Default.LiveTv, "No live channels", "Add a playlist with live TV in Settings"); return }
     val refresh = act.refresh + Repo.version
-    val favUrls = remember(refresh) { Repo.favorites().map { it.optString("url") }.toSet() }
+    val favChans = remember(refresh, l) { Repo.favouriteChannels(l) }   // the same set as the Guide's (Favourites.kt)
+    val favUrls = remember(favChans) { favChans.mapTo(HashSet()) { it.url } }
     val hiddenCh = remember(Repo.version) { Repo.hiddenChannels }
     val byGroup = remember(l) { l.channels.groupBy { it.group } }
-    val favCount = remember(l, favUrls) { l.channels.count { it.url in favUrls } }   // favourites still in a playlist (not stale links)
-    val groups = remember(l, favUrls, Repo.version) { listOfNotNull(if (favUrls.isNotEmpty()) "★ Favourites" else null, "All channels") + Repo.arrange(l.groups.filter { it.isNotBlank() }) }
+    val favCount = favChans.size   // favourites still in a playlist (not stale links)
+    val groups = remember(l, favUrls, Repo.version) { listOfNotNull(if (favChans.isNotEmpty()) "★ Favourites" else null, "All channels") + Repo.arrange(l.groups.filter { it.isNotBlank() }) }
     var group by rememberSaveable { mutableStateOf(startGroup ?: groups.firstOrNull { it != "All channels" && it != "★ Favourites" } ?: groups[0]) }
     // The highlight moves through the groups at once; the channel list only follows once it rests there (TiviMate does
     // the same), so holding down through the groups doesn't build a whole list for every group passed.
@@ -115,10 +119,10 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     var unlockTick by remember { mutableIntStateOf(0) }
     val locked = remember(group, Repo.version, unlockTick) { Repo.isLocked(group) }
     // Built off the main thread ("All channels" can be ~19k channels): the old list stays up until the new one is ready.
-    val list by produceState(emptyList<Channel>(), group, l, favUrls, hiddenCh, Repo.version) {
+    val list by produceState(emptyList<Channel>(), group, l, favChans, hiddenCh, Repo.version) {
         value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             val hidden = Repo.hiddenGroups; val lockedGs = if (Repo.pin.isEmpty()) emptySet() else Repo.lockedGroups - Repo.unlocked
-            when (group) { "All channels" -> l.channels.filter { it.group !in hidden && it.group !in lockedGs }; "★ Favourites" -> l.channels.filter { it.url in favUrls }; else -> byGroup[group] ?: emptyList() }
+            when (group) { "All channels" -> l.channels.filter { it.group !in hidden && it.group !in lockedGs }; "★ Favourites" -> favChans; else -> byGroup[group] ?: emptyList() }
                 .let { if (hiddenCh.isEmpty()) it else it.filter { c -> c.url !in hiddenCh } }
         }
     }
@@ -213,10 +217,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
             "TV guide for this group" to { groupMenu = null; act.go(Screen.Guide(g)) },
         )) { groupMenu = null }
     }
-    androidx.activity.compose.BackHandler(enabled = Repo.preview && Preview.channel != null && chanMenu == null && groupMenu == null && pinFor == null) {
-        val pl = Preview.list; val c = Preview.channel!!
-        act.playLive(pl.ifEmpty { listOf(c) }, pl.indexOf(c).coerceAtLeast(0))
-    }
+    // Back opens the menu (TvActivity), as on every page; OK on the previewed channel goes full screen.
     pinFor?.let { (title, then) ->
         val choosing = Repo.pin.isEmpty()
         PinDialog(title, verify = if (choosing) null else Repo::checkPin) { pin -> pinFor = null; if (pin != null) then(pin) }

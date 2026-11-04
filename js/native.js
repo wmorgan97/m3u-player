@@ -48,3 +48,5 @@ export const nativePlay = c => call('NativePlayer', 'play', { url: c.url, title:
 export const nativeVlc = opts => call('NativePlayer', 'vlc', opts);
 export const nativeVlcClose = () => call('NativePlayer', 'close', {});
 export const nativeShare = (name, text) => call('NativePlayer', 'share', { name, text });
+// Offline downloads kept by the app itself (ios/App/App/Downloads.swift): start / pause / resume / remove / list.
+export const nativeDl = (method, opts = {}) => call('Downloads', method, opts);

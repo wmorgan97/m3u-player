@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -153,6 +154,11 @@ object SportsHub {
     val FEED_COMPS = setOf("Premier League", "Champions League", "Europa League", "Conference League", "FA Cup", "EFL", "Carabao Cup", "Scottish Premiership",
         "LaLiga", "Serie A", "Bundesliga", "MLS", "Formula 1", "F1", "Six Nations", "Rugby", "UFC", "NFL", "NBA")
     private val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+    /** One read of the channel list for the page and its searches (each used to read all ~19k channels at the same time). */
+    private val liveLock = kotlinx.coroutines.sync.Mutex()
+    suspend fun live(): Repo.Live? = Repo.live ?: liveLock.withLock { Repo.live ?: runCatching { Repo.liveChannels() }.getOrNull() }
+    /** The last pages worked out, by scope (UK / all countries): shown at once when the page is opened again. */
+    @Volatile var last: Triple<Boolean, Page?, FxPage?>? = null
 
     // UK-only and all-countries results are saved apart (a UK search only looks through your UK channels' guide).
     private fun file(c: Context, q: String) = File(c.filesDir, "sports-" + q.lowercase().replace(Regex("[^a-z0-9]+"), "-") + (if (Repo.sportsAll) "-all" else "") + ".json")
@@ -180,7 +186,7 @@ object SportsHub {
                     val f = file(c, q); if (!f.exists()) return@runCatching
                     raw[q] = parse(JSONObject(f.readText()).optJSONArray("matches")); fetchedAt[q] = f.lastModified()
                 }
-                val live = runCatching { Repo.liveChannels() }.getOrNull()
+                val live = live()
                 if (live != null) kotlinx.coroutines.withContext(Dispatchers.Default) { indexFor(live); sportChannels(live) }   // ready before the first results land
                 val urls = live?.epgUrls.orEmpty()
                 if (urls.isEmpty()) { queries.forEach { if (it !in raw) raw[it] = emptyList() }; return@launch }
@@ -229,6 +235,7 @@ object SportsHub {
                 raw[q] = parse(a); fetchedAt[q] = System.currentTimeMillis()
                 runCatching { file(c, q).writeText(JSONObject().put("matches", a).toString()) }
             }
+            SportsPerf.mark("guide searches back (${qs.size})")
             Log.i(TAG, "sports: ${qs.size} searches in one request, ${qs.sumOf { raw[it]?.size ?: 0 }} matches")
             true
         } else false
@@ -327,7 +334,7 @@ object SportsHub {
             if (n.isNotEmpty()) byName.getOrPut(n) { ArrayList() } += c
             if (c.tvgName.isNotEmpty() && c.tvgName != c.name) fastNorm(c.tvgName).takeIf { it.isNotEmpty() && it != n }?.let { byName.getOrPut(it) { ArrayList() } += c }
         }
-        return Index(sig, byId, byName, teams).also { index = it; Log.i(TAG, "sports index: ${l.channels.size} channels in ${android.os.SystemClock.uptimeMillis() - t0} ms") }
+        return Index(sig, byId, byName, teams).also { index = it; Log.i(TAG, "sports index: ${l.channels.size} channels in ${android.os.SystemClock.uptimeMillis() - t0} ms"); SportsPerf.mark("index ${l.channels.size} ch ${android.os.SystemClock.uptimeMillis() - t0}ms") }
     }
 
     /** Which copy of a channel to use: not a backup or SD copy, an English group, HD (the web app's order). */
@@ -479,11 +486,23 @@ object SportsHub {
         FixturesHub.refreshChannels(c, l, ix.byId.keys, ix.byName.keys, ix.sig, force)
     }
 
+    /** The channels a worked-out page relies on, most needed first (saved for the next cold start: SportsSnapshot). */
+    internal fun snapshotChannels(l: Repo.Live, g: Page?, f: FxPage?): List<Channel> {
+        val ix = indexFor(l)
+        val out = ArrayList<Channel>()
+        f?.let { (it.live + it.days.flatMap { d -> d.items } + it.teams.mapNotNull { t -> t.fx }).mapNotNullTo(out) { x -> x.c }; it.teams.mapNotNullTo(out) { t -> t.guide?.c } }
+        g?.let { p -> p.live.mapTo(out) { it.c }; p.rows.forEach { r -> r.second.mapTo(out) { it.c } }; p.teams.mapNotNullTo(out) { it.second?.c } }
+        for (ms in FixturesHub.channels.value.orEmpty().values) for (m in ms) out += ix.byId[m.id.lowercase()] ?: ix.byName[fastNorm(m.name)] ?: emptyList()
+        out += sportChannels(l)
+        out += ix.teams
+        return out
+    }
+
     private val FX_BIG = 70   // Premier League … LaLiga: shown even when not on your channels; smaller ones only when they are
     private fun feedSport(comp: String?) = comp != null && comp in FEED_COMPS
 
     /** Everything the fixtures page shows, worked out off the main thread. [g]: the guide page (other sports, sports channels). */
-    fun fixturePage(l: Repo.Live, now: Long, g: Page?): FxPage {
+    fun fixturePage(l: Repo.Live, now: Long, g: Page?, known: Boolean = true): FxPage {
         val ix = indexFor(l)
         val all = FixturesHub.list.value.orEmpty()
         val raw = FixturesHub.channels.value
@@ -517,7 +536,7 @@ object SportsHub {
             if (f != null) FxTeamEntry(fl.q, item(f), null) else FxTeamEntry(fl.q, null, teamMatches(ix, fl.q, now).firstOrNull())
         }
         val next = up.firstOrNull()?.let { "${it.title}, ${dayWord(it.start, now)} ${hhmm(it.start)}" }
-        return FxPage(live, days, teams, raw != null, next)
+        return FxPage(live, days, teams, raw != null && known, next)
     }
 
     /** One match once: the same fixture on several channels (each guide words it differently: "Fútbol Bundesliga -
@@ -642,6 +661,7 @@ private val NEXT_H = 116.dp
 @Composable
 fun SportsScreen(act: TvActivity) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    remember { SportsPerf.opened() }
     // Opening the page, and following a team (on any device): searches whatever is older than 30 minutes, or new.
     val followKey = Repo.follows.joinToString("|") { it.q.lowercase() }
     LaunchedEffect(followKey) { FixturesHub.readCache(ctx.applicationContext); SportsHub.refresh(ctx.applicationContext) }
@@ -659,7 +679,19 @@ fun SportsScreen(act: TvActivity) {
             delay(if (FixturesHub.usable && (FixturesHub.channels.value == null || Repo.live == null)) 3_000 else 30_000)
         }
     }
-    val live by produceState(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: value }
+    val live by produceState(Repo.live, Repo.version) { value = SportsHub.live() ?: value; value?.let { SportsPerf.first("live ready (${it.channels.size} channels)") } }
+    // Until the full channel list is in (after a cold start it is read, or downloaded again, which can take a while on
+    // the Shield): the channels the page used last time, saved on the TV, so the cards show at once; else no channels
+    // at all (the fixtures alone, "finding the channels").
+    var quick by remember { mutableStateOf<Repo.Live?>(null) }
+    LaunchedEffect(Unit) {
+        if (Repo.live != null) return@LaunchedEffect
+        val q = withContext(Dispatchers.IO) { FixturesHub.readCache(ctx.applicationContext); SportsPerf.trace("snapshot") { SportsSnapshot.load(ctx.applicationContext) } }
+        SportsPerf.mark("snapshot ${q?.channels?.size ?: "none"}")
+        quick = q ?: Repo.Live(emptyList(), emptyList(), emptyList())
+    }
+    // Which of your channels shows each game: asked the moment the full list is in (not on the next 3-second pass).
+    LaunchedEffect(live) { val l = live ?: return@LaunchedEffect; if (com.wmorgan97.m3uplayer.PlayerActivity.current == null) runCatching { SportsHub.refreshFixtureChannels(ctx.applicationContext, l) } }
     var minute by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); minute = System.currentTimeMillis() } }
     // The sports channels' guide (what each is showing now): asked for once the channel list is there.
@@ -667,16 +699,22 @@ fun SportsScreen(act: TvActivity) {
     val ver = Repo.version
     // Worked out again as results land, never cancelled half-way (results arrive faster than the page is worked out):
     // each pass finishes, then the newest state is taken.
-    var page by remember { mutableStateOf<SportsHub.Page?>(null) }
-    var fpage by remember { mutableStateOf<SportsHub.FxPage?>(null) }
+    // Opened again: the last pages at once (worked out afresh just after).
+    val lastPages = remember { SportsHub.last?.takeIf { it.first == Repo.sportsAll } }
+    var page by remember { mutableStateOf(lastPages?.second) }
+    var fpage by remember { mutableStateOf(lastPages?.third) }
     LaunchedEffect(Unit) {
-        snapshotFlow { listOf(live, SportsHub.doneCount, Repo.guideVersion, minute, Repo.version, FixturesHub.version.intValue, FixturesHub.ok.value) }.conflate().collect { k ->
+        snapshotFlow { listOf(live ?: quick, SportsHub.doneCount, Repo.guideVersion, minute, Repo.version, FixturesHub.version.intValue, FixturesHub.ok.value, Repo.sportsAll) }.conflate().collect { k ->
             val l = k[0] as Repo.Live? ?: return@collect
+            val full = l === live
             withContext(Dispatchers.Default) {
                 val now = System.currentTimeMillis()
-                val g = runCatching { SportsHub.page(l, now) }.onFailure { android.util.Log.w("M3U", "sports page failed", it) }.getOrNull() ?: page
-                val f = if (FixturesHub.usable) runCatching { SportsHub.fixturePage(l, now, g) }.onFailure { android.util.Log.w("M3U", "fixtures page failed", it) }.getOrNull() else null
+                val g = runCatching { SportsPerf.trace("page") { SportsHub.page(l, now) } }.onFailure { android.util.Log.w("M3U", "sports page failed", it) }.getOrNull() ?: page
+                val f = if (FixturesHub.usable) runCatching { SportsPerf.trace("fixturePage") { SportsHub.fixturePage(l, now, g, known = full || l.channels.isNotEmpty()) } }.onFailure { android.util.Log.w("M3U", "fixtures page failed", it) }.getOrNull() else null
                 withContext(Dispatchers.Main) { page = g; fpage = f }
+                SportsPerf.first(if (full) "worked out (full list)" else "worked out (saved channels: ${l.channels.size})")
+                if (full) { SportsHub.last = Triple(Repo.sportsAll, g, f)
+                    withContext(Dispatchers.IO) { runCatching { SportsSnapshot.save(ctx.applicationContext, l, SportsHub.snapshotChannels(l, g, f)) } } }
             }
         }
     }
@@ -734,6 +772,7 @@ fun SportsScreen(act: TvActivity) {
             }
         }
         if (fp != null) {
+            SportsPerf.content("fixtures (${fp.live.size} live, ${fp.days.sumOf { it.items.size }} upcoming, channels known ${fp.chansKnown})")
             var firstUsed = false
             fun takeFirst(): Modifier = if (!firstUsed) { firstUsed = true; Modifier.focusRequester(first) } else Modifier
             val scope = if (Repo.sportsAll) ":all" else ""
@@ -792,6 +831,7 @@ fun SportsScreen(act: TvActivity) {
             return@LazyColumn
         }
         if (p == null) { repeat(3) { k -> item(key = "sk$k") { Column { if (k > 0) SkeletonTitle() else Spacer(Modifier.height(8.dp)); SkeletonRow(count = 4, width = if (k == 0) LIVE_W else NEXT_W, aspect = if (k == 0) LIVE_W / LIVE_H else NEXT_W / NEXT_H) } } }; return@LazyColumn }
+        SportsPerf.content("guide page (${p.live.size} live, ${p.rows.size} rows)")
         var firstUsed = false
         fun takeFirst(): Modifier = if (!firstUsed) { firstUsed = true; Modifier.focusRequester(first) } else Modifier
         // Switching UK / all countries starts each row afresh from its first card (rather than keeping the old first card in place).

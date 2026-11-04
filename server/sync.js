@@ -10,7 +10,13 @@
 //   watchlater  films and series saved for later, per "<movie|series>:<id>" ({ kind, id, name, logo, … at }), newest
 //               edit wins; a removed one stays as a { deleted } marker (for 90 days) so other devices drop it too
 //
+//   handoff     "Play on TV": the phone's one latest request { id, kind, url, name, t, at, sent, from }; newest at wins;
+//               a TV that plays it adds { taken, takenAt } (same id). Dropped after 10 minutes; TVs act only on ones < 60 s old.
+//   tvs         TV apps that have synced, per name ({ name, at }): the phone shows "Play on TV" only once a TV exists
+//
 //   POST /sync?key=<PROXY_KEY>   body: the device's state -> the merged state
+//   GET  /sync?key=…&handoff=1[&tv=<name>]   just { handoff, now, live } (cheap: the TV app polls it every few seconds
+//               while it's open; tv=<name> marks that TV as open now, which the phone reads from `live`)
 
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
@@ -88,7 +94,40 @@ export function merge(a, b) {
     out.follows = keys.length > 200 ? Object.fromEntries(keys.sort((x, y) => f[y].at - f[x].at).slice(0, 200).map(k => [k, f[k]])) : f;
   }
   if (b.watchlater && typeof b.watchlater === 'object' && !Array.isArray(b.watchlater)) out.watchlater = mergeWatchLater(a.watchlater, b.watchlater);
+  if (b.handoff && typeof b.handoff === 'object') out.handoff = mergeHandoff(a.handoff, b.handoff);
+  if (out.handoff && !(out.handoff.sent > Date.now() - HANDOFF_KEEP)) delete out.handoff;
+  if (b.tvs && typeof b.tvs === 'object' && !Array.isArray(b.tvs)) {
+    const t = { ...(a.tvs || {}) };
+    for (const [k0, v] of Object.entries(b.tvs)) {
+      const k = String(k0).trim().slice(0, 60);
+      if (k && v && typeof v === 'object' && (+v.at || 0) > (t[k]?.at || 0)) t[k] = { name: String(v.name || k).slice(0, 60), at: +v.at };
+    }
+    const keys = Object.keys(t);
+    out.tvs = keys.length > 10 ? Object.fromEntries(keys.sort((x, y) => t[y].at - t[x].at).slice(0, 10).map(k => [k, t[k]])) : t;
+  }
   return out;
+}
+
+// ---------- Play on TV ----------
+const HANDOFF_KEEP = 10 * 60_000, HANDOFF_FIELDS = ['id', 'kind', 'url', 'name', 'logo', 'group', 'src', 'sid', 'series', 'season', 'num', 'year', 'from', 'tvgId'];
+// One request at a time: a newer one (by at) replaces it; the TV's "taken" for the same id is added to it.
+export function mergeHandoff(a, b) {
+  if (!b?.id) return a;
+  if (a?.id === b.id) return b.taken && !a.taken ? { ...a, taken: String(b.taken).slice(0, 60), takenAt: +b.takenAt || Date.now() } : a;
+  if (a && (+b.at || 0) <= (+a.at || 0)) return a;
+  if (!/^https?:\/\//i.test(String(b.url || ''))) return a;
+  const e = { at: +b.at || 0, sent: +b.sent || Date.now() };
+  for (const f of HANDOFF_FIELDS) if (b[f] !== undefined && b[f] !== null && b[f] !== '') e[f] = typeof b[f] === 'string' ? b[f].slice(0, 1000) : b[f];
+  if (Number.isFinite(+b.t) && +b.t > 0) e.t = +b.t;
+  if (Number.isFinite(+b.d) && +b.d > 0) e.d = +b.d;
+  return e;
+}
+// TV apps polling for handoffs right now: name -> last poll (memory only; a restart forgets, which is fine).
+const tvPolls = new Map();
+export function handoffView(state, now = Date.now()) {
+  const live = {};
+  for (const [k, at] of tvPolls) if (now - at < 20_000) live[k] = at; else tvPolls.delete(k);
+  return { handoff: state?.handoff || null, now, live };
 }
 
 const MAX_WATCHLATER = 300, WL_FIELDS = ['kind', 'id', 'name', 'logo', 'year', 'rating', 'group', 'ext', 'url'];
@@ -114,9 +153,16 @@ export function mergeWatchLater(a0, b) {
 
 export async function handleSync(req, res, url, send) {
   if (PROXY_KEY && url.searchParams.get('key') !== PROXY_KEY) return send(res, 403, 'Wrong or missing key');
+  if (req.method !== 'POST' && url.searchParams.has('handoff')) {
+    const tv = (url.searchParams.get('tv') || '').trim().slice(0, 60);
+    if (tv) tvPolls.set(tv, Date.now());
+    return send(res, 200, JSON.stringify(handoffView(await load())), { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  }
   if (req.method !== 'POST') return send(res, 200, JSON.stringify(await load()), { 'content-type': 'application/json' });
   let incoming;
   try { incoming = JSON.parse(await readBody(req)); } catch { return send(res, 400, 'Bad body'); }
+  // The server's own clock dates a new handoff, so phone/TV clocks that disagree can't make it look stale or fresh.
+  if (incoming?.handoff && typeof incoming.handoff === 'object' && !incoming.handoff.taken) incoming.handoff.sent = Date.now();
   stored = merge(await load(), incoming || {});
   const snapshot = JSON.stringify(stored);
   writing = writing.then(async () => {

@@ -60,7 +60,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         DispatchQueue.main.async {
             guard let web = webView else { finish(false); return }
             // The page checks the favourites (window.__bgCheck returns a promise); iOS allows ~30 s.
-            web.callAsyncJavaScript("return await (window.__bgCheck ? window.__bgCheck() : 0)", arguments: [:], in: nil, in: .page) { _ in finish(true) }
+            // A background refresh also brings the Live Activity up to date (or ends it at full time).
+            LiveScores.shared.refresh {
+                web.callAsyncJavaScript("return await (window.__bgCheck ? window.__bgCheck() : 0)", arguments: [:], in: nil, in: .page) { _ in finish(true) }
+            }
         }
     }
 
@@ -80,6 +83,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
 
     func applicationWillTerminate(_ application: UIApplication) {
         // Called when the application is about to terminate. Save data if appropriate. See also applicationDidEnterBackground:.
+    }
+
+    // Downloads (Downloads.swift) carry on in the background; iOS wakes the app when they finish.
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
+        guard identifier == DownloadManager.sessionId else { completionHandler(); return }
+        DownloadManager.shared.backgroundCompletion = completionHandler
     }
 
     func application(_ application: UIApplication,

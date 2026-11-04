@@ -1368,3 +1368,10 @@ html:not(.mac) .ts-box kbd { display: none !important; }
 
 /* Guide: a channel in the group with no listings yet */
 .gnone { position: absolute; top: 50%; transform: translateY(-50%); font-size: var(--fs-small, 13px); color: var(--muted); white-space: nowrap; }
+
+/* Play on TV / downloads (iPhone app): a quiet ⋯ on each episode row, a calm accent tick once a title is on the phone. */
+.epc .ep-more { flex: none; align-self: center; width: 36px; height: 36px; margin-left: auto; color: var(--muted); background: none; border: 0; border-radius: 10px; }
+.epc .ep-more:active { background: var(--surface-2); }
+.epc .ep-more .ico { width: 20px; height: 20px; }
+.film-tools button.dl-done .ico { color: var(--accent); }
+.film-tools button.dl-done span { color: var(--text); }

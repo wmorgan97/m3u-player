@@ -11,6 +11,7 @@ class MainViewController: CAPBridgeViewController {
     private var testReminderDone = false
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(NativePlayerPlugin())
+        bridge?.registerPluginInstance(WidgetsPlugin())
     }
 
     /// Test hook: launched with `-testStream <url>` (simulator / Xcode only), open the player straight on that
@@ -412,8 +413,8 @@ final class PlayerRootView: UIView {
     }
 }
 
-/// Full-screen player on VLC's engine. Tap to show the controls; swipe up/down on a live channel for
-/// the next/previous one. Events: progress {t, d} every 5s, closed {t, d}, ended, error {message}, step {dir}.
+/// Full-screen player on VLC's engine. Tap to show the controls; swipe sideways on a live channel for
+/// the next/previous one, pinch for fit / fill, double tap a side to skip 10 s. Events: progress {t, d} every 5s, closed {t, d}, ended, error {message}, step {dir}.
 final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     struct Item {
         let url: URL
@@ -636,6 +637,11 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         // Touch: a single tap shows/hides the controls, a double tap on the left/right third skips 10s.
         // Taps that land on a button or the slider go to that control only (see gestureRecognizer(_:shouldReceive:)).
         videoView.isUserInteractionEnabled = false   // VLC's drawing view must never take the touches
+        // Two fingers: pinch between fit and fill. Every view a finger can land on must take both, or UIKit drops the
+        // second finger whenever the controls are up.
+        func multiTouch(_ v: UIView) { v.isMultipleTouchEnabled = true; v.subviews.forEach(multiTouch) }
+        multiTouch(view)
+        setUpSkipBubbles()
         // Taps and swipes are read straight from the touches (touchesBegan/Ended below): gesture recognizers
         // never fired over VLC's video view, which is what made the player feel dead to the touch.
         startBrightness = UIScreen.main.brightness
@@ -649,6 +655,8 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments   // test hook: `-testStillAfter 1` asks "Still watching?" sooner
         if let i = args.firstIndex(of: "-testStillAfter"), i + 1 < args.count, let n = Int(args[i + 1]) { stillAfter = n }
+        // `-testTapWindow 0.9`: a slower double tap, for the simulator's tap tool (its taps arrive ~0.5 s apart).
+        if let i = args.firstIndex(of: "-testTapWindow"), i + 1 < args.count, let w = Double(args[i + 1]) { tapWindow = w }
         #endif
         load(item)
     }
@@ -658,12 +666,14 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         if isMini { touchStart = touches.first.map { ($0.location(in: parent?.view), ProcessInfo.processInfo.systemUptime) }; return }
         if locked { showUnlock(); return super.touchesBegan(touches, with: event) }   // locked: a touch only offers the unlock button
+        if pinch != nil || beginPinch(event) { return super.touchesBegan(touches, with: event) }
         if let t = touches.first, !isOnControl(t) { touchStart = (t.location(in: view), ProcessInfo.processInfo.systemUptime) }
         super.touchesBegan(touches, with: event)
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesMoved(touches, with: event)
         if isMini { return miniMoved(touches) }
+        if pinch != nil { return pinchMoved(event) }
         guard !locked, let t = touches.first, let start = touchStart else { return }
         let p = t.location(in: view), dx = p.x - start.point.x, dy = p.y - start.point.y
         let h = view.bounds.height, w = view.bounds.width
@@ -712,6 +722,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         defer { touchStart = nil; super.touchesEnded(touches, with: event) }
         if isMini { return miniEnded(touches) }
+        if pinch != nil { return pinchEnded(event, lifted: touches) }
         if drag == .minimize {
             drag = .none
             let dy = (touches.first.map { $0.location(in: view).y } ?? 0) - (touchStart?.point.y ?? 0)
@@ -740,6 +751,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         if abs(dx) < 12 && abs(dy) < 12 && ProcessInfo.processInfo.systemUptime - start.time < 0.6 { tapped(at: p) }
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if pinch != nil { pinchEnded(event, lifted: touches) }
         if drag == .minimize { drag = .none; springBack() }
         if drag == .guide { drag = .none }
         if drag != .none { let wasVolume = drag == .volume; drag = .none; if !wasVolume { showHud(hud.text ?? "", sticky: false) } }
@@ -837,6 +849,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     func load(_ next: Item) {
         item = next
+        liveSkipTimer?.invalidate(); liveSkipBase = nil; liveSkipPending = 0; skipRun = nil   // (a skip meant for the last one)
         lastTime = -1
         titleLabel.text = next.title
         subtitleLabel.text = next.subtitle
@@ -991,6 +1004,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         hideTimer?.invalidate()
         countdown?.invalidate()
         zapTimer?.invalidate()
+        liveSkipTimer?.invalidate(); pendingTap?.timer.invalidate(); pendingTap = nil
         buffer?.stop(); buffer = nil
         tearDownRemoteControls()
         if UIScreen.main.brightness != startBrightness { UIScreen.main.brightness = startBrightness }   // the phone's own brightness back
@@ -1369,6 +1383,12 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             spinner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: view.centerYAnchor),
         ])
+        // Play on TV (Handoff.swift): the web app sends this title and position to the TV app and closes the player.
+        Handoff.addButton(to: overlay, after: aspectButton, ask: askJS) { [weak self] in
+            guard let self = self else { return }
+            let (t, d) = self.position()
+            self.onEvent(["type": "handoff", "t": t, "d": d])
+        }
     }
 
     private func showOverlay(keep: Bool = false) {
@@ -1393,19 +1413,162 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         updateCardVisibility()
     }
 
-    private var lastTap: (time: TimeInterval, x: CGFloat, controls: Bool) = (0, 0, false)
+    // Taps. The middle of the screen answers at once. On the left / right third, where a double tap skips 10 s, a single
+    // tap waits a moment (as in every video app) so the controls don't flash up and away under a double tap. Keep
+    // tapping the same side to go further (−20, −30 …).
+    private var pendingTap: (timer: Timer, side: Int, time: TimeInterval)?
+    private var skipRun: (side: Int, time: TimeInterval, total: Int)?
+    private var tapWindow: TimeInterval = 0.3   // how long a side tap waits for a second one
     private func tapped(at point: CGPoint) {
         #if DEBUG
         NSLog("M3UDBG tap alpha=%.2f", overlay.alpha)
         #endif
-        let now = ProcessInfo.processInfo.systemUptime, x = point.x, w = view.bounds.width
+        let now = uptime, x = point.x, w = view.bounds.width
         let side = x < w / 3 ? -1 : x > w * 2 / 3 ? 1 : 0
-        let quickSecond = now - lastTap.time < 0.3 && abs(x - lastTap.x) < 80
-        // Live: only while the controls were up at the first tap (the screen's thirds are for swipes otherwise).
-        let liveSkip = item.live && lastTap.controls && liveWindow() != nil
-        lastTap = (now, x, overlay.alpha > 0.5)
-        if quickSecond && side != 0 && (!item.live || liveSkip) { return skip(side) }
-        if overlay.alpha > 0.5 { hideOverlay() } else { showOverlay() }
+        if side != 0, let run = skipRun, run.side == side, now - run.time < tapWindow + 0.4 { return gestureSkip(side) }
+        skipRun = nil
+        if let p = pendingTap {
+            p.timer.invalidate(); pendingTap = nil
+            if p.side == side && now - p.time < tapWindow + 0.05 && canGestureSkip(side) { return gestureSkip(side) }
+            toggleOverlay()   // a tap on the other side: the first one still counts
+        }
+        if side != 0 && canGestureSkip(side) {
+            let t = Timer.scheduledTimer(withTimeInterval: tapWindow, repeats: false) { [weak self] _ in
+                guard let self = self else { return }
+                self.pendingTap = nil
+                if !self.isMini && !self.finished && !self.locked { self.toggleOverlay() }
+            }
+            pendingTap = (t, side, now)
+            return
+        }
+        toggleOverlay()
+    }
+    private func toggleOverlay() { if overlay.alpha > 0.5 { hideOverlay() } else { showOverlay() } }
+
+    /// Whether a double tap on that side can move the picture without a new connection to the provider: films and
+    /// episodes always; live only inside what's been recorded (LiveBuffer) or within a catch-up recording.
+    private func canGestureSkip(_ dir: Int) -> Bool {
+        guard item.live else { return player.isSeekable || (player.media?.length.intValue ?? 0) > 0 }
+        return liveSkipTarget(dir, by: 10) != nil
+    }
+    /// Where a live skip of `seconds` lands, or nil when getting there would need the provider again.
+    private func liveSkipTarget(_ dir: Int, by seconds: Double, from base: Double? = nil) -> Double? {
+        guard let w = liveWindow(), let pos = base ?? livePosition() else { return nil }
+        let t = pos + Double(dir) * seconds
+        switch feed {
+        case .buffered:
+            guard let b = buffer else { return nil }
+            let bw = b.window
+            guard !bw.direct, bw.start > 0 else { return nil }
+            if dir > 0 { return isAtLive && base == nil ? nil : min(t, w.end) }   // past the end: back to live (local)
+            return pos - bw.start > 1 ? max(t, bw.start) : nil
+        case .catchup:
+            guard player.isSeekable else { return nil }
+            if dir > 0 { return t < w.end - 5 ? t : nil }   // forward to live would mean the provider again
+            return pos - catchupStart > 1 ? max(t, catchupStart) : nil
+        case .direct: return nil
+        }
+    }
+
+    /// A double tap's skip: a light tap of haptics and a small badge on that side; the controls stay as they were.
+    /// On live the seek waits until the taps stop, so a run of taps opens the recording once.
+    private var liveSkipBase: Double?
+    private var liveSkipPending = 0   // seconds asked for since the last live seek
+    private var liveSkipTimer: Timer?
+    private func gestureSkip(_ dir: Int) {
+        let now = uptime
+        let total = (skipRun?.side == dir ? skipRun!.total : 0) + 10
+        if item.live {
+            if liveSkipBase == nil { liveSkipBase = livePosition(); liveSkipPending = 0 }
+            let pending = liveSkipPending + 10
+            guard let base = liveSkipBase, liveSkipTarget(dir, by: Double(pending), from: base) != nil else { return }
+            liveSkipPending = pending
+            liveSkipTimer?.invalidate()
+            liveSkipTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
+                guard let self = self else { return }
+                let b = self.liveSkipBase, by = Double(self.liveSkipPending)
+                self.liveSkipBase = nil; self.liveSkipPending = 0
+                guard let base = b, let t = self.liveSkipTarget(dir, by: by, from: base) else { return }
+                self.seekLive(to: t)
+            }
+        } else {
+            if dir < 0 { player.jumpBackward(10) } else { player.jumpForward(10) }
+        }
+        skipRun = (dir, now, total)
+        Haptics.light()
+        showSkipBubble(dir, total: total)
+    }
+
+    // The skip badge: a small frosted capsule, centred in that third of the screen.
+    private let skipBubbles = [SkipBubble(forward: false), SkipBubble(forward: true)]
+    private var skipBubbleX: [NSLayoutConstraint] = []
+    private func setUpSkipBubbles() {
+        for (i, b) in skipBubbles.enumerated() {
+            b.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(b)
+            let x = b.centerXAnchor.constraint(equalTo: i == 0 ? view.leadingAnchor : view.trailingAnchor)
+            skipBubbleX.append(x)
+            NSLayoutConstraint.activate([x, b.centerYAnchor.constraint(equalTo: view.centerYAnchor)])
+        }
+    }
+    private func showSkipBubble(_ dir: Int, total: Int) {
+        let i = dir < 0 ? 0 : 1
+        let off = view.bounds.width / 6
+        skipBubbleX[i].constant = i == 0 ? off : -off
+        skipBubbles[1 - i].hide()
+        view.bringSubviewToFront(skipBubbles[i])
+        skipBubbles[i].show(seconds: total)
+    }
+
+    // MARK: pinch (fit / fill)
+    // Two fingers anywhere on the picture: apart = fill the screen (no bars, edges cut), together = fit (the whole
+    // picture). Decided once per pinch, with a short cross-fade and a quiet word in the middle.
+    private var pinch: (from: CGFloat, done: Bool)?
+    private func activeTouches(_ event: UIEvent?) -> [UITouch] {
+        (event?.allTouches ?? []).filter { $0.phase != .ended && $0.phase != .cancelled && $0.view?.isDescendant(of: view) == true }
+    }
+    private func pinchDistance(_ ts: [UITouch]) -> CGFloat? {
+        guard ts.count >= 2 else { return nil }
+        let a = ts[0].location(in: view), b = ts[1].location(in: view)
+        return hypot(a.x - b.x, a.y - b.y)
+    }
+    /// A second finger came down: whatever the first one was doing is let go, and this is a pinch.
+    private func beginPinch(_ event: UIEvent?) -> Bool {
+        guard guide == nil, nextCard.isHidden || cardMode == .none, let d = pinchDistance(activeTouches(event)), d > 20 else { return false }
+        switch drag {
+        case .minimize: springBack()
+        case .scrub, .brightness: showHud(hud.text ?? "", sticky: false)
+        default: break
+        }
+        drag = .none
+        touchStart = nil
+        pendingTap?.timer.invalidate(); pendingTap = nil
+        pinch = (d, false)
+        return true
+    }
+    private func pinchMoved(_ event: UIEvent?) {
+        guard let p = pinch, !p.done, let d = pinchDistance(activeTouches(event)) else { return }
+        let r = d / max(1, p.from)
+        if r > 1.18 { pinch?.done = true; setFill(true) } else if r < 0.85 { pinch?.done = true; setFill(false) }
+    }
+    private func pinchEnded(_ event: UIEvent?, lifted: Set<UITouch>) {
+        let left = activeTouches(event).filter { !lifted.contains($0) }
+        if left.isEmpty { pinch = nil }   // (one finger still down after a pinch: nothing until it lifts too)
+    }
+    private func setFill(_ fill: Bool) {
+        let mode = fill ? 1 : 0
+        guard aspectMode != mode else { return showHud(fill ? "Fill screen" : "Fit to screen", sticky: false) }
+        // Cross-fade from the old shape to the new one, rather than a jump.
+        if !isMini, firstPicture, let snap = videoView.snapshotView(afterScreenUpdates: false) {
+            snap.frame = videoView.frame
+            snap.isUserInteractionEnabled = false
+            view.insertSubview(snap, aboveSubview: videoView)
+            UIView.animate(withDuration: 0.3, delay: 0.05, options: [.curveEaseOut]) { snap.alpha = 0 } completion: { _ in snap.removeFromSuperview() }
+        }
+        aspectMode = mode
+        applyAspect()
+        Haptics.light()
+        showHud(fill ? "Fill screen" : "Fit to screen", sticky: false)
     }
 
     private func skip(_ dir: Int) {
@@ -1447,6 +1610,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             showTuning(name: r.title, number: num, logo: logo, now: r.detail)
         }
         player.pause()
+        Haptics.selection()
         let quick = uptime - lastZap < 0.6
         lastZap = uptime
         zapTarget = to
@@ -2484,6 +2648,69 @@ final class NextEpisodeCard: UIView {
 }
 
 /// A button with a lighter band sweeping across it: the countdown, without any numbers.
+/// Light haptics for the player's gestures: a tick on each channel change, a soft tap on skips and fit / fill.
+enum Haptics {
+    private static let impact = UIImpactFeedbackGenerator(style: .light)
+    private static let select = UISelectionFeedbackGenerator()
+    static func light() { impact.impactOccurred(intensity: 0.7); impact.prepare() }
+    static func selection() { select.selectionChanged(); select.prepare() }
+}
+
+/// The double-tap skip badge: a small frosted capsule with the arrow and how far (−10 s, −20 s …), that pulses on
+/// each tap and fades a moment after the last.
+final class SkipBubble: UIVisualEffectView {
+    private let icon = UIImageView()
+    private let label = UILabel()
+    private let forward: Bool
+    private var hideWork: DispatchWorkItem?
+
+    init(forward: Bool) {
+        self.forward = forward
+        super.init(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+        isUserInteractionEnabled = false
+        alpha = 0
+        layer.cornerRadius = 22
+        layer.cornerCurve = .continuous
+        clipsToBounds = true
+        contentView.backgroundColor = UIColor(white: 0, alpha: 0.18)
+        icon.image = UIImage(systemName: forward ? "goforward" : "gobackward", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold))
+        icon.tintColor = .white
+        label.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+        label.textColor = .white
+        let row = UIStackView(arrangedSubviews: forward ? [label, icon] : [icon, label])
+        row.spacing = 7
+        row.alignment = .center
+        row.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(row)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 44),
+            row.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+        ])
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func show(seconds: Int) {
+        label.text = (forward ? "+" : "−") + "\(seconds) s"
+        accessibilityLabel = (forward ? "Forward " : "Back ") + "\(seconds) seconds"
+        hideWork?.cancel()
+        transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+        UIView.animate(withDuration: 0.22, delay: 0, usingSpringWithDamping: 0.7, initialSpringVelocity: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+            self.alpha = 1
+            self.transform = .identity
+        }
+        let work = DispatchWorkItem { [weak self] in self?.hide() }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: work)
+    }
+    func hide() {
+        hideWork?.cancel(); hideWork = nil
+        guard alpha > 0 else { return }
+        UIView.animate(withDuration: 0.3, delay: 0, options: [.beginFromCurrentState]) { self.alpha = 0 }
+    }
+}
+
 final class FillButton: UIButton {
     private let fill = UIView()
     var showsFill = true { didSet { fill.isHidden = !showsFill } }

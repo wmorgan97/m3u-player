@@ -20,7 +20,42 @@
 		A7C3E1F02B4D5E6F70810001 /* NativePlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1F02B4D5E6F70810002 /* NativePlayer.swift */; };
 		A7C3E1F02B4D5E6F70810021 /* PlayerGuide.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1F02B4D5E6F70810022 /* PlayerGuide.swift */; };
 		A7C3E1F02B4D5E6F70810011 /* LiveBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C3E1F02B4D5E6F70810012 /* LiveBuffer.swift */; };
+		D0A11CE02B4D5E6F70820001 /* Downloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0A11CE02B4D5E6F70820002 /* Downloads.swift */; };
+		D0A11CE02B4D5E6F70820011 /* Handoff.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0A11CE02B4D5E6F70820012 /* Handoff.swift */; };
+		C0FFEE00000000000000000C /* M3UShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE000000000000000001 /* M3UShared.swift */; };
+		C0FFEE00000000000000000D /* WidgetBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE000000000000000002 /* WidgetBridge.swift */; };
+		C0FFEE00000000000000000E /* M3UShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE000000000000000001 /* M3UShared.swift */; };
+		C0FFEE00000000000000000F /* M3UWidgetsBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE000000000000000004 /* M3UWidgetsBundle.swift */; };
+		C0FFEE000000000000000010 /* ContinueWatchingWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE000000000000000005 /* ContinueWatchingWidget.swift */; };
+		C0FFEE000000000000000011 /* MyTeamsWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE000000000000000006 /* MyTeamsWidget.swift */; };
+		C0FFEE000000000000000012 /* MatchLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE000000000000000007 /* MatchLiveActivity.swift */; };
+		C0FFEE000000000000000013 /* WidgetUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE000000000000000008 /* WidgetUI.swift */; };
+		C0FFEE000000000000000014 /* M3UWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = C0FFEE00000000000000000B /* M3UWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C0FFEE00000000000000001C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 504EC2FC1FED79650016851F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C0FFEE000000000000000017;
+			remoteInfo = M3UWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C0FFEE00000000000000001B /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				C0FFEE000000000000000014 /* M3UWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		2FAD9762203C412B000D30F8 /* config.xml */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = config.xml; sourceTree = "<group>"; };
@@ -37,6 +72,19 @@
 		A7C3E1F02B4D5E6F70810022 /* PlayerGuide.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerGuide.swift; sourceTree = "<group>"; };
 		A7C3E1F02B4D5E6F70810012 /* LiveBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveBuffer.swift; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
+		D0A11CE02B4D5E6F70820002 /* Downloads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Downloads.swift; sourceTree = "<group>"; };
+		D0A11CE02B4D5E6F70820012 /* Handoff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Handoff.swift; sourceTree = "<group>"; };
+		C0FFEE000000000000000001 /* M3UShared.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = M3UShared.swift; sourceTree = "<group>"; };
+		C0FFEE000000000000000002 /* WidgetBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetBridge.swift; sourceTree = "<group>"; };
+		C0FFEE000000000000000003 /* App.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = App.entitlements; sourceTree = "<group>"; };
+		C0FFEE000000000000000004 /* M3UWidgetsBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = M3UWidgetsBundle.swift; sourceTree = "<group>"; };
+		C0FFEE000000000000000005 /* ContinueWatchingWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContinueWatchingWidget.swift; sourceTree = "<group>"; };
+		C0FFEE000000000000000006 /* MyTeamsWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyTeamsWidget.swift; sourceTree = "<group>"; };
+		C0FFEE000000000000000007 /* MatchLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MatchLiveActivity.swift; sourceTree = "<group>"; };
+		C0FFEE000000000000000008 /* WidgetUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetUI.swift; sourceTree = "<group>"; };
+		C0FFEE000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C0FFEE00000000000000000A /* M3UWidgets.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = M3UWidgets.entitlements; sourceTree = "<group>"; };
+		C0FFEE00000000000000000B /* M3UWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = M3UWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -49,6 +97,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C0FFEE000000000000000019 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -57,6 +112,8 @@
 			children = (
 				958DCC722DB07C7200EA8C5F /* debug.xcconfig */,
 				504EC3061FED79650016851F /* App */,
+				C0FFEE000000000000000015 /* Shared */,
+				C0FFEE000000000000000016 /* M3UWidgets */,
 				504EC3051FED79650016851F /* Products */,
 			);
 			sourceTree = "<group>";
@@ -65,6 +122,7 @@
 			isa = PBXGroup;
 			children = (
 				504EC3041FED79650016851F /* App.app */,
+				C0FFEE00000000000000000B /* M3UWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -76,6 +134,10 @@
 				A7C3E1F02B4D5E6F70810002 /* NativePlayer.swift */,
 				A7C3E1F02B4D5E6F70810022 /* PlayerGuide.swift */,
 				A7C3E1F02B4D5E6F70810012 /* LiveBuffer.swift */,
+				D0A11CE02B4D5E6F70820002 /* Downloads.swift */,
+				D0A11CE02B4D5E6F70820012 /* Handoff.swift */,
+				C0FFEE000000000000000002 /* WidgetBridge.swift */,
+				C0FFEE000000000000000003 /* App.entitlements */,
 				50379B222058CBB4000EE86E /* capacitor.config.json */,
 				504EC3071FED79650016851F /* AppDelegate.swift */,
 				504EC30B1FED79650016851F /* Main.storyboard */,
@@ -88,6 +150,28 @@
 			path = App;
 			sourceTree = "<group>";
 		};
+		C0FFEE000000000000000015 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				C0FFEE000000000000000001 /* M3UShared.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		C0FFEE000000000000000016 /* M3UWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				C0FFEE000000000000000004 /* M3UWidgetsBundle.swift */,
+				C0FFEE000000000000000005 /* ContinueWatchingWidget.swift */,
+				C0FFEE000000000000000006 /* MyTeamsWidget.swift */,
+				C0FFEE000000000000000007 /* MatchLiveActivity.swift */,
+				C0FFEE000000000000000008 /* WidgetUI.swift */,
+				C0FFEE000000000000000009 /* Info.plist */,
+				C0FFEE00000000000000000A /* M3UWidgets.entitlements */,
+			);
+			path = M3UWidgets;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -98,10 +182,12 @@
 				504EC3001FED79650016851F /* Sources */,
 				504EC3011FED79650016851F /* Frameworks */,
 				504EC3021FED79650016851F /* Resources */,
+				C0FFEE00000000000000001B /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				C0FFEE00000000000000001D /* PBXTargetDependency */,
 			);
 			name = App;
 			packageProductDependencies = (
@@ -112,6 +198,23 @@
 			productReference = 504EC3041FED79650016851F /* App.app */;
 			productType = "com.apple.product-type.application";
 		};
+		C0FFEE000000000000000017 /* M3UWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C0FFEE00000000000000001E /* Build configuration list for PBXNativeTarget "M3UWidgets" */;
+			buildPhases = (
+				C0FFEE000000000000000018 /* Sources */,
+				C0FFEE000000000000000019 /* Frameworks */,
+				C0FFEE00000000000000001A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = M3UWidgets;
+			productName = M3UWidgets;
+			productReference = C0FFEE00000000000000000B /* M3UWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -121,6 +224,10 @@
 				LastSwiftUpdateCheck = 0920;
 				LastUpgradeCheck = 0920;
 				TargetAttributes = {
+					C0FFEE000000000000000017 = {
+						CreatedOnToolsVersion = 27.1;
+						ProvisioningStyle = Automatic;
+					};
 					504EC3031FED79650016851F = {
 						CreatedOnToolsVersion = 9.2;
 						LastSwiftMigration = 1100;
@@ -146,6 +253,7 @@
 			projectRoot = "";
 			targets = (
 				504EC3031FED79650016851F /* App */,
+				C0FFEE000000000000000017 /* M3UWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -164,6 +272,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C0FFEE00000000000000001A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -176,10 +291,35 @@
 				A7C3E1F02B4D5E6F70810001 /* NativePlayer.swift in Sources */,
 				A7C3E1F02B4D5E6F70810021 /* PlayerGuide.swift in Sources */,
 				A7C3E1F02B4D5E6F70810011 /* LiveBuffer.swift in Sources */,
+				D0A11CE02B4D5E6F70820001 /* Downloads.swift in Sources */,
+				D0A11CE02B4D5E6F70820011 /* Handoff.swift in Sources */,
+				C0FFEE00000000000000000C /* M3UShared.swift in Sources */,
+				C0FFEE00000000000000000D /* WidgetBridge.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C0FFEE000000000000000018 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C0FFEE00000000000000000E /* M3UShared.swift in Sources */,
+				C0FFEE00000000000000000F /* M3UWidgetsBundle.swift in Sources */,
+				C0FFEE000000000000000010 /* ContinueWatchingWidget.swift in Sources */,
+				C0FFEE000000000000000011 /* MyTeamsWidget.swift in Sources */,
+				C0FFEE000000000000000012 /* MatchLiveActivity.swift in Sources */,
+				C0FFEE000000000000000013 /* WidgetUI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C0FFEE00000000000000001D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C0FFEE000000000000000017 /* M3UWidgets */;
+			targetProxy = C0FFEE00000000000000001C /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXVariantGroup section */
 		504EC30B1FED79650016851F /* Main.storyboard */ = {
@@ -317,6 +457,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -339,6 +480,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -349,6 +491,58 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.wmorgan97.m3uplayer;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C0FFEE00000000000000001F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = M3UWidgets/M3UWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = M3UWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wmorgan97.m3uplayer.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C0FFEE000000000000000020 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = M3UWidgets/M3UWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = M3UWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wmorgan97.m3uplayer.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -371,6 +565,15 @@
 			buildConfigurations = (
 				504EC3171FED79650016851F /* Debug */,
 				504EC3181FED79650016851F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C0FFEE00000000000000001E /* Build configuration list for PBXNativeTarget "M3UWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C0FFEE00000000000000001F /* Debug */,
+				C0FFEE000000000000000020 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

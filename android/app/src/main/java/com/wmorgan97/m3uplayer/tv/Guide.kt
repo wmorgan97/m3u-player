@@ -52,22 +52,27 @@ private fun at(l: List<Programme>, t: Long): Programme? { val i = l.indexOfLast 
 
 @Composable
 fun GuideScreen(act: TvActivity, startGroup: String?) {
-    val live by produceState<Repo.Live?>(Repo.live, Repo.version) { value = runCatching { Repo.liveChannels() }.getOrNull() ?: Repo.Live(emptyList(), emptyList(), emptyList()) }
-    val l = live ?: run { Box(Modifier.fillMaxSize()) { PageTitle("TV Guide", "Loading channels…") }; return }
-    if (l.channels.isEmpty() && Repo.syncData.optJSONObject("sources") == null && Repo.lastSyncError == null) { Box(Modifier.fillMaxSize()) { PageTitle("TV Guide", "Loading channels…") }; return }
+    val live by produceState<Repo.Live?>(Repo.live, Repo.version, Repo.liveTick) {
+        // A failed or interrupted load keeps what was there (it used to put up an empty list: "No live channels" while
+        // the playlists were still loading after a cold start).
+        value = try { Repo.liveChannels() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { value ?: Repo.Live(emptyList(), emptyList(), emptyList()) }
+    }
+    val l = live
+    if (l == null || Repo.liveSettling(l)) { Box(Modifier.fillMaxSize()) { PageTitle("TV Guide", "Loading channels…") }; return }
     if (l.channels.isEmpty()) { Repo.liveError?.let { ErrorState("Couldn't load your channels", "$it Check the playlist in Settings, or try again later.") } ?: EmptyState(Icons.Default.CalendarViewWeek, "No live channels", "Add a playlist with live TV in Settings"); return }
     LaunchedEffect(Unit) { Repo.loadSavedGuide() }
     val v = Repo.version
-    val favUrls = remember(v) { Repo.favorites().map { it.optString("url") }.toSet() }
+    val favChans = remember(v, l) { Repo.favouriteChannels(l) }   // the same set as Live TV's (Favourites.kt)
+    val favUrls = remember(favChans) { favChans.mapTo(HashSet()) { it.url } }
     val hiddenCh = remember(v) { Repo.hiddenChannels }
     val byGroup = remember(l) { l.channels.groupBy { it.group } }
-    val groups = remember(l, favUrls, v) { listOfNotNull(if (l.channels.any { it.url in favUrls }) "★ Favourites" else null) + Repo.arrange(l.groups.filter { it.isNotBlank() }) }
+    val groups = remember(l, favUrls, v) { listOfNotNull(if (favChans.isNotEmpty()) "★ Favourites" else null) + Repo.arrange(l.groups.filter { it.isNotBlank() }) }
     var group by rememberSaveable { mutableStateOf(startGroup?.takeIf { it in groups } ?: groups.firstOrNull() ?: "") }
     var unlockTick by remember { mutableIntStateOf(0) }
     val locked = remember(group, v, unlockTick) { Repo.isLocked(group) }
     // A group (favourited or not) can hold the same channel twice - merged from more than one playlist, or a stream
     // and its backup both named the same: one row per URL, the first kept, same as CardRow's own duplicate-key rule.
-    val chans = remember(group, l, favUrls, hiddenCh) { ((if (group == "★ Favourites") l.channels.filter { it.url in favUrls } else byGroup[group] ?: emptyList()).distinctBy { it.url }.filter { it.url !in hiddenCh }) }   // every channel of the group (rows are lazy); a 600 cap cut big groups like "24/7 Channels" (2,600+) short
+    val chans = remember(group, l, favUrls, hiddenCh) { ((if (group == "★ Favourites") favChans else byGroup[group] ?: emptyList()).distinctBy { it.url }.filter { it.url !in hiddenCh }) }   // every channel of the group (rows are lazy); a 600 cap cut big groups like "24/7 Channels" (2,600+) short
 
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = System.currentTimeMillis() } }
@@ -80,15 +85,25 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     var viewStart by remember(group) { mutableLongStateOf(floor30(System.currentTimeMillis())) }
     LaunchedEffect(group, locked, row / 100) { if (!locked) Repo.requestGuide(chans.drop(maxOf(0, row - 50)).take(300)) }   // (rows further down get theirs as you reach them)
     val anyArchive = remember(chans) { chans.any { it.hasCatchup } }
-    val earliest = floor30(now) - (if (anyArchive) 24 * 3600_000L else 0L)   // the past is only worth visiting with catch-up; otherwise left from now opens the menu
+    val earliest = floor30(now)   // TiviMate: the guide starts at what's on now and only looks ahead (catch-up lives in the programme menu)
     val latest = now + 24 * 3600_000L
     val span = SPAN_MIN * 60_000L
     val listState = rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = 4, nested = 0) })   // rows built before they scroll in
     val gridFocus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+    val chipFocus = remember { FocusRequester() }   // the open group's chip
+    val chipState = rememberLazyListState()
+    var focusedChip by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(focusedChip) { val g = focusedChip ?: return@LaunchedEffect; if (g != group) { delay(350); group = g } }
+    /** Up to the group chips from anywhere in the grid (one press, however far down the list you are). */
+    fun toChips() = scope.launch {
+        val i = groups.indexOf(group).takeIf { it >= 0 }?.plus(2) ?: 0   // (after "Now" and the divider)
+        if (chipState.layoutInfo.visibleItemsInfo.none { it.index == i }) chipState.scrollToItem(maxOf(0, i - 1))
+        delay(16); if (runCatching { chipFocus.requestFocus() }.isFailure) runCatching { chipFocus.requestFocus() }
+    }
     var gridFocused by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf<Pair<Channel, Programme>?>(null) }
     var pinFor by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
 
     fun progs(i: Int) = chans.getOrNull(i)?.let { Repo.guideFor(it) } ?: emptyList()
     /** Moves the highlight onto a programme, shifting the window (by whole half hours) only when it's out of sight. */
@@ -129,6 +144,9 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                 else if (viewStart + span < latest) { viewStart += HALF_HOUR; cursor = maxOf(cursor, viewStart) }
             }
             Key.DirectionLeft -> {
+                // On what's on now, a channel with no catch-up has nothing behind it worth stepping into: Left opens the
+                // menu at once, as on every other page, instead of paging back through hours of past listings first.
+                if (viewStart <= earliest && (cur == null || cur.start <= now)) return false   // on what's on now: Left opens the menu
                 if (cur != null && cur.start < viewStart) { if (viewStart <= earliest) return false; viewStart -= HALF_HOUR; cursor = maxOf(cur.start, viewStart) }
                 else {
                     val prev = if (cur != null) l0.lastOrNull { it.end <= cur.start } else l0.lastOrNull { it.end <= cursor }
@@ -177,15 +195,18 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
             }
         }
         }
-        LazyRow(contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        LazyRow(state = chipState, contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             // "Now": back to the present from anywhere in the guide (also the guide button, or Back once you've moved away).
             item(key = "\u0000now") {
                 TvChip("Now", selected = false, onClick = { jumpToNow(); scope.launch { delay(60); runCatching { gridFocus.requestFocus() } } }, icon = Icons.Default.Schedule)
             }
             item(key = "\u0000sep") { Box(Modifier.padding(horizontal = 4.dp).width(1.dp).height(20.dp).background(Tv.line)) }
             // Group tabs: the shared chip (the open group in accent, the highlight white).
+            // Resting on a chip switches to its group (after a short settle, as in Live TV's group list); OK goes down into it.
             items(groups, key = { it }) { g ->
-                TvChip((if (g in Repo.lockedGroups && Repo.pin.isNotEmpty()) "🔒 " else "") + prettyGroup(g), g == group, { group = g })
+                TvChip((if (g in Repo.lockedGroups && Repo.pin.isNotEmpty()) "🔒 " else "") + prettyGroup(g), g == group,
+                    { focusedChip = null; if (g != group) group = g else if (!locked) runCatching { gridFocus.requestFocus() } },
+                    modifier = if (g == group) Modifier.focusRequester(chipFocus) else Modifier, onFocus = { if (it) focusedChip = g else if (focusedChip == g) focusedChip = null })
             }
         }
         Spacer(Modifier.height(6.dp))
@@ -224,14 +245,16 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
             }
         }
     }
-    // Back goes to the channel in the preview, full screen (the menu is one press of left away).
-    androidx.activity.compose.BackHandler(enabled = Repo.preview && Preview.channel != null && info == null && pinFor == null) {
-        val pl = Preview.list; val c = Preview.channel!!
-        act.playLive(pl.ifEmpty { listOf(c) }, pl.indexOf(c).coerceAtLeast(0))
-    }
-    // Moved away from now: Back first comes back to the present (registered after the handler above, so it goes first).
+    // Back: away from now, it first comes back to the present; at now it opens the menu (TvActivity), like every page.
+    // (It used to send the preview full screen, which made the Guide feel like a page you couldn't leave; OK on the
+    // previewed channel does that.)
+    // At now, Back first goes up to the group chips (TiviMate-like: switching group is one press away from anywhere in a
+    // long group); Back on the chips opens the menu.
     androidx.activity.compose.BackHandler(enabled = gridFocused && viewStart != floor30(now) && info == null && pinFor == null) { jumpToNow() }
-    LaunchedEffect(locked, chans) { if (!locked && chans.isNotEmpty()) { delay(120); runCatching { gridFocus.requestFocus() } } }
+    androidx.activity.compose.BackHandler(enabled = gridFocused && viewStart == floor30(now) && info == null && pinFor == null) { toChips() }
+    // The grid takes the highlight when the page (or a group) opens, except while you're moving along the group chips:
+    // a group picked there keeps the highlight on the chips, so you can carry on; OK / Down goes into the grid.
+    LaunchedEffect(locked, chans) { if (!locked && chans.isNotEmpty()) { delay(120); if (focusedChip == null) runCatching { gridFocus.requestFocus() } } }
     info?.let { (c, p) ->
         ProgrammeDialog(act, c, p, now, chans) { info = null }
     }

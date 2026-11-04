@@ -148,15 +148,16 @@ fun SearchScreen(act: TvActivity) {
         if (fieldFocused || micFocused) { runCatching { firstResult.requestFocus() }; kb?.hide() }
         spoken = null
     }
-    // Back from the results goes to the field (then a second Back leaves Search as usual).
-    var pageFocused by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    androidx.activity.compose.BackHandler(enabled = pageFocused && !fieldFocused && !micFocused && chanMenu == null) {
-        runCatching { field.requestFocus() }
-        scope.launch { listState.scrollToItem(0); delay(60); kb?.hide() }   // the field, without the keyboard over the results (OK opens it)
+    // Back in the field (or on the mic) leaves it for the results below; with nothing below it opens the menu. Back on
+    // the results opens the menu (TvActivity), as on every page. (Back from the results used to go up to the field, and
+    // the field kept every Back after that: Search could only be left with Left.)
+    val hasResults = if (query.isEmpty()) recent.isNotEmpty() else chans.isNotEmpty() || progs.isNotEmpty() || vods?.let { it.first.isNotEmpty() || it.second.isNotEmpty() } == true
+    androidx.activity.compose.BackHandler(enabled = (fieldFocused || micFocused) && chanMenu == null) {
+        kb?.hide()
+        if (!hasResults || runCatching { firstResult.requestFocus() }.isFailure && !focusMgr.moveFocus(androidx.compose.ui.focus.FocusDirection.Down)) act.openMenu()
     }
     HeldPace()
-    LazyColumn(Modifier.fillMaxSize().onFocusChanged { pageFocused = it.hasFocus }, state = listState, contentPadding = PaddingValues(top = Tv.topMargin, bottom = 56.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(top = Tv.topMargin, bottom = 56.dp)) {
         item {
             Row(Modifier.padding(horizontal = Tv.margin).fillMaxWidth(.66f), verticalAlignment = Alignment.CenterVertically) {
                 // A text field keeps its text readable when focused: it lifts and gets the white focus outline (no fill).
@@ -178,7 +179,7 @@ fun SearchScreen(act: TvActivity) {
             }
         }
         if (query.isEmpty()) {
-            if (recent.isNotEmpty()) { item(key = "recent-t") { RowTitle("Recent channels") }; item(key = "recent") { ChannelRowCards(act, recent, guideTick) { chanMenu = it } } }
+            if (recent.isNotEmpty()) { item(key = "recent-t") { RowTitle("Recent channels") }; item(key = "recent") { Box(Modifier.focusRequester(firstResult)) { ChannelRowCards(act, recent, guideTick) { chanMenu = it } } } }
             else item { Box(Modifier.fillMaxWidth().padding(top = 120.dp)) { EmptyState(Icons.Default.Search, "Find anything", "Channels, what's on TV, movies and series, all at once") } }
             return@LazyColumn
         }

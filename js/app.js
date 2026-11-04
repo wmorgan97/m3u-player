@@ -11,7 +11,8 @@ import { wlKey, wlEntry, watchLaterList, adoptWatchLater } from './watchlater.js
 import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport, importance } from './sports.js';
 import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup, isEventGroup, eventChannelsFor } from './fixtures.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
-import { isNative, isTV, nativePlay, nativeShare, nativeVlc, headersFromOpts } from './native.js';
+import { isNative, isTV, nativePlay, nativeShare, nativeVlc, nativeVlcClose, nativeDl, headersFromOpts } from './native.js';
+import { handoffEntry, hasTv, openTvs } from './handoff.js';
 
 const PAGE = 150;
 const UNGROUPED = 'Ungrouped';
@@ -92,7 +93,9 @@ async function init() {
   state.watchlater = (await db.get('watchlater').catch(() => null)) || {};
   state.intros = (await db.get('intros')) || {};
   state.downloads = (await db.get('downloads')) || {};
-  for (const m of Object.values(state.downloads)) if (!m.done && !m.error) m.error = 'Interrupted';   // the app was closed mid-download
+  state.tvs = (await db.get('tvs').catch(() => null)) || {};
+  for (const m of Object.values(state.downloads)) if (!m.native && !m.done && !m.error) m.error = 'Interrupted';   // the app was closed mid-download
+  initNativeDownloads();
   scheduleReminders();
   Object.assign(syncMeta, meta);
   state.playlists = playlists.sort((a, b) => a.createdAt - b.createdAt);
@@ -131,8 +134,9 @@ async function init() {
   else if (location.hash.startsWith('#/guide') && state.current) ensureGuide(guideScope(state.current));
   if (resumeChannel) ensureGuide([resumeChannel]);
   syncNow();
+  widgetsReady();
   if (state.playlists.length) setTimeout(() => { if (!state.playing && $('#sheet').hidden) askAlerts(); }, 6000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); checkFollows(); keepFresh(); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); checkFollows(); keepFresh(); widgetFixtures(); } });
   setInterval(() => { if (!document.hidden) keepFresh(); }, 30 * MINUTE);   // open for a while: the guide and lists stay current
   setTimeout(() => { checkNewEpisodes(); checkFollows(); }, 20_000);   // after start-up, quietly
   // The saved guides load once the first screen is up and the remote is responsive, not during it.
@@ -232,12 +236,14 @@ async function syncNow() {
       if (d.sources) adoptSources(d.sources);
       if (d.reminders) await adoptReminders(d.reminders);
       if (d.follows) await adoptFollows(d.follows);
+      widgetSnapshot(); widgetFixtures();
       if (d.watchlater) {
         const before = JSON.stringify(watchLaterList(state.watchlater, state.progress).map(e => e.key));
         state.watchlater = adoptWatchLater(state.watchlater, d.watchlater);
         db.set('watchlater', state.watchlater).catch(() => {});
         if (JSON.stringify(watchLaterList(state.watchlater, state.progress).map(e => e.key)) !== before) changed = true;
       }
+      if (d.tvs && JSON.stringify(d.tvs) !== JSON.stringify(state.tvs)) { state.tvs = d.tvs; db.set('tvs', d.tvs).catch(() => {}); }
       Object.assign(syncMeta, { favAt: d.favAt || syncMeta.favAt, recReset: d.recReset || syncMeta.recReset });
       db.set('syncMeta', syncMeta).catch(() => {});
       // Never redraw Home under a playing channel or while you're typing; keep the scroll position.
@@ -250,6 +256,51 @@ async function syncNow() {
   return syncing;
 }
 const syncSoon = debounce(syncNow, 1500);
+
+// ---------- Play on TV ----------
+// The phone hands a title (and where you are in it) to the TV app through your server (js/handoff.js, server/sync.js).
+// The TV app checks every few seconds while it's open, so it can only answer when it's open: the copy says so.
+// Offered once a TV app has synced with your server.
+const canPlayOnTv = () => canSync() && hasTv(state.tvs);
+window.__tvReady = () => canPlayOnTv();
+const handoffName = () => isNative ? (/iPad/.test(navigator.userAgent) ? 'iPad' : 'iPhone') : isIOS ? 'iPhone' : 'computer';
+let handingOff = false;
+async function playOnTv(c, { t, d } = {}) {
+  if (!canSync()) return toast('Connect your server first');
+  if (handingOff) return;
+  const live = isLiveChannel(c);
+  if (!live && t == null) {   // from a details page: where you'd resume here (the same rule as Play)
+    const pr = state.progress[c.pkey || c.url];
+    t = pr && !pr.done && pr.t > 30 ? pr.t : 0; d = pr?.d || 0;
+  }
+  const e = handoffEntry(c, { t, d, from: handoffName() });
+  if (!e) return toast('This one can’t be sent to the TV');
+  handingOff = true;
+  // The provider allows one connection: the phone lets go of it first (the player, and a download in progress).
+  if (!live && c.kind !== 'catchup' && t > 0 && d >= 60) writeProgress(c, t, d);
+  if (state.playing && nowChannel()?.url === c.url) { if (isNative) nativeVlcClose().catch(() => {}); else stopPlaying(); }
+  const dl = activeNativeDl();
+  if (dl) await pauseNativeDl(dl, 'tv');
+  toast('Sending to your TV…', { busy: true });
+  try {
+    const res = await fetch(serverApi('sync'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ handoff: e, progress: state.progress }) });
+    if (!res.ok) throw new Error(`The server replied ${res.status}`);
+    // Wait (up to ~8 s) for the TV to say it has it.
+    let view = null;
+    for (let i = 0; i < 8; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      try { view = await (await fetch(`${serverApi('sync')}&handoff=1`, { cache: 'no-store' })).json(); } catch {}
+      if (view?.handoff?.id === e.id && view.handoff.taken) break;
+    }
+    const taken = view?.handoff?.id === e.id && view.handoff.taken;
+    const extra = dl ? ' · download paused' : '';
+    if (taken) toast(`Playing on ${taken === 'TV' ? 'your TV' : taken}${extra}`);
+    else if (openTvs(view).length) toast(`Sent to your TV. It starts in a moment${extra}`);
+    else toast('Open M3U Player on your TV: it starts if you open it within a minute', { action: 'OK', fn: () => {} });
+  } catch (err) {
+    toast(`Couldn’t reach your server: ${err.message || 'try again'}`);
+  } finally { handingOff = false; }
+}
 // Reminders are shared too (set one on the TV box and the phone alerts you as well): keyed by channel link + start
 // time, the same on every device; a removed one is sent as a { deleted } marker so the others drop it.
 function localReminders() {
@@ -413,6 +464,7 @@ async function enterServerKey() {
   await db.set('settings', state.settings);
   applySettings();
   toast('Connected to your server');
+  widgetConfig();
   syncNow();
   rerender();
 }
@@ -1421,7 +1473,7 @@ function showHome() {
       e.stopPropagation();
       const entry = cw[+x.dataset.cwX];
       // Hidden, not forgotten: the resume point stays, and playing it again brings it back. Syncs to your other devices.
-      if (entry) { state.progress[entry.item.url] = { ...state.progress[entry.item.url], hidden: true, at: Date.now() }; db.set('progress', state.progress).catch(() => {}); syncSoon(); }
+      if (entry) { state.progress[entry.item.url] = { ...state.progress[entry.item.url], hidden: true, at: Date.now() }; db.set('progress', state.progress).catch(() => {}); syncSoon(); widgetSnapshot(); }
       toast('Removed from Continue watching');
       // Take just this card out (no redraw: the other cards and their buttons stay exactly as they are).
       const card = x.closest('.cw'), row = card?.parentNode;
@@ -2211,6 +2263,11 @@ async function deleteDownload(meta) {
   await db.set('downloads', state.downloads);
 }
 function downloadMenu(item, { onCancel } = {}) {
+  if (isNative) {   // the iPhone app keeps the provider's own file (VLC plays anything): no choices to make
+    const have = dlFor(item.url);
+    if (have) { closeSheet(); location.hash = '#/downloads'; return; }
+    return startNativeDownload(item);
+  }
   const disk = !!window.showSaveFilePicker;   // Chrome/Edge on a computer: save straight to a file you choose
   const pick = (q, label) => ({ label, fn: () => (disk ? saveToDisk(item, q) : startDownload(item, q)) });
   menu(`${disk ? 'Save to disk' : 'Download'}: ${niceName(item)}`, [
@@ -2272,14 +2329,144 @@ async function playDiskFile(meta) {
     playChannel([{ id: meta.id, kind: meta.kind, name: meta.name, logo: meta.logo, group: meta.group, year: meta.year, url, pkey: meta.orig, offline: true, src: meta.src }], 0);
   } catch { toast('That file isn’t there any more (moved or deleted?)'); }
 }
-function refreshDownloadsUi() { if (location.hash === '#/downloads') showDownloads({ keep: true }); }
+// ---------- Offline downloads in the iPhone app ----------
+// The app downloads the provider's own file (Downloads.swift: a background download, carrying on with the app closed)
+// and plays it in its VLC player from the phone's storage. One at a time, and a download uses the provider's one
+// connection, so starting to watch something else asks first. Entries live in state.downloads with native: true.
+const dlFor = url => isNative && url ? Object.values(state.downloads).find(m => m.native && m.orig === url) : null;
+const activeNativeDl = () => isNative ? Object.values(state.downloads).find(m => m.native && m.nstate === 'downloading') : null;
+let dlSpace = null, dlWatcher = null, dlWatchAnyway = '';
+const dlPct = m => m.total > 0 ? Math.min(100, Math.floor((m.bytes / m.total) * 100)) : 0;
+// " · Downloaded" on an episode row (and the like): quiet, only when there is something to say.
+function dlNote(url) {
+  const m = dlFor(url);
+  if (!m) return '';
+  return m.done ? ' · Downloaded' : m.nstate === 'downloading' ? ` · Downloading ${dlPct(m)}%` : m.nstate === 'paused' ? ' · Download paused' : m.nstate === 'queued' ? ' · Download waiting' : '';
+}
+function dlButtonHtml(m) {
+  const d = dlFor(m.url);
+  const label = !d ? 'Download' : d.done ? 'Downloaded' : d.nstate === 'downloading' ? `${dlPct(d)}%` : d.nstate === 'paused' ? 'Paused' : d.nstate === 'failed' ? 'Stopped' : 'Waiting';
+  return `<button data-dl${d?.done ? ' class="dl-done"' : ''}>${icon(d?.done ? 'check' : 'download')}<span>${label}</span></button>`;
+}
+// One open page (a film's or a series' details) follows download progress: fn runs (at most twice a second) on changes.
+function dlWatch(url, fn, key = url) { dlWatcher = { url, fn, key, last: 0 }; }
+function fromNative(o) {
+  let meta = {};
+  try { meta = JSON.parse(o.meta || '{}'); } catch {}
+  const old = state.downloads[o.id] || {};
+  const m = { ...meta, ...old, id: o.id, native: true, nstate: o.state, bytes: o.bytes || 0, total: o.total || 0, path: o.path || '', done: o.state === 'done', error: o.state === 'failed' ? (o.error || 'Failed') : undefined, at: o.at || old.at || Date.now() };
+  if (m.nstate === 'downloading' && old.bytes != null && m.bytes > old.bytes) noteSpeed(m, m.bytes - old.bytes);
+  if (m.nstate !== 'downloading') { delete m.samples; m.speed = 0; }
+  if (m.nstate === 'downloading' || m.nstate === 'queued') delete m.pausedFor;
+  return m;
+}
+async function initNativeDownloads() {
+  if (!isNative) return;
+  for (const [k, m] of Object.entries(state.downloads)) if (m.native) delete state.downloads[k];
+  try {
+    const r = await nativeDl('list');
+    dlSpace = { used: r.used || 0, free: r.free || 0 };
+    for (const o of r.items || []) state.downloads[o.id] = fromNative(o);
+  } catch {}
+  refreshDownloadsUi();
+}
+window.__downloads = o => {
+  if (!o?.id) return;
+  const before = state.downloads[o.id];
+  const m = state.downloads[o.id] = fromNative(o);
+  if (m.done && before && !before.done) { toast(`Downloaded: ${niceName(m)}`, { action: 'View', fn: () => { location.hash = '#/downloads'; } }); db.set('downloads', state.downloads).catch(() => {}); }
+  if (m.nstate === 'failed' && before?.nstate !== 'failed') toast(`Download stopped: ${m.error}`);
+  refreshDownloadsUi();
+  const w = dlWatcher;
+  const changed = before?.nstate !== m.nstate;
+  if (w && (!w.url || w.url === m.orig) && (changed || Date.now() - w.last > 500) && $('#sheet') && !$('#sheet').hidden) { w.last = Date.now(); w.fn(m, changed); }
+};
+async function startNativeDownload(item) {
+  if (!/^https?:/i.test(item.url || '')) return toast('This one can’t be downloaded');
+  if (dlFor(item.url)) { location.hash = '#/downloads'; return; }
+  const id = `dl-${uid()}`;
+  const ext = ((/\.(mkv|mp4|m4v|avi|mov|ts|webm)(\?|$)/i.exec(item.url) || [])[1] || 'mp4').toLowerCase();
+  const meta = { id, name: item.name, logo: item.logo || '', group: item.group || '', year: item.year || '', kind: item.kind === 'episode' ? 'episode' : 'movie', orig: item.url, src: item.src, season: item.season, num: item.num, at: Date.now() };
+  try {
+    await nativeDl('start', { id, url: item.url, ext, headers: headersFromOpts(item.opts), meta: JSON.stringify(meta) });
+  } catch (e) { return toast(e.message || 'Couldn’t start the download'); }
+  state.downloads[id] ||= { ...meta, native: true, nstate: 'queued', bytes: 0, total: 0, done: false };
+  const busy = Object.values(state.downloads).some(m => m.native && m.id !== id && (m.nstate === 'downloading' || m.nstate === 'queued'));
+  toast(busy ? `Added to downloads: ${niceName(item)} (one at a time)` : `Downloading ${niceName(item)}`, { action: 'View', fn: () => { location.hash = '#/downloads'; } });
+}
+async function pauseNativeDl(m, why = '') {
+  m.pausedFor = why;
+  await nativeDl('pause', { id: m.id }).catch(() => {});
+  m.nstate = 'paused';
+  refreshDownloadsUi();
+}
+async function resumeNativeDl(m) {
+  delete m.pausedFor;
+  await nativeDl('resume', { id: m.id }).catch(() => {});
+}
+// Watching uses the provider's connection too: with a download running, ask first (once per download).
+function askAboutDownload(go) {
+  const m = activeNativeDl();
+  if (!m || dlWatchAnyway === m.id) return go();
+  menu('Downloading uses your connection — pause the download to watch?', [
+    { label: 'Pause download and watch', fn: async () => { await pauseNativeDl(m, 'watch'); go(); } },
+    { label: 'Watch anyway (both may stutter)', fn: () => { dlWatchAnyway = m.id; go(); } },
+  ]);
+}
+// Done watching: a download paused for it carries on by itself.
+function resumeDownloadsAfterWatching() {
+  const m = Object.values(state.downloads).find(x => x.native && x.nstate === 'paused' && x.pausedFor === 'watch');
+  if (m) { resumeNativeDl(m); toast(`Download resumed: ${niceName(m)}`); }
+}
+// A title that's on the phone plays from there (no connection needed), keeping its place in the list.
+function localCopy(c) {
+  const m = !c.offline && dlFor(c.url);
+  return m?.done && m.path ? { ...c, url: m.path, pkey: c.url, offline: true, nativeFile: true } : null;
+}
+function playOfflineNative(m) {
+  playChannel([{ id: m.id, kind: m.kind, name: m.name, logo: m.logo, group: m.group, year: m.year, season: m.season, num: m.num, url: m.path, pkey: m.orig, offline: true, nativeFile: true, src: m.src }], 0);
+}
+function nativeDlRow(m) {
+  const pct = dlPct(m);
+  const eta = m.total && m.speed ? (m.total - m.bytes) / m.speed : NaN;
+  const of = m.total ? `${fmtBytes(m.bytes)} of ${fmtBytes(m.total)}` : fmtBytes(m.bytes);
+  const line = m.done ? `${fmtBytes(m.total || m.bytes)} · on this iPhone`
+    : m.nstate === 'downloading' ? `<b>${pct}%</b> · ${of}${m.speed ? ` · ${fmtSpeed(m.speed)}` : ''}${fmtEta(eta) ? ` · ${fmtEta(eta)} left` : ''}`
+    : m.nstate === 'queued' ? 'Waiting · one download at a time'
+    : m.nstate === 'paused' ? `${m.pausedFor === 'watch' ? 'Paused while you watch' : m.pausedFor === 'tv' ? 'Paused while the TV plays' : 'Paused'}${m.bytes ? ` · ${of}` : ''}`
+    : `Stopped: ${esc(m.error || 'failed')}`;
+  const btn = m.done ? `<button class="btn primary small" data-act="play">${icon('play')} Play</button>`
+    : m.nstate === 'downloading' || m.nstate === 'queued' ? `<button class="btn small" data-act="pause">${icon('pause')} Pause</button>`
+    : `<button class="btn small" data-act="resume">${icon('download')} Resume</button>`;
+  return `<li class="card dl" data-dl="${m.id}">
+      <span class="hs-poster">${m.logo ? `<img src="${esc(m.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
+      <span class="card-text"><span class="card-title">${esc(niceName(m))}</span>
+        <span class="muted">${line}</span>
+        ${!m.done && m.nstate !== 'failed' ? `<span class="bar dl-bar">${m.total ? `<i style="width:${pct}%"></i>` : m.nstate === 'downloading' ? '<i class="indeterminate"></i>' : ''}</span>` : ''}</span>
+      ${btn}
+      <button class="icon-btn" data-act="delete" aria-label="Delete">${icon('close')}</button>
+    </li>`;
+}
+let dlUiAt = 0, dlUiTimer;
+function refreshDownloadsUi() {
+  if (isNative) {   // native progress arrives twice a second: redraw at most that often, never mid-scroll jank
+    const wait = 500 - (Date.now() - dlUiAt);
+    if (wait > 0) { clearTimeout(dlUiTimer); dlUiTimer = setTimeout(refreshDownloadsUi, wait); return; }
+    dlUiAt = Date.now();
+  }
+  refreshDownloadsUiNow();
+}
+function refreshDownloadsUiNow() { if (location.hash === '#/downloads') showDownloads({ keep: true }); }
 setInterval(() => { if (dlActive && location.hash === '#/downloads') showDownloads({ keep: true }); }, 1000);
 let spaceLine = '';
 async function showDownloads({ keep = false } = {}) {
   state.current = null;
   setTopbar({ title: 'Downloads', back: '#/' });
   const list = Object.values(state.downloads).sort((a, b) => b.at - a.at);
-  if (!keep || !spaceLine) { try { const e = await navigator.storage?.estimate?.(); if (e?.quota) spaceLine = `${fmtBytes(e.usage || 0)} used of ${fmtBytes(e.quota)} available on this device`; } catch {} }
+  if (isNative) {
+    if (!keep) { try { const r = await nativeDl('list'); dlSpace = { used: r.used || 0, free: r.free || 0 }; } catch {} }
+    spaceLine = dlSpace ? `Downloads use ${fmtBytes(dlSpace.used)} · ${fmtBytes(dlSpace.free)} free on this iPhone` : '';
+  } else if (!keep || !spaceLine) { try { const e = await navigator.storage?.estimate?.(); if (e?.quota) spaceLine = `${fmtBytes(e.usage || 0)} used of ${fmtBytes(e.quota)} available on this device`; } catch {} }
   const space = spaceLine;
   const y = scrollY;
   const detail = m => {
@@ -2298,7 +2485,7 @@ async function showDownloads({ keep = false } = {}) {
   };
   view.innerHTML = `
     <p class="muted">${esc(space || 'Downloaded titles play without a connection.')}${window.showSaveFilePicker ? ' On this computer, downloads go straight to a file you choose.' : ''}</p>
-    ${list.length ? `<ul class="cards">${list.map(m => `<li class="card dl" data-dl="${m.id}">
+    ${list.length ? `<ul class="cards">${list.map(m => m.native ? nativeDlRow(m) : `<li class="card dl" data-dl="${m.id}">
       <span class="hs-poster">${m.logo ? `<img src="${esc(m.logo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
       <span class="card-text"><span class="card-title">${esc(niceName(m))}</span>
         ${m.done ? `<span class="muted">${m.disk ? `On disk: ${esc(m.file)} · ` : ''}${fmtBytes(m.bytes)} · ${m.q === 'file' ? 'Exact original' : m.q === 'orig' ? 'Original' : m.q + 'p'}${m.duration ? ` · ${fmtDur(m.duration)}` : ''}${m.startedAt && m.finishedAt ? ` · took ${fmtEta((m.finishedAt - m.startedAt) / 1000)}` : ''}</span>`
@@ -2307,13 +2494,25 @@ async function showDownloads({ keep = false } = {}) {
       ${m.done ? `<button class="btn primary small" data-act="play">${icon('play')} Play</button>` : m.error ? '<button class="btn small" data-act="retry">Retry</button>' : '<button class="btn small" data-act="cancel">Cancel</button>'}
       <button class="icon-btn" data-act="delete" aria-label="Delete">${icon('close')}</button>
     </li>`).join('')}</ul>`
-    : `<div class="empty">${icon('film', 'big')}<p><b>No downloads yet</b></p><p class="muted">Open a film or episode and choose Download. Keep the app open while it downloads.</p></div>`}`;
+    : `<div class="empty">${icon('film', 'big')}<p><b>No downloads yet</b></p><p class="muted">Open a film or episode and choose Download.${isNative ? ' It carries on with the app closed.' : ' Keep the app open while it downloads.'}</p></div>`}`;
   if (keep) scrollTo(0, y);
   view.onclick = async e => {
     const li = e.target.closest('[data-dl]'), act = e.target.closest('[data-act]')?.dataset.act;
     if (!li) return;
     const m = state.downloads[li.dataset.dl];
     if (!m) return;
+    if (m.native) {
+      if (act === 'play' || (!act && m.done)) return playOfflineNative(m);
+      if (act === 'pause') return pauseNativeDl(m);
+      if (act === 'resume') return resumeNativeDl(m);
+      if (act === 'delete') {
+        if (!await confirmDialog(m.done ? `Delete “${niceName(m)}” from this iPhone?` : `Stop and delete the download of “${niceName(m)}”?`, 'Delete', true)) return;
+        await nativeDl('remove', { id: m.id }).catch(() => {});
+        delete state.downloads[m.id]; db.set('downloads', state.downloads).catch(() => {});
+        return showDownloads();
+      }
+      return;
+    }
     if (act === 'play' || (!act && m.done)) return playOffline(m);
     if (act === 'cancel' && dlActive?.id === m.id) return dlActive.ctrl.abort();
     if (act === 'retry') { if (dlActive) return toast('One download at a time'); m.bytes = 0; m.parts = 0; runDownload(m); return showDownloads(); }
@@ -2755,6 +2954,7 @@ function channelMenu(c) {
   const hasGuide = isLiveChannel(c) && guideFor(c)?.list(c).length;
   menu(c.name, [
     !fromPlayer && { label: 'Play', fn: () => { const i = state.filtered.indexOf(c); playChannel(i >= 0 ? state.filtered : [c], Math.max(i, 0)); } },
+    canPlayOnTv() && { label: 'Play on TV', fn: () => playOnTv(c) },
     hasGuide && { label: archiveDays(c) ? 'TV guide & catch-up' : 'TV guide', fn: () => scheduleSheet(c) },
     { label: favUrls.has(c.url) ? 'Remove from Favorites' : 'Add to Favorites', fn: () => toggleFavorite(c, null).then(highlightStars) },
     isLiveChannel(c) && !isTV && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
@@ -2920,7 +3120,8 @@ function detailHtml(m, info = {}) {
     <div class="film-tools">
       <button data-fav>${icon('star', favUrls.has(m.url) ? 'on' : '')}<span>${favUrls.has(m.url) ? 'Saved' : 'Save'}</span></button>
       ${wlButton(m)}
-      ${canSync() && !m.offline ? `<button data-dl>${icon('download')}<span>Download</span></button>` : ''}
+      ${canPlayOnTv() && !m.offline ? `<button data-tv>${icon('tv')}<span>Play on TV</span></button>` : ''}
+      ${(isNative || canSync()) && !m.offline ? dlButtonHtml(m) : ''}
       ${i.youtube_trailer ? `<button data-trailer>${icon('film')}<span>Trailer</span></button>` : ''}
       <button data-more>${icon('more')}<span>More</span></button>
     </div>
@@ -3022,6 +3223,9 @@ async function movieSheet(m) {
       el.querySelector('[data-fav]').onclick = async () => { await toggleFavorite(m, null); open(true); };
       el.querySelector('[data-wl]')?.addEventListener('click', async () => { await toggleWatchLater(m); open(true); });
       el.querySelector('[data-dl]')?.addEventListener('click', () => downloadMenu(m, { onCancel: () => open() }));
+      el.querySelector('[data-tv]')?.addEventListener('click', () => { closeSheet(); playOnTv(m); });
+      // Progress updates the Download button in place (redrawing the sheet would swallow taps mid-update).
+      dlWatch(m.url, () => { const b = still() && $('#sheet [data-dl]'); if (b) { const t = document.createElement('div'); t.innerHTML = dlButtonHtml(m); const n = t.firstElementChild; b.className = n.className; b.innerHTML = n.innerHTML; } });
       el.querySelector('[data-trailer]')?.addEventListener('click', () => { const k = withTmdb(info.info || {}, info.tmdb).youtube_trailer; if (k) window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(k)}`, '_blank'); });
       el.querySelector('[data-more]').onclick = () => menu(niceName(m), externalItems(m), { onCancel: () => open() });
       el.querySelectorAll('[data-plot]').forEach(p => p.addEventListener('click', () => p.classList.toggle('open')));
@@ -3120,7 +3324,8 @@ async function seriesSheet(s, { play = false } = {}) {
         const still = e.logo && e.logo !== s.logo && e.logo !== i.cover ? e.logo : '';
         return `<li class="epc${pr?.done ? ' done' : ''}" data-e="${k}">
           <span class="ep-still" data-initials="${esc(e.num)}">${still ? `<img src="${esc(still)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}${pr && !pr.done && pr.t > 30 ? `<span class="bar"><i style="width:${Math.min(100, (pr.t / pr.d) * 100).toFixed(1)}%"></i></span>` : ''}<span class="ep-play">${pr?.done ? icon('check') : icon('play')}</span></span>
-          <span class="row-text"><span class="muted ep-label">Episode ${esc(e.num)}${e.duration ? ` · ${esc(niceRuntime(e.duration))}` : ''}${pr?.done ? ' · Watched' : pr?.t > 30 ? ` · ${fmtDur(pr.d - pr.t)} left` : ''}</span><span class="row-name">${esc(epTitle(e.name) || `Episode ${e.num}`)}</span>${e.plot ? `<span class="muted clamp">${esc(e.plot)}</span>` : ''}</span>
+          <span class="row-text"><span class="muted ep-label">Episode ${esc(e.num)}${e.duration ? ` · ${esc(niceRuntime(e.duration))}` : ''}${pr?.done ? ' · Watched' : pr?.t > 30 ? ` · ${fmtDur(pr.d - pr.t)} left` : ''}${dlNote(e.url)}</span><span class="row-name">${esc(epTitle(e.name) || `Episode ${e.num}`)}</span>${e.plot ? `<span class="muted clamp">${esc(e.plot)}</span>` : ''}</span>
+          ${isNative || canPlayOnTv() ? `<button class="icon-btn ep-more" data-emore="${k}" aria-label="More for episode ${esc(e.num)}">${icon('more')}</button>` : ''}
         </li>`;
       }).join('')}</ul>` : '<p class="muted">No episodes listed.</p>'}
     </div>`, {
@@ -3134,6 +3339,8 @@ async function seriesSheet(s, { play = false } = {}) {
           if (e.target.closest('[data-trailer]')) return window.open(`https://www.youtube.com/watch?v=${encodeURIComponent(i.youtube_trailer)}`, '_blank');
           if (e.target.closest('[data-sfav]')) { toggleFavorite({ ...s, url: s.url || s.id }, null).then(() => render(true)); return; }
           if (e.target.closest('[data-wl]')) { toggleWatchLater(s).then(() => render(true)); return; }
+          const em = e.target.closest('[data-emore]');
+          if (em) { const k = +em.dataset.emore, x = list[k]; return episodeMenu(x, list, k, { onCancel: () => render(true) }); }
           const ep = e.target.closest('[data-e]');
           if (ep) { closeSheet(); playChannel(list, +ep.dataset.e); }
         };
@@ -3141,6 +3348,18 @@ async function seriesSheet(s, { play = false } = {}) {
     });
   };
   render();
+  dlWatch(null, (m, changed) => { if (changed && $('#sheet .detail')?.dataset.id === s.id) render(true); }, s.id);   // redrawn only when a download starts / pauses / finishes
+}
+// An episode's own actions (the ⋯ on its row): play, play on the TV, download.
+function episodeMenu(x, list, k, { onCancel } = {}) {
+  const dl = dlFor(x.url);
+  menu(epTitle(x.name) || x.name, [
+    { label: 'Play', fn: () => playChannel(list, k) },
+    canPlayOnTv() && { label: 'Play on TV', fn: () => playOnTv(x) },
+    isNative && !dl && { label: 'Download', fn: () => startNativeDownload(x) },
+    isNative && dl && { label: dl.done ? 'Downloaded · open Downloads' : 'Downloading · open Downloads', fn: () => { location.hash = '#/downloads'; } },
+    !isNative && canSync() && { label: 'Download for offline…', fn: () => downloadMenu(x, { onCancel }) },
+  ], { onCancel });
 }
 
 // ---------- TV guide ----------
@@ -3500,6 +3719,7 @@ async function toggleFollow(q) {
   if (isFollowing(q)) { state.follows = state.follows.filter(f => f.q.toLowerCase() !== k); (syncMeta.followDel ||= {})[k] = Date.now(); toast(`Stopped following ${q}`); }
   else { if (syncMeta.followDel) delete syncMeta.followDel[k]; state.follows.push({ q: q.trim(), at: Date.now() }); toast(`Following ${q}`); }
   await db.set('follows', state.follows);
+  widgetSnapshot();
   db.set('syncMeta', syncMeta).catch(() => {}); syncSoon();
 }
 let followsAt = 0;
@@ -3688,7 +3908,7 @@ async function loadFixtures(force = false) {
       if (d.fixtures.length || !fxHub.list) fxHub.list = d.fixtures;
       fxHub.ok = !!fxHub.list.length || Object.values(d.sources || {}).some(s => s.ok);
     } catch { if (!fxHub.list) fxHub.ok = false; }
-  })().finally(() => { fxHub.loading = null; renderSportsSoon(); });
+  })().finally(() => { fxHub.loading = null; renderSportsSoon(); widgetSnapshot(); });
   return fxHub.loading;
 }
 
@@ -3752,7 +3972,7 @@ async function loadFixtureChannels(force = false) {
     };
     for (const l of on.values()) l.sort((a, b) => score(b) - score(a) || (isUkChannel(b.channel) - isUkChannel(a.channel)) || sportsPrefer(b.channel) - sportsPrefer(a.channel));
     fxHub.on = on; fxHub.chAt = Date.now();
-  })().finally(() => { fxHub.chLoading = null; renderSportsSoon(); repaintSportsBells(); });
+  })().finally(() => { fxHub.chLoading = null; renderSportsSoon(); repaintSportsBells(); widgetSnapshot(); });
   return fxHub.chLoading;
 }
 
@@ -4975,6 +5195,71 @@ async function backgroundRefresh() {
   }
 }
 
+// ---------- Widgets (iPhone) ----------
+// The Home Screen / Lock Screen widgets and the live-score Live Activity live outside the page (ios/App/M3UWidgets).
+// They ask your server themselves (address + key, handed over here), and take from the app what only it knows: tidy
+// titles and backdrops for Continue watching, which fixtures are your teams' (followMatches knows the aliases) and
+// the channel showing each. Tapping a widget opens the app on a link (m3uplayer://…) handled by __widgetLink.
+
+// FNV-1a over the UTF-8 bytes, hex: names a Continue watching item in a link without putting its stream URL there.
+// Same function as M3UShared.hash in Swift.
+const fnv = s => { let h = 0x811c9dc5; for (const b of new TextEncoder().encode(s)) h = Math.imul(h ^ b, 0x01000193) >>> 0; return h.toString(16); };
+const widgetCall = (method, opts) => (isNative ? globalThis.Capacitor.nativePromise('Widgets', method, opts).catch(() => {}) : Promise.resolve());
+let widgetsOn = false;
+
+function widgetConfig() {
+  const base = canSync() ? serverProxy.base.replace(/proxy$/, '') : '';
+  return widgetCall('configure', { base, key: base ? state.settings.serverKey || '' : '' });
+}
+
+const widgetSnapshot = debounce(() => {
+  if (!isNative || !widgetsOn) return;
+  const follows = (state.follows || []).map(f => f.q);
+  const now = Date.now();
+  const games = follows.length ? (fxHub.list || []).filter(f => f.status !== 'postponed' && f.end > now - 3 * HOUR && follows.some(q => followMatches(q, f))) : [];
+  const channels = {};
+  for (const f of games) { const c = fxHub.on.get(f.id)?.[0]?.channel; if (c) channels[f.id] = c.name; }
+  const cw = continueWatching().filter(e => e.item.kind === 'movie' || e.item.kind === 'episode').slice(0, 6).map(e => {
+    const m = vodMeta(e.item.name), bd = cwBackdrop(e.item);
+    return { k: fnv(e.item.url), url: e.item.url, name: displayTitle(e.item.name), ...(m.episode != null ? { sub: `S${m.season || 1} E${m.episode}` } : {}),
+      art: bd || e.item.logo || '', poster: !bd, t: e.t, d: e.d, at: e.at };
+  });
+  widgetCall('snapshot', { json: JSON.stringify({ at: now, follows, followed: games.map(f => f.id), channels, cw, liveActivities: state.settings.liveActivities !== false }) });
+}, 1500);
+
+// Your teams' fixtures (and their channels), so the widgets and live scores know them without a visit to Sports.
+function widgetFixtures() {
+  if (!isNative || !widgetsOn || !(state.follows || []).length) return;
+  Promise.resolve(loadFixtures()).then(() => loadFixtureChannels()).catch(() => {});
+}
+
+async function widgetsReady() {
+  if (!isNative) return;
+  widgetsOn = true;
+  state.follows ||= (await db.get('follows').catch(() => null)) || [];
+  await widgetConfig();
+  widgetSnapshot();
+  widgetFixtures();
+}
+
+// A widget or the Live Activity was tapped (the app opened from it, or was already running).
+globalThis.__widgetLink = async () => {
+  if (!isNative || !widgetsOn) return;   // still starting: the native side asks again shortly
+  let l;
+  try { l = await globalThis.Capacitor.nativePromise('Widgets', 'takeLink', {}); } catch { return; }
+  if (!l?.kind) return;
+  closeSheet();
+  if (l.kind === 'resume' && l.k) {
+    const find = () => Object.values(state.progress).find(e => e.item?.url && fnv(e.item.url) === l.k);
+    let e = find();
+    if (!e) { await syncNow(); e = find(); }   // watched on another device and not synced here yet
+    if (e) return playChannel([e.item], 0);
+    location.hash = '#/';
+    return;
+  }
+  location.hash = l.kind === 'sports' ? '#/sports' : '#/';
+};
+
 // ---------- settings, backup ----------
 async function settingsSheet() {
   const s = state.settings;
@@ -4988,7 +5273,8 @@ async function settingsSheet() {
     <form class="form" id="settings">
       ${isNative ? `<div class="section-title">Connection</div>
       <p class="muted">The iPhone app plays streams directly from your provider. Your server adds the TV guide, sync with your other devices, movies &amp; series and downloads${state.settings.serverUrl ? ` (connected: ${esc(state.settings.serverUrl)})` : ''}.</p>
-      <button type="button" class="btn" id="server-key-2">${state.settings.serverUrl ? 'Change server' : 'Connect your server'}</button>` : `<div class="section-title">Proxy</div>
+      <button type="button" class="btn" id="server-key-2">${state.settings.serverUrl ? 'Change server' : 'Connect your server'}</button>
+      <label class="switch"><span><b>Live scores on the Lock Screen</b><span class="muted">When a team you follow is playing, its score shows on the Lock Screen and in the Dynamic Island. It updates while the app is open or playing, and says when it last did.</span></span><input type="checkbox" name="liveActivities" ${s.liveActivities !== false ? 'checked' : ''}></label>` : `<div class="section-title">Proxy</div>
       ${serverProxy.available
         ? `<p class="muted">Your server’s built-in proxy is ${serverProxy.needsKey ? '<b>waiting for its key</b>' : 'active'}. Leave the address below empty to use it.</p>
            <button type="button" class="btn" id="server-key-2">${serverProxy.needsKey ? 'Enter server key' : 'Change server key'}</button>`
@@ -5047,7 +5333,9 @@ async function settingsSheet() {
           ...(isNative ? {} : { tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto') }), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'), prefer4k: f.get('prefer4k') === 'on', livePlayer: String(f.get('livePlayer') || state.settings.livePlayer || 'app'),
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
           showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on',
+          ...(isNative ? { liveActivities: f.get('liveActivities') === 'on' } : {}),
         });
+        widgetSnapshot();
         if (mergeWas !== state.settings.mergeDupes) state.playlists.forEach(invalidate);
         if (langWas !== state.settings.vodLanguage) vodCache.clear();   // rebuilt with the new language filter on next view
         applySettings();
@@ -5326,6 +5614,7 @@ function writeProgress(c, t, d) {
   const entries = Object.entries(state.progress);
   if (entries.length > MAX_PROGRESS) state.progress = Object.fromEntries(entries.sort((a, b) => b[1].at - a[1].at).slice(0, MAX_PROGRESS));
   db.set('progress', state.progress).catch(() => {});
+  widgetSnapshot();
   syncLater();
 }
 
@@ -5467,6 +5756,7 @@ function playerMenu() {
     { label: 'Picture in Picture', fn: () => player.togglePip().catch(e => toast(e.message)) },
     !isLiveChannel(c) && !c.offline && canSync() && { label: 'Download for offline…', fn: () => downloadMenu(c) },
     isNative && { label: 'Play in iPhone player (full screen)', fn: () => openNativePlayer(c) },
+    canPlayOnTv() && { label: 'Play on TV', fn: () => playOnTv(c, isLiveChannel(c) ? {} : { t: video.currentTime || 0, d: Number.isFinite(video.duration) ? video.duration : 0 }) },
     isLiveChannel(c) && !isTV && { label: 'Watch in Multi-view', fn: () => addToMulti(c) },
     { label: favUrls.has(c.url) ? 'Remove from Favorites' : 'Add to Favorites', fn: () => toggleFavorite(c, null).then(highlightStars) },
     ...externalItems(c),
@@ -5522,7 +5812,7 @@ addEventListener('unhandledrejection', e => report('promise', e.reason?.message 
 function playNative(list, index, c) {
   state.playing = { list, index };
   highlightPlaying();
-  addRecent(c);
+  if (!c.offline) addRecent(c);   // (a file on the phone: its link means nothing to your other devices)
   const live = isLiveChannel(c);
   const g = live && guideFor(c), nn = g && g.nowNext(c), now = nn && nn.now;
   if (live) ensureGuide([c]);
@@ -5591,12 +5881,13 @@ window.__playerCatchup = (start, end) => {
 window.__nativePlayer = ev => {
   const pl = state.playing, c = pl && pl.list[pl.index];
   if (!ev || !c) return;
+  if (ev.type === 'handoff') { playOnTv(c, isLiveChannel(c) ? {} : { t: ev.t || 0, d: ev.d || 0 }); return; }
   if (ev.type === 'step') { const i = pl.index + ev.dir; if (i >= 0 && i < pl.list.length) playChannel(pl.list, i); }
   if (ev.type === 'jump' && ev.index >= 0 && ev.index < pl.list.length && ev.index !== pl.index) playChannel(pl.list, ev.index);
   if ((ev.type === 'progress' || ev.type === 'closed') && !isLiveChannel(c) && c.kind !== 'catchup' && ev.d >= 60) writeProgress(c, ev.t, ev.d);
   // 'ended' / credits: the player shows its own next-episode card, counts down and then asks for the next one (a 'step'),
   // after a 'progress' at the full length so the finished episode counts as watched.
-  if (ev.type === 'closed') { state.playing = null; highlightPlaying(); if (!state.current) rerender(); }
+  if (ev.type === 'closed') { state.playing = null; highlightPlaying(); if (!state.current) rerender(); resumeDownloadsAfterWatching(); }
   if (ev.type === 'error') report('native-play', `${ev.message}: ${c.name}`, isLiveChannel(c) ? 'live' : c.kind);
 };
 
@@ -5643,7 +5934,12 @@ function playChannel(list, index) {
     c = list[index] = { ...up, name: c.name, logo: c.logo || up.logo, group: c.group, num: c.num, src: c.src, _fromUhd: true, alts: [c.url, ...(c.alts || [])] };
     toast('Playing the 4K version');
   }
-  if ((isNative || isTV) && !c.offline) return playNative(list, index, c);   // iPhone: VLC player; Shield: ExoPlayer
+  if (isNative && !c.offline) {
+    const local = localCopy(c);
+    if (local) { list = list.slice(); c = list[index] = local; }
+    else if (activeNativeDl() && !list._dlAsked) { const l = list.slice(); l._dlAsked = true; return askAboutDownload(() => playChannel(l, index)); }
+  }
+  if ((isNative || isTV) && (!c.offline || c.nativeFile)) return playNative(list, index, c);   // iPhone: VLC player; Shield: ExoPlayer
   // "Play films & series in VLC / Infuse / IINA": hand the provider's link straight to that app.
   const choice = isLiveChannel(c) ? state.settings.livePlayer : state.settings.vodPlayer;
   if (!c.offline && choice && choice !== 'app' && !/^blob:/.test(c.url)) {

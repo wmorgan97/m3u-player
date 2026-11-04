@@ -31,6 +31,21 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.wmorgan97.m3uplayer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>m3uplayer</string>
+			</array>
+		</dict>
+	</array>
+	<key>M3UKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)com.wmorgan97.m3uplayer.shared</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
