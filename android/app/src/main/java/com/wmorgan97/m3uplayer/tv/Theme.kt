@@ -239,6 +239,18 @@ fun premiumQuality(q: String) = q == "4K" || q == "HDR" || q == "Dolby Vision" |
 @Composable
 fun QualityTag(q: String) = if (premiumQuality(q)) Tag(q, color = Tv.text, bg = Tv.accentDeep) else Tag(q)
 
+/** Outside ratings beside the TMDB star, the one way everywhere (spotlight, details): a single quiet tag,
+ *  "IMDb 8.8 · RT 87%" (Metacritic only when Rotten Tomatoes has no score). Nothing when OMDb isn't set up. */
+fun outsideRatings(r: org.json.JSONObject?): String? {
+    if (r == null) return null
+    val imdb = r.optDouble("imdb").takeIf { !it.isNaN() && it > 0 }?.let { "IMDb %.1f".format(it) }
+    val rt = if (r.has("rt")) "RT ${r.optInt("rt")}%" else null
+    val mc = if (rt == null) r.optInt("mc").takeIf { it > 0 }?.let { "MC $it" } else null
+    return listOfNotNull(imdb, rt, mc).joinToString("  ·  ").ifEmpty { null }
+}
+@Composable
+fun RatingsTag(r: org.json.JSONObject?) { outsideRatings(r)?.let { Tag(it) } }
+
 /** A row under the spotlight: its title (and a quiet note, e.g. "from TMDB" on the Top 10s, or a count), then its cards. */
 @Composable
 fun SpotRow(title: String, modifier: Modifier = Modifier, extra: String? = null, count: Int? = null, content: @Composable () -> Unit) {

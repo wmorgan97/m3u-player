@@ -6,17 +6,24 @@
 //   GET  /tmdb/info?key=..&kind=movie|tv&name=..&year=.. -> details for one title (cached for two weeks)
 //   GET  /tmdb/episodes?key=..&name=..&year=..&season=N  -> { episodes: [{ n, title, plot, still, runtime, air }] }
 //        (episode plots and stills for a season; cached a day while it's airing, two weeks once it's finished)
+//
+// /tmdb/info also carries the title's logo (a transparent title treatment, English, PNG), where it's streaming in the UK
+// ("Also on": TMDB's watch providers, data from JustWatch, which the apps credit) and its IMDb id (for OMDb ratings,
+// see extras.js, which also answers /tmdb/ratings, /tmdb/omdb-key and /tmdb/fanart-key).
 
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readBody } from './sync.js';
+import { handleExtras, extrasStatus, fanartLogo } from './extras.js';
 
 const PROXY_KEY = process.env.PROXY_KEY || '';
-const DIR = fileURLToPath(new URL('../data/', import.meta.url));
+const DIR = process.env.M3U_DATA_DIR || fileURLToPath(new URL('../data/', import.meta.url));
 const KEY_FILE = join(DIR, 'tmdb.json'), CACHE_FILE = join(DIR, 'tmdb-cache.json');
 const IMG = 'https://image.tmdb.org/t/p/';
 const INFO_TTL = 14 * 86400_000, LIST_TTL = 3 * 3600_000;
+const INFO_V = 2;   // bump when info() returns new fields: older cached entries are fetched again (once, on open)
+const REGION = 'GB';
 
 let apiKey = null;          // null = not read yet
 let onChange = () => {};
@@ -125,13 +132,40 @@ function saveSoon() {
   }, 5000);
   saveTimer.unref?.();
 }
+// The title logo: English, a PNG (an SVG only when there's nothing else; the TV can't draw those), wide rather than
+// stacked, the best voted. Original size: the image proxy shrinks it for each screen and keeps the transparency.
+export function pickLogo(logos) {
+  const ok = (logos || []).filter(l => l.iso_639_1 === 'en' && l.file_path && l.aspect_ratio >= 1.2);
+  const score = l => (/\.png$/i.test(l.file_path) ? 100 : 0) + (l.aspect_ratio >= 1.6 && l.aspect_ratio <= 9 ? 50 : 0) + (l.vote_average || 0) + Math.min(l.width || 0, 2000) / 1000;
+  const best = ok.sort((a, b) => score(b) - score(a))[0];
+  return best ? { logo: `${IMG}original${best.file_path}`, logoAspect: Math.round(best.aspect_ratio * 100) / 100 } : { logo: '', logoAspect: 0 };
+}
+// Where it's streaming in the UK: subscription services, then free / with-ads ones, one entry per service
+// ("Netflix Standard with Ads" is Netflix; add-on channels sold through another store are left out). At most four.
+const SHORT_NAMES = { 'amazon prime video': 'Prime Video', 'disney plus': 'Disney+', 'paramount plus': 'Paramount+', 'apple tv plus': 'Apple TV+', 'apple tv+': 'Apple TV+', 'now tv': 'NOW', 'sky go': 'Sky Go' };
+export function providersOf(wp) {
+  const r = wp?.results?.[REGION];
+  if (!r) return [];
+  const seen = new Set(), out = [];
+  const byPriority = l => [...(l || [])].sort((a, b) => (a.display_priority ?? 99) - (b.display_priority ?? 99));
+  for (const p of [...byPriority(r.flatrate), ...byPriority([...(r.free || []), ...(r.ads || [])])]) {
+    if (/\b(amazon|apple tv|roku premium) channel\b/i.test(p.provider_name || '')) continue;
+    const raw = String(p.provider_name || '').replace(/\s+(standard|basic)?\s*with ads$/i, '').trim();
+    const name = SHORT_NAMES[raw.toLowerCase()] || raw;
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    out.push({ name, logo: p.logo_path ? `${IMG}w92${p.logo_path}` : '' });
+  }
+  return out.slice(0, 4);
+}
+
 const norm = s => String(s || '').toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '');
 export async function info(kind, name, year) {
   if (!(await loadKey())) return null;
   const c = await loadCache();
   const ck = `${kind}|${norm(name)}|${year || ''}`;
   const hit = c.get(ck);
-  if (hit && Date.now() - hit.at < INFO_TTL) return hit.data;
+  if (hit && hit.v === INFO_V && Date.now() - hit.at < INFO_TTL) return hit.data;
   const search = await call(`/search/${kind}`, { query: name, language: 'en-US', include_adult: 'false', ...(year ? { [kind === 'movie' ? 'year' : 'first_air_date_year']: year } : {}) });
   let results = search.results || [];
   if (!results.length && year) results = (await call(`/search/${kind}`, { query: name, language: 'en-US', include_adult: 'false' })).results || [];
@@ -140,7 +174,7 @@ export async function info(kind, name, year) {
   const best = results.find(r => norm(r.title || r.name) === want) || [...results].sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0))[0];
   let data = null;
   if (best) {
-    const d = await call(`/${kind}/${best.id}`, { language: 'en-US', append_to_response: 'videos,credits' });
+    const d = await call(`/${kind}/${best.id}`, { language: 'en-US', append_to_response: 'videos,credits,images,external_ids,watch/providers', include_image_language: 'en,null' });
     const g = await genres(kind);
     const trailer = (d.videos?.results || []).find(v => v.site === 'YouTube' && v.type === 'Trailer') || (d.videos?.results || []).find(v => v.site === 'YouTube');
     data = { ...slim(d, kind, g),
@@ -151,9 +185,13 @@ export async function info(kind, name, year) {
       director: (d.credits?.crew || []).filter(p => p.job === 'Director').map(p => p.name).slice(0, 2).join(', '),
       trailer: trailer?.key || '',
       seasons: d.number_of_seasons || 0,
+      imdb: d.external_ids?.imdb_id || d.imdb_id || '',
+      providers: providersOf(d['watch/providers']),
+      ...pickLogo(d.images?.logos),
     };
+    if (!data.logo) { const f = await fanartLogo(kind, d.id, d.external_ids?.tvdb_id); if (f) Object.assign(data, { logo: f, logoAspect: 0 }); }
   }
-  c.set(ck, { at: Date.now(), data });
+  c.set(ck, { at: Date.now(), v: INFO_V, data });
   saveSoon();
   return data;
 }
@@ -184,7 +222,11 @@ export async function handleTmdb(req, res, url, send) {
   if (PROXY_KEY && url.searchParams.get('key') !== PROXY_KEY) return send(res, 403, 'Wrong or missing key');
   const json = (code, obj) => send(res, code, JSON.stringify(obj), { 'content-type': 'application/json', 'cache-control': 'no-store' });
   try {
-    if (url.pathname === '/tmdb/status') return json(200, { configured: await tmdbConfigured() });
+    if (url.pathname === '/tmdb/status') return json(200, { configured: await tmdbConfigured(), ...(await extrasStatus()) });
+    if (url.pathname === '/tmdb/ratings' || url.pathname === '/tmdb/omdb-key' || url.pathname === '/tmdb/fanart-key') {
+      const done = await handleExtras(req, url, json, readBody);
+      if (done !== null) return done;
+    }
     if (url.pathname === '/tmdb/key' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req, 4096) || '{}');
       const k = String(body.key || '').trim();

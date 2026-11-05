@@ -178,8 +178,10 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .05);
 }
 .logo::before { content: attr(data-initials); font-size: 14px; font-weight: 700; letter-spacing: .02em; color: hsl(var(--hue) 45% 84%); }
-.logo img { position: absolute; inset: 0; width: 100%; height: 100%; padding: 5px; object-fit: contain; background: transparent; }
+.logo img { position: absolute; inset: 0; width: 100%; height: 100%; padding: 12%; object-fit: contain; background: transparent; }
 .logo:has(img)::before { display: none; }   /* initials only when there's no logo (the img removes itself on error) */
+/* With a logo: the same calm dark plate behind every one (the matched logos are drawn for dark backgrounds). */
+.logo:has(img) { background: #1c1f26; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06); }
 .star { color: var(--muted); }
 .star.on { color: var(--star); }
 .star.on .ico { fill: currentColor; }

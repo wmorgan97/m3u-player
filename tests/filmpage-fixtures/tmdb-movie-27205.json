@@ -1,0 +1,30 @@
+{
+  "id": 27205, "title": "Inception", "release_date": "2010-07-15", "imdb_id": "tt1375666",
+  "overview": "Cobb, a skilled thief who commits corporate espionage by infiltrating the subconscious of his targets, is offered a chance to regain his old life.",
+  "backdrop_path": "/8ZTVqvKDQ8emSGUEMjsS4yHAwrp.jpg", "poster_path": "/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg",
+  "vote_average": 8.369, "vote_count": 37000, "runtime": 148, "tagline": "Your mind is the scene of the crime.",
+  "genres": [{ "id": 28, "name": "Action" }, { "id": 878, "name": "Science Fiction" }, { "id": 12, "name": "Adventure" }],
+  "videos": { "results": [{ "site": "YouTube", "type": "Trailer", "key": "YoHD9XEInc0" }] },
+  "credits": { "cast": [{ "name": "Leonardo DiCaprio" }, { "name": "Joseph Gordon-Levitt" }], "crew": [{ "job": "Director", "name": "Christopher Nolan" }] },
+  "images": { "logos": [
+    { "aspect_ratio": 1.0, "file_path": "/square-en.png", "iso_639_1": "en", "vote_average": 9, "width": 800 },
+    { "aspect_ratio": 4.2, "file_path": "/wide-en.svg", "iso_639_1": "en", "vote_average": 6, "width": 2000 },
+    { "aspect_ratio": 4.36, "file_path": "/wide-en.png", "iso_639_1": "en", "vote_average": 5.3, "width": 1500 },
+    { "aspect_ratio": 3.9, "file_path": "/wide-fr.png", "iso_639_1": "fr", "vote_average": 9, "width": 1500 }
+  ] },
+  "external_ids": { "imdb_id": "tt1375666", "tvdb_id": null },
+  "watch/providers": { "results": {
+    "US": { "flatrate": [{ "provider_name": "Max", "logo_path": "/max.jpg", "display_priority": 1 }] },
+    "GB": {
+      "link": "https://www.themoviedb.org/movie/27205-inception/watch?locale=GB",
+      "flatrate": [
+        { "provider_name": "Netflix", "logo_path": "/netflix.jpg", "display_priority": 2 },
+        { "provider_name": "Netflix Standard with Ads", "logo_path": "/netflix-ads.jpg", "display_priority": 30 },
+        { "provider_name": "Amazon Prime Video", "logo_path": "/prime.jpg", "display_priority": 5 },
+        { "provider_name": "Paramount Plus Amazon Channel", "logo_path": "/ppac.jpg", "display_priority": 9 }
+      ],
+      "ads": [{ "provider_name": "ITVX", "logo_path": "/itvx.jpg", "display_priority": 1 }],
+      "rent": [{ "provider_name": "Apple TV", "logo_path": "/apple.jpg", "display_priority": 3 }]
+    }
+  } }
+}

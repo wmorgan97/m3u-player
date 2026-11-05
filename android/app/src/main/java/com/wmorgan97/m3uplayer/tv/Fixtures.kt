@@ -24,13 +24,40 @@ data class FxTeam(val name: String, val short: String, val crest: String, val sc
     val label get() = if (name.length <= 16 || short.isBlank()) name else short
 }
 
-/** One fixture from the feed. Team sports have [home]/[away]; F1 sessions and UFC cards a [title] (and [session]). */
+/** A driver, player or fighter (F1, tennis, UFC): [flag] is a 3-letter country code; [sets] / [tb] a tennis score so far,
+ *  [pos] / [gap] a place in a race's running order, [record] a fighter's "17-4-0". */
+data class FxAth(val name: String, val short: String, val flag: String = "", val seed: Int? = null, val sets: List<String> = emptyList(), val tb: List<Int?> = emptyList(),
+                 val win: Boolean = false, val record: String = "", val pos: Int? = null, val gap: String = "") {
+    /** "Verstappen" from "M. Verstappen". */
+    val surname get() = short.ifBlank { name }.replace(Regex("""^[A-Z]\.\s+"""), "")
+}
+/** A tennis match ([round], [court]) or a UFC bout ([weight], [card]: "Main card" / "Prelims", [main]: the main event). */
+data class FxBout(val start: Long, val status: String, val a: FxAth, val b: FxAth, val round: String = "", val court: String = "", val detail: String = "",
+                  val weight: String = "", val card: String = "", val main: Boolean = false) {
+    fun has(q: String) = FixtureRules.namesPerson(q, a.name) || FixtureRules.namesPerson(q, b.name)
+}
+
+/** One fixture from the feed. Team sports have [home]/[away]; F1 sessions, tennis days and UFC cards a [title] (and
+ *  [session]): F1 its [order] (top 3, Race / Sprint) and [drivers]; a tennis day its order of play ([matches]); a UFC
+ *  card its [fights], main event first. */
 data class Fixture(
     val id: String, val sport: String, val comp: String, val compRank: Int, val start: Long, val end: Long, val status: String,
     val minute: String?, val home: FxTeam?, val away: FxTeam?, val title: String, val session: String, val venue: String, val round: String,
+    val country: String = "", val prelims: Long = 0L, val drivers: List<String> = emptyList(), val order: List<FxAth> = emptyList(),
+    val matches: List<FxBout> = emptyList(), val fights: List<FxBout> = emptyList(),
 ) {
-    /** Live now, or due on: started and not reported finished (feeds lag a minute or two). */
-    fun isOn(now: Long) = status == "live" || (status == "scheduled" && start <= now && now < end)
+    /** Live now, or due on: started and not reported finished (feeds lag a minute or two). Tennis: only a match in
+     *  progress (its later times are "not before" guesses). */
+    fun isOn(now: Long) = status == "live" || (status == "scheduled" && matches.isEmpty() && start <= now && now < end)
+    /** Still to come; a tennis day between matches (play resumes later today) too, though its first time has passed. */
+    fun upcoming(now: Long) = status == "scheduled" && (start > now || (matches.isNotEmpty() && end > now))
+    /** Everyone named in it (drivers, players, fighters), for follows. */
+    val people: List<String> get() = drivers.ifEmpty { order.map { it.name } } + matches.flatMap { listOf(it.a.name, it.b.name) } + fights.flatMap { listOf(it.a.name, it.b.name) }
+    /** The tennis match to show: the first on court, else the next, else the last played. */
+    val focusMatch: FxBout? get() = matches.firstOrNull { it.status == "live" } ?: matches.firstOrNull { it.status == "scheduled" } ?: matches.lastOrNull()
+    val mainEvent: FxBout? get() = fights.firstOrNull { it.main } ?: fights.firstOrNull()
+    /** F1, tennis or UFC: has more to show than a programme (the running order, order of play, fight card). */
+    val detailed get() = sport == "f1" || matches.isNotEmpty() || fights.isNotEmpty()
     /** "Arsenal v Chelsea", "São Paulo Grand Prix · Qualifying", "UFC 334: Gane v Hokit". */
     val label: String get() = if (home != null && away != null) "${home.short.ifBlank { home.name }} v ${away.short.ifBlank { away.name }}"
         else if (session.isNotBlank()) "$title · $session" else title
@@ -112,12 +139,28 @@ object FixtureRules {
 
     private val WOMEN = Regex("""\b(?:women|womens|ladies|wsl|w)\b""")
 
-    /** A follow ("Man Utd", "Spurs", "Chelsea Women", "F1") matches this fixture? Women's follows never match (the feed
-     *  has no women's games, so those stay with the guide search). F1 / UFC: the follow names the competition. */
+    /** 2026 teams, for following a team ("McLaren") rather than a driver (js/fixtures.js F1_TEAMS). */
+    val F1_TEAMS = setOf("red bull", "ferrari", "mercedes", "mclaren", "aston martin", "alpine", "williams", "racing bulls", "haas", "audi", "sauber", "cadillac")
+    /** A follow names this person? "Lewis Hamilton", or the surname alone (4+ letters): "Hamilton", "Martin Etcheverry". */
+    fun namesPerson(q: String, name: String): Boolean {
+        val k = foldName(q); val n = foldName(name)
+        if (k.isEmpty() || n.isEmpty()) return false
+        if (k == n) return true
+        val w = n.split(' ')
+        return k.length >= 4 && w.size > 1 && (k == w.drop(1).joinToString(" ") || k == w.last())
+    }
+
+    /** A follow ("Man Utd", "Spurs", "Chelsea Women", "F1", "Hamilton", "Alcaraz") matches this fixture? Women's follows
+     *  never match (the feed has no women's games, so those stay with the guide search). F1 / tennis / UFC: the follow
+     *  names the sport, a driver or F1 team, a player or a fighter. */
     fun followMatches(q: String, f: Fixture): Boolean {
         val k = foldName(q)
         if (k.isEmpty() || WOMEN.containsMatchIn(k)) return false
-        if (f.home == null || f.away == null) return classifySport(q)?.let { it == f.comp } ?: false
+        if (f.home == null || f.away == null) {
+            classifySport(q)?.let { c -> return c == f.comp || (c == "F1" && f.sport == "f1") || (c == "Tennis" && f.sport == "tennis") || (c == "UFC" && f.sport == "ufc") }
+            if (f.sport == "f1" && (k in F1_TEAMS || k.replace(Regex(" (?:f1|racing|team)$"), "") in F1_TEAMS)) return true
+            return f.people.any { namesPerson(k, it) }
+        }
         val canon = ALIAS_OF[k] ?: k
         for (t in listOf(f.home, f.away)) {
             val vs = teamVariants(t)
@@ -192,6 +235,16 @@ object FixtureRules {
 
     // ---------- reading the server's replies ----------
 
+    private fun strs(a: JSONArray?): List<String> = if (a == null) emptyList() else (0 until a.length()).map { a.optString(it) }
+    private fun ath(o: JSONObject?): FxAth = if (o == null) FxAth("", "") else FxAth(o.optString("name"), o.optString("short"), o.optString("flag"),
+        o.optInt("seed").takeIf { it > 0 }, strs(o.optJSONArray("sets")), o.optJSONArray("tb")?.let { a -> (0 until a.length()).map { if (a.isNull(it)) null else a.optInt(it) } }.orEmpty(),
+        o.optBoolean("win"), o.optString("record"), o.optInt("pos").takeIf { it > 0 }, o.optString("gap"))
+    private fun bouts(a: JSONArray?): List<FxBout> = if (a == null) emptyList() else (0 until a.length()).mapNotNull { i ->
+        val m = a.optJSONObject(i) ?: return@mapNotNull null
+        FxBout(m.optLong("start"), m.optString("status", "scheduled"), ath(m.optJSONObject("a")), ath(m.optJSONObject("b")), m.optString("round"), m.optString("court"),
+            m.optString("detail"), m.optString("weight"), m.optString("card"), m.optBoolean("main"))
+    }
+
     private fun team(o: JSONObject?): FxTeam? = o?.let {
         FxTeam(it.optString("name"), it.optString("short"), it.optString("crest"), if (it.has("score") && !it.isNull("score")) it.optString("score") else null,
             it.optString("nick").ifBlank { null })
@@ -204,7 +257,9 @@ object FixtureRules {
             val start = o.optLong("start"); if (start <= 0) return@mapNotNull null
             Fixture(o.optString("id"), o.optString("sport"), o.optString("comp"), o.optInt("compRank"), start, o.optLong("end", start + 2 * 3600_000L),
                 o.optString("status", "scheduled"), o.optString("minute").ifBlank { null }, team(o.optJSONObject("home")), team(o.optJSONObject("away")),
-                o.optString("title"), o.optString("session"), o.optString("venue"), o.optString("round"))
+                o.optString("title"), o.optString("session"), o.optString("venue"), o.optString("round"), o.optString("country"), o.optLong("prelims"),
+                strs(o.optJSONArray("drivers")), o.optJSONArray("order")?.let { a -> (0 until a.length()).map { ath(a.optJSONObject(it)) } }.orEmpty(),
+                bouts(o.optJSONArray("matches")), bouts(o.optJSONArray("fights")))
         }
     }
 

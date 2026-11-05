@@ -227,8 +227,9 @@ private fun SearchProgrammeCard(act: TvActivity, h: ProgrammeHit, onLong: () -> 
     Column(Modifier.width(Tv.channel)) {
         FocusCard(Modifier.width(Tv.channel).aspectRatio(16f / 9f), scale = Tv.scaleWide, label = "${p.title}, $sub", onLongClick = onLong, focused = focused, onClick = { if (onAir) act.playLive(listOf(c), 0) }) {
             Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
-                if (c.logo.isBlank()) Text(initials(c.name), fontSize = Tv.numeral, fontWeight = FontWeight.Bold, color = Tv.muted)
-                else Picture(Repo.logo(c.logo), Modifier.fillMaxSize().padding(16.dp).background(Color.Transparent), ContentScale.Fit) {
+                val logo = remember(c) { Repo.chLogo(c) }
+                if (logo.isBlank()) Text(initials(c.name), fontSize = Tv.numeral, fontWeight = FontWeight.Bold, color = Tv.muted)
+                else Picture(Repo.logo(logo), Modifier.fillMaxSize().padding(16.dp).background(Color.Transparent), ContentScale.Fit) {
                     Text(initials(c.name), fontSize = Tv.numeral, fontWeight = FontWeight.Bold, color = Tv.muted)
                 }
                 TvBadge(if (onAir) "LIVE" else "$day${hhmm(p.start)}".trim(), Modifier.align(Alignment.TopStart).padding(6.dp), if (onAir) BadgeTone.Live else BadgeTone.Neutral)

@@ -305,7 +305,7 @@ object Repo {
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
     fun api(path: String) = "$server/$path?key=${enc(key)}"
     /** The original picture address behind one of our server's /img links (null if it isn't one). */
-    fun imgOriginal(url: String?): String? = url?.takeIf { it.startsWith("$server/img?") }?.substringAfter("&u=", "")?.substringBefore('&')?.ifEmpty { null }?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+    fun imgOriginal(url: String?): String? = url?.takeIf { it.startsWith("$server/img?") || it.startsWith("$server/logo?") }?.substringAfter("&u=", "")?.substringBefore('&')?.ifEmpty { null }?.let { java.net.URLDecoder.decode(it, "UTF-8") }
     /** Background logo warm-up, once per channel list: favourites' and recents' groups first, then the first 60 channels of
      *  every group. Each distinct logo is fetched once into the on-TV cache (low priority, paused while watching full
      *  screen), so a group shows its logos instantly even the first time it is opened. */
@@ -318,7 +318,7 @@ object Repo {
             val mine = (favorites() + recentChannels()).mapNotNull { channelByUrl(it.optString("url"))?.group }.toSet()
             val byGroup = l.channels.groupBy { it.group }
             val order = mine.mapNotNull { byGroup[it] } + byGroup.filterKeys { it !in mine && it !in hiddenGroups }.values.map { it.take(60) }
-            val urls = LinkedHashSet<String>(); order.forEach { g -> g.forEach { ch -> logo(ch.logo)?.let { urls += it } } }
+            val urls = LinkedHashSet<String>(); order.forEach { g -> g.forEach { ch -> logo(chLogo(ch))?.let { urls += it } } }
             val loader = coil.Coil.imageLoader(c)
             for (u in urls) {
                 while (com.wmorgan97.m3uplayer.PlayerActivity.current != null) kotlinx.coroutines.delay(5_000)
@@ -331,11 +331,16 @@ object Repo {
     fun prefetchLogos(c: Context, chans: List<Channel>) {
         if (com.wmorgan97.m3uplayer.PlayerActivity.current != null) return   // never while watching full screen
         val loader = coil.Coil.imageLoader(c)
-        for (ch in chans) logo(ch.logo)?.let { loader.enqueue(coil.request.ImageRequest.Builder(c).data(it).size(120, 72).build()) }
+        for (ch in chans) logo(chLogo(ch))?.let { loader.enqueue(coil.request.ImageRequest.Builder(c).data(it).size(120, 72).build()) }
     }
     /** A channel logo's own file (cached on the TV like every picture). Not the server's shrunk copy: that one is a JPEG,
      *  and logos drawn on a transparent background came out as white blocks or plain coloured rectangles. */
     fun logo(url: String?): String? = url?.takeIf { it.startsWith("http") }
+    /** A live channel's logo through the server's matcher: clean tv-logos / iptv-org artwork when the channel is known,
+     *  else the provider's own, as a small PNG that keeps its transparency (404 when there's neither: initials show).
+     *  If the server can't be reached, Picture falls back to the provider's own address (the trailing u=). */
+    fun chLogo(c: Channel): String = if (server.isBlank() || c.name.isBlank()) c.logo
+        else api("logo") + "&w=200&name=" + enc(c.name) + (if (c.tvgId.isNotEmpty()) "&id=" + enc(c.tvgId) else "") + (if (c.logo.startsWith("http")) "&u=" + enc(c.logo) else "")
     fun img(url: String?, w: Int = 300): String? = if (url.isNullOrBlank()) null else if (!url.startsWith("http")) url else "$server/img?key=${enc(key)}&w=$w&u=${enc(url)}"
 
     private fun http(url: String, body: String? = null, timeout: Int = 30_000): String {
@@ -877,11 +882,14 @@ object Repo {
     }
 
     private val tmdb = ConcurrentHashMap<String, JSONObject>()
+    /** What [tmdbInfo] already has in memory (no waiting): lets a page start with the title logo instead of swapping it in. */
+    fun cachedTmdbInfo(v: Vod): JSONObject? = tmdb["${v.kind}|${v.title}|${v.year}"]
     suspend fun tmdbInfo(v: Vod): JSONObject? = withContext(Dispatchers.IO) {
         val k = "${v.kind}|${v.title}|${v.year}"
         tmdb[k]?.let { return@withContext it }
         // Film details hardly ever change: kept on the TV for 30 days, so a details page opens at once the second time.
-        val file = File(app.filesDir, "tmdb-" + sha(k).take(16) + ".json")
+        // ("v2": details now carry the title logo, UK streaming services and the IMDb id; older copies are asked again.)
+        val file = File(app.filesDir, "tmdb-v2-" + sha(k).take(16) + ".json")
         if (file.exists() && System.currentTimeMillis() - file.lastModified() < 30 * 86_400_000L)
             runCatching { JSONObject(file.readText()) }.getOrNull()?.let { tmdb[k] = it; return@withContext it }
         try {
@@ -917,16 +925,48 @@ object Repo {
     }
 
     /** Is a TMDB key saved on the server (null: couldn't ask)? */
-    suspend fun tmdbConfigured(): Boolean? = withContext(Dispatchers.IO) { runCatching { JSONObject(http(api("tmdb/status"), timeout = 10_000)).optBoolean("configured") }.getOrNull() }
-    /** Saves (or with "" removes) the server's TMDB key. Returns null when it worked, else what went wrong. */
-    suspend fun setTmdbKey(k: String): String? = withContext(Dispatchers.IO) {
+    suspend fun tmdbConfigured(): Boolean? = keysStatus()?.optBoolean("configured")
+    /** Which keys the server has: { configured (TMDB), omdb, fanart }; null when it couldn't be asked. */
+    suspend fun keysStatus(): JSONObject? = withContext(Dispatchers.IO) {
+        runCatching { JSONObject(http(api("tmdb/status"), timeout = 10_000)) }.getOrNull()?.also { omdbOn = it.optBoolean("omdb") }
+    }
+    @Volatile private var omdbOn: Boolean? = null   // null: not asked yet this run
+
+    // ---------- outside ratings (OMDb, through the server; only with its key) ----------
+    // OMDb's free key allows 1,000 lookups a day: they're only asked for on a details page or a spotlight slide, the
+    // server keeps each for three weeks and the TV for a week. Nothing at all happens without a key.
+    private val ratingsMem = ConcurrentHashMap<String, JSONObject>()
+    /** { imdb: 8.8, rt: 87, mc: 74 } (only what's known) for an IMDb id, or null. */
+    suspend fun ratings(imdb: String?): JSONObject? = withContext(Dispatchers.IO) {
+        if (imdb.isNullOrBlank() || !imdb.matches(Regex("tt\\d{5,10}"))) return@withContext null
+        if ((omdbOn ?: keysStatus()?.optBoolean("omdb")) != true) return@withContext null   // no key: nothing, not even old copies
+        ratingsMem[imdb]?.let { return@withContext it.takeIf { it.length() > 0 } }
+        val file = File(app.filesDir, "tmdb-r-$imdb.json")
+        if (file.exists() && System.currentTimeMillis() - file.lastModified() < 7 * 86_400_000L)
+            runCatching { JSONObject(file.readText()) }.getOrNull()?.let { ratingsMem[imdb] = it; return@withContext it.takeIf { it.length() > 0 } }
         try {
-            val c = URL(api("tmdb/key")).openConnection() as HttpURLConnection
+            val d = JSONObject(http(api("tmdb/ratings") + "&imdb=$imdb"))
+            ratingsMem[imdb] = d; runCatching { file.writeText(d.toString()) }
+            d.takeIf { it.length() > 0 }
+        } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
+    }
+
+    /** A title logo through the server's image cache, sized for the TV and kept transparent (a PNG); null for none or
+     *  an SVG (which the TV can't draw: the title shows as text instead). */
+    fun logoImg(url: String?): String? = url?.takeIf { it.startsWith("http") && !it.endsWith(".svg", true) }?.let { u -> img(u, 800)?.let { if (it.startsWith("$server/img?")) "$it&f=png" else it } }
+
+    /** Saves (or with "" removes) the server's TMDB key. Returns null when it worked, else what went wrong. */
+    suspend fun setTmdbKey(k: String): String? = setServerKey("tmdb/key", k)
+    /** The same for the OMDb key (IMDb and Rotten Tomatoes ratings). */
+    suspend fun setOmdbKey(k: String): String? = setServerKey("tmdb/omdb-key", k, clear = false).also { if (it == null) { omdbOn = k.isNotEmpty(); ratingsMem.clear() } }
+    private suspend fun setServerKey(path: String, k: String, clear: Boolean = true): String? = withContext(Dispatchers.IO) {
+        try {
+            val c = URL(api(path)).openConnection() as HttpURLConnection
             c.connectTimeout = 15_000; c.readTimeout = 30_000; c.requestMethod = "POST"; c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json"); c.outputStream.use { it.write(JSONObject().put("key", k).toString().toByteArray()) }
             val code = c.responseCode
             val text = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
-            if (code in 200..299) { clearCache(); null } else runCatching { JSONObject(text).optString("error") }.getOrNull()?.ifBlank { null } ?: "The server replied $code"
+            if (code in 200..299) { if (clear) clearCache(); null } else runCatching { JSONObject(text).optString("error") }.getOrNull()?.ifBlank { null } ?: "The server replied $code"
         } catch (e: Exception) { describe(e, "your server") }
     }
 

@@ -29,7 +29,9 @@ const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 const EMPTY_EVERY = 3 * HOUR, FULL_EVERY = 15 * MIN, LIVE_EVERY = 2 * MIN, IDLE_AFTER = 6 * HOUR, WINDOW = 7 * DAY, KEEP_PAST = 12 * HOUR;
 
 // rank: overrides the IMPORTANCE score of comp (sports.js); rankAs: use another competition's score.
-// by: 'month' (one request per calendar month the window touches) or 'day' (busy US leagues: one per day).
+// by: 'month' (one request per calendar month the window touches), 'day' (busy US leagues: one per day) or 'current'
+// (tennis: one request, the tournaments being played now with their whole order of play; ~250-450 KB).
+// Tennis is one item per tournament day (its singles order of play), F1 one per session, UFC one per card.
 export const SOURCES = [
   { key: 'eng.1', path: 'soccer/eng.1', sport: 'football', comp: 'Premier League' },
   { key: 'uefa.champions', path: 'soccer/uefa.champions', sport: 'football', comp: 'Champions League' },
@@ -62,6 +64,8 @@ export const SOURCES = [
   { key: 'nhl', path: 'hockey/nhl', sport: 'nhl', comp: 'NHL', by: 'day' },
   { key: 'mlb', path: 'baseball/mlb', sport: 'mlb', comp: 'MLB', by: 'day' },
   { key: 'ufc', path: 'mma/ufc', sport: 'ufc', comp: 'UFC' },
+  { key: 'tennis.atp', path: 'tennis/atp', sport: 'tennis', comp: 'ATP', by: 'current', liveEvery: 5 * MIN },
+  { key: 'tennis.wta', path: 'tennis/wta', sport: 'tennis', comp: 'WTA', by: 'current', liveEvery: 5 * MIN },
   { key: 'golf.pga', path: 'golf/pga', sport: 'golf', comp: 'PGA Tour', rankAs: 'Golf' },
   { key: 'golf.eur', path: 'golf/eur', sport: 'golf', comp: 'DP World Tour', rank: 54 },
   { key: 'golf.lpga', path: 'golf/lpga', sport: 'golf', comp: 'LPGA Tour', rank: 40 },
@@ -77,6 +81,7 @@ const etDay = t => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_Yor
 
 /** The scoreboard requests for one source covering [from, to]. */
 export function requestsFor(src, from, to) {
+  if (src.by === 'current') return [`${BASE}/${src.path}/scoreboard`];
   const out = new Set();
   if (src.by === 'day') for (let t = from; t <= Math.min(to, from + 4 * DAY); t += DAY) out.add(`dates=${etDay(t)}`);   // busy leagues: 4 days is plenty
   else for (let t = from; t <= to + DAY; t += 20 * DAY) out.add(`dates=${etDay(t).slice(0, 6)}&limit=200`);
@@ -102,7 +107,15 @@ async function fetchSource(src, urls) {
     const d = await getJson(u);
     for (const ev of d.events || []) for (const f of normaliseEspn(ev, src)) byId.set(f.id, f);
   }
-  return [...byId.values()];
+  const list = [...byId.values()];
+  if (src.sport === 'f1') fillDrivers(list);
+  return list;
+}
+/** F1 weekends not started yet have no drivers in the feed: the latest weekend's field (for "follow a driver"). */
+export function fillDrivers(list, prev = []) {
+  const done = [...list, ...prev].filter(f => f.drivers?.length).sort((a, b) => b.start - a.start)[0];
+  if (done) for (const f of list) if (!f.drivers?.length) f.drivers = done.drivers;
+  return list;
 }
 const inWindow = (f, now) => f.start < now + WINDOW && (f.end > now - KEEP_PAST || f.status === 'live');
 
@@ -161,9 +174,10 @@ async function refreshAll() {
 async function refreshLive() {
   const now = Date.now(), want = new Map();
   for (const src of SOURCES) {
+    if (src.liveEvery && now - (state.sources[src.key]?.liveAt || 0) < src.liveEvery) continue;   // big replies: less often
     const days = new Set();
     for (const f of state.sources[src.key]?.fixtures || []) if (isOn(f, now) || (f.status === 'scheduled' && f.start <= now + LIVE_EVERY && f.start > now - 6 * HOUR)) days.add(etDay(f.start));
-    if (days.size) want.set(src, [...days].map(d => `${BASE}/${src.path}/scoreboard?dates=${d}`));
+    if (days.size) want.set(src, src.by === 'current' ? requestsFor(src) : [...days].map(d => `${BASE}/${src.path}/scoreboard?dates=${d}`));
   }
   state.liveAt = now;
   if (!want.size) return;
@@ -171,7 +185,8 @@ async function refreshLive() {
     try {
       const fresh = new Map((await fetchSource(src, urls)).map(f => [f.id, f]));
       const s = state.sources[src.key];
-      s.fixtures = s.fixtures.map(f => fresh.get(f.id) || f);
+      s.liveAt = Date.now();
+      s.fixtures = s.fixtures.map(f => { const n = fresh.get(f.id); return !n ? f : !n.drivers && f.drivers ? { ...n, drivers: f.drivers } : n; });
     } catch {}
   }));
   saveSoon();
@@ -225,7 +240,7 @@ function progIndexFor(ix, only, now) {
   const progs = [], until = now + 8 * DAY;
   for (const id of only.size ? only : []) {
     const json = ix.chans.get(id);
-    if (!json || !/ v | vs|@| at |f1|formula|grand prix|ufc/i.test(json)) continue;
+    if (!json || !/ v | vs|@| at |f1|formula|grand prix|ufc|tennis|atp|wta/i.test(json)) continue;
     const name = ix.display?.[id] || id;
     for (const p of JSON.parse(json)) if (p[1] > now - 4 * HOUR && p[0] < until) progs.push({ id, name, start: p[0], end: p[1], title: p[2], desc: p[3] || '' });
   }

@@ -1346,6 +1346,34 @@ html:not(.mac) .ts-box kbd { display: none !important; }
 }
 @media (min-width: 900px) { .sp-fxl { width: 300px; } }
 
+/* F1, tennis, UFC: drivers / players / fighters with their flag; set scores; the full order of play or card in a sheet */
+.sp-flag { flex: none; display: inline-block; width: 18px; height: 18px; border-radius: 50%; object-fit: cover; background: var(--surface-2); }
+.sp-ath .sp-flag { margin: 0 1px; }
+.sp-seed { margin-left: 5px; font-size: var(--fs-caption); font-weight: 500; color: var(--muted); }
+.sp-pos { flex: none; width: 1.1em; text-align: right; font-size: var(--fs-footnote); font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sp-gap { flex: none; font-size: var(--fs-footnote); font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sp-sets { flex: none !important; display: inline-flex; gap: 2px; font-variant-numeric: tabular-nums; overflow: visible !important; }
+.sp-sets i { font-style: normal; min-width: 1.15em; text-align: center; font-weight: 500; color: var(--muted); }
+.sp-sets i.won { color: var(--text); font-weight: 700; }
+.sp-sets sup { font-size: .65em; margin-left: 1px; }
+.sp-ath.win > span:not(.sp-sets):not(.sp-flag) { font-weight: 700; }
+.sp-fxl .sp-sets i { font-size: var(--fs-headline); min-width: 1.05em; }
+.sp-detail .section-title:first-child { margin-top: 0; }
+.sp-dm { list-style: none; margin: 0 0 6px; padding: 0; }
+.sp-dm-m { display: grid; grid-template-columns: 78px 1fr auto; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.sp-dm-m:last-child { border-bottom: 0; }
+.sp-dm-m.main { background: color-mix(in srgb, var(--accent) 9%, transparent); margin: 0 -10px; padding: 10px; border-radius: var(--r-md); border-bottom: 0; }
+.sp-dm-when { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-footnote); font-weight: 600; font-variant-numeric: tabular-nums; }
+.sp-dm-when small { font-weight: 500; color: var(--muted); font-size: var(--fs-caption); }
+.sp-dm-when .nc-dot, .sp-live-t .nc-dot { display: inline-block; margin-right: 5px; vertical-align: middle; }
+.sp-dm-pair { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.sp-dm-p { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--fs-subhead); }
+.sp-dm-p.win .sp-dm-name { font-weight: 700; }
+.sp-dm-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sp-dm-fol { display: flex; flex-direction: column; gap: 5px; }
+.sp-fol { font: inherit; font-size: var(--fs-caption); font-weight: 600; padding: 3px 9px; border-radius: 99px; border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer; }
+.sp-fol.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+
 /* Sports: which channels are shown, and the switch */
 .sp-scope { margin: 22px 0 8px; text-align: center; font-size: var(--fs-small, 13px); }
 .sp-scope .link { font-size: inherit; padding: 10px 4px; }
@@ -1375,3 +1403,25 @@ html:not(.mac) .ts-box kbd { display: none !important; }
 .epc .ep-more .ico { width: 20px; height: 20px; }
 .film-tools button.dl-done .ico { color: var(--accent); }
 .film-tools button.dl-done span { color: var(--text); }
+
+/* ---------- Title logos, "Also on", outside ratings (film & series pages, Home hero) ---------- */
+/* The title as its logo: transparent art, left-aligned, never taller than a two-line title. The text stays for
+   screen readers. A soft shadow keeps white logos readable over bright backdrops. */
+.has-logo > .title-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.title-logo { display: block; width: auto; height: auto; max-width: min(100%, 300px); max-height: 64px; object-fit: contain; object-position: left bottom;
+  filter: drop-shadow(0 1px 6px rgba(0,0,0,.45)); }
+.detail-title.has-logo { margin: 2px 0 4px; line-height: 0; }
+.hero-title.has-logo { display: block; -webkit-line-clamp: unset; line-height: 0; margin: 4px 0 6px; }
+.hero-slide .hero-title.has-logo .title-logo { max-width: min(78%, 340px); max-height: 76px; }
+@media (min-width: 900px) {
+  .detail-title.has-logo .title-logo { max-width: 360px; max-height: 84px; }
+  .hero-slide .hero-title.has-logo .title-logo { max-width: 440px; max-height: 120px; }
+}
+.film-meta .pill.ext-rating { color: var(--muted); font-weight: 600; }
+.film-meta .pill.ext-rating b { color: var(--text); font-weight: 700; }
+.also-on { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 12px 0 2px; font-size: 13px; }
+.also-on .also-label { color: var(--muted); font-weight: 600; margin-right: 2px; }
+.also-on .prov { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 3px; border-radius: 999px; background: var(--surface-2); color: var(--text); font-weight: 600; font-size: 12.5px; }
+.also-on .prov:not(:has(img)) { padding-left: 9px; }
+.also-on .prov img { width: 20px; height: 20px; border-radius: 6px; object-fit: cover; }
+.also-on .jw-credit { flex-basis: 100%; color: var(--muted); font-size: 11px; opacity: .8; }

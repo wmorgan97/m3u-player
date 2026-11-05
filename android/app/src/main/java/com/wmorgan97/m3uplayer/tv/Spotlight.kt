@@ -24,6 +24,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,7 +56,12 @@ private const val PREVIEW_DELAY = 320L // ms the highlight must rest on a card b
 /** What the spotlight shows. */
 @Immutable
 data class Spot(val key: String, val kicker: String, val accent: Boolean, val title: String, val tags: List<String>, val rating: Double?, val plot: String, val backdrop: String,
-                val quality: List<String> = emptyList())
+                val quality: List<String> = emptyList(), val ref: String = "")
+
+/** What arrives a moment after a spotlight title: its logo (already in memory when set) and, on the featured slides,
+ *  its outside ratings. Keyed by "kind:id" ([Spot.ref]). */
+@Immutable
+data class SpotExtras(val logo: String?, val ratings: org.json.JSONObject? = null)
 
 private val Q_UHD = Regex("""\b(4k|uhd|2160p?)\b|ᵁᴴᴰ""", RegexOption.IGNORE_CASE)
 private val Q_1080 = Regex("""\b(1080p?|fhd|full ?hd)\b""", RegexOption.IGNORE_CASE)
@@ -91,6 +98,7 @@ class SpotlightState internal constructor(indexState: MutableIntState) {
     var index by indexState
     internal var touchedAt = 0L
     var spot by mutableStateOf<Spot?>(null)
+    val extras = mutableStateMapOf<String, SpotExtras>()
     /** Follows what the spotlight shows (not where focus is), so buttons and text change together. */
     val heroMode: Boolean get() = spot?.key?.startsWith("hero:") != false
     fun preview(v: Vod, p: Progress? = null) { target.value = SpotTarget.Card(v, p) }
@@ -104,7 +112,12 @@ fun rememberSpotlight(slides: List<Vod>, ranks: Map<String, Int>): SpotlightStat
     val s = remember { SpotlightState(idx) }
     val ctx = LocalContext.current
     // Every slide's backdrop is fetched up front, so a slide never appears blank and then pops in.
-    LaunchedEffect(slides) { val l = coil.Coil.imageLoader(ctx); slides.forEach { l.enqueue(ImageRequest.Builder(ctx).data(it.backdrop).build()) } }
+    LaunchedEffect(slides) {
+        val l = coil.Coil.imageLoader(ctx); slides.forEach { l.enqueue(ImageRequest.Builder(ctx).data(it.backdrop).build()) }
+        // Then each slide's title logo and outside ratings, one at a time (details are cached on the TV and the server;
+        // ratings are only asked for these few featured titles, never for every card).
+        slides.forEach { v -> loadExtras(s, v, ctx, withRatings = true) }
+    }
     LaunchedEffect(slides, ranks) {
         snapshotFlow { s.target.value to s.index }.collectLatest { (t, i) ->
             when (t) {
@@ -116,6 +129,7 @@ fun rememberSpotlight(slides: List<Vod>, ranks: Map<String, Int>): SpotlightStat
                     // (and Details, opened from this card, has its backdrop at once).
                     if (sp.backdrop.isNotEmpty()) withTimeoutOrNull(1500) { coil.Coil.imageLoader(ctx).execute(ImageRequest.Builder(ctx).data(sp.backdrop).build()) }
                     s.spot = sp
+                    loadExtras(s, t.v, ctx, withRatings = false)
                 }
             }
         }
@@ -131,6 +145,40 @@ fun rememberSpotlight(slides: List<Vod>, ranks: Map<String, Int>): SpotlightStat
     return s
 }
 
+/** A title's key for [SpotlightState.extras] (the title too: Continue watching's cards don't all carry an id). */
+private fun refOf(v: Vod) = "${v.kind}:${v.id}:${v.title}"
+
+/** Fetches a title's logo (into memory before it's shown, so it never pops in half-drawn) and, if asked, its outside
+ *  ratings, then records them for the spotlight. Quietly does nothing when there's neither. */
+private suspend fun loadExtras(s: SpotlightState, v: Vod, ctx: android.content.Context, withRatings: Boolean) {
+    val ref = refOf(v)
+    if (s.extras[ref]?.let { !withRatings || it.ratings != null } == true) return
+    val info = withTimeoutOrNull(4000) { runCatching { Repo.tmdbInfo(v) }.getOrNull() } ?: return
+    val logo = Repo.logoImg(info.optString("logo"))?.takeIf { u ->
+        withTimeoutOrNull(3000) { coil.Coil.imageLoader(ctx).execute(ImageRequest.Builder(ctx).data(u).size(coil.size.Size.ORIGINAL).build()) } is coil.request.SuccessResult
+    }
+    val ratings = if (withRatings) withTimeoutOrNull(4000) { Repo.ratings(info.optString("imdb")) } else null
+    if (logo != null || ratings != null) s.extras[ref] = SpotExtras(logo, ratings)
+}
+
+/** The title as its logo (TMDB's transparent title art), left-aligned within [maxW] x [maxH]; [text] while there's
+ *  none, while it loads or if it fails. The logo fades in over the text's place. */
+@Composable
+fun TitleLogo(url: String?, title: String, maxW: androidx.compose.ui.unit.Dp, maxH: androidx.compose.ui.unit.Dp, modifier: Modifier = Modifier, text: @Composable () -> Unit) {
+    if (url.isNullOrEmpty()) { text(); return }
+    val ctx = LocalContext.current
+    val painter = coil.compose.rememberAsyncImagePainter(remember(url) { ImageRequest.Builder(ctx).data(url).size(coil.size.Size.ORIGINAL).crossfade(false).build() })
+    val st = painter.state
+    val ok = st is coil.compose.AsyncImagePainter.State.Success
+    val alpha by animateFloatAsState(if (ok) 1f else 0f, tween(Tv.durMed, easing = Tv.easeMove), label = "logo")
+    Box(modifier.semantics { contentDescription = title }) {
+        if (!ok) text()
+        if (st !is coil.compose.AsyncImagePainter.State.Error)
+            androidx.compose.foundation.Image(painter, null, Modifier.sizeIn(maxWidth = maxW, maxHeight = maxH).graphicsLayer { this.alpha = alpha },
+                contentScale = ContentScale.Fit, alignment = Alignment.BottomStart)
+    }
+}
+
 /** The backdrop layer: right-aligned, fading into the page on the left and at the bottom. Put it first in the page's Box. */
 @Composable
 fun SpotlightBackdrop(state: SpotlightState, modifier: Modifier) =
@@ -144,7 +192,7 @@ fun SpotlightHeader(act: TvActivity, state: SpotlightState, slides: List<Vod>, r
         val s = state.spot
         val heroMode = state.heroMode
         if (s == null) { if (loading) SpotSkeleton() }
-        else SpotText(s, heroMode)
+        else SpotText(s, heroMode, state.extras[s.ref])
         if (slides.isNotEmpty()) {
             val index = state.index.coerceIn(0, slides.size - 1)
             val v = slides[index]
@@ -159,7 +207,7 @@ fun SpotlightHeader(act: TvActivity, state: SpotlightState, slides: List<Vod>, r
 }
 
 private fun slideSpot(v: Vod, rank: Int) = Spot("hero:${v.kind}:${v.id}", "#$rank TRENDING ${if (v.kind == "series") "SERIES" else "MOVIE"}", true, v.title,
-    listOfNotNull(v.year?.toString()) + v.genres.take(2), v.rating, v.overview, v.backdrop, qualityTags(v.name, v.group))
+    listOfNotNull(v.year?.toString()) + v.genres.take(2), v.rating, v.overview, v.backdrop, qualityTags(v.name, v.group), refOf(v))
 
 /** A card's spotlight: what the row already knows, with TMDB's backdrop, plot and genres filled in where it doesn't
  *  (saved on the TV for 30 days, so mostly instant). */
@@ -174,10 +222,10 @@ private suspend fun cardSpot(v: Vod, p: Progress?): Spot {
         val m = vodMeta(p.item.optString("name"))
         val ep = if (p.item.optString("kind") == "episode" && m.episode != null) "S${m.season ?: 1} E${m.episode}" else null
         return Spot("cw:${p.url}", "CONTINUE WATCHING", false, v.title, listOfNotNull(ep, "${clock((p.d - p.t).toLong())} left") + genres.take(2), rating, plot, backdrop,
-            qualityTags(p.item.optString("name"), p.item.optString("group")))
+            qualityTags(p.item.optString("name"), p.item.optString("group")), refOf(v))
     }
     return Spot("${v.kind}:${v.id}", if (v.kind == "series") "SERIES" else "MOVIE", false, v.title,
-        listOfNotNull(year?.toString()) + genres.take(2), rating, plot, backdrop, qualityTags(v.name, v.group))
+        listOfNotNull(year?.toString()) + genres.take(2), rating, plot, backdrop, qualityTags(v.name, v.group), refOf(v))
 }
 
 /** A right-aligned backdrop fading into the page on the left and at the bottom, cross-fading between pictures.
@@ -195,7 +243,7 @@ fun CinematicBackdrop(url: String, fadeMs: Int, modifier: Modifier) {
 }
 
 @Composable
-private fun SpotText(s: Spot, heroMode: Boolean) {
+private fun SpotText(s: Spot, heroMode: Boolean, extras: SpotExtras?) {
     // One copy at a time, faded in. A Crossfade composes and lays out two copies, which landed on the first frames of
     // the next move along a row (Shield trace: 20–25 ms recomposes).
     key(s.key) {
@@ -206,20 +254,24 @@ private fun SpotText(s: Spot, heroMode: Boolean) {
         Column(Modifier.graphicsLayer { alpha = fade.value }.padding(start = Tv.margin, top = 22.dp).fillMaxWidth(.56f)) {
             Text(sp.kicker, fontSize = Tv.label, color = if (sp.accent) Tv.accent else Tv.muted, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, maxLines = 1)
             Spacer(Modifier.height(6.dp))
-            Text(sp.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = if (heroMode) 1 else 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine,
+            // The title logo when there is one (it counts as a two-line title for the plot below).
+            val logo = extras?.logo
+            if (logo != null) TitleLogo(logo, sp.title, 330.dp, 60.dp) { Text(sp.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine) }
+            else Text(sp.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = if (heroMode) 1 else 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine,
                 onTextLayout = { titleLines = it.lineCount })
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 sp.tags.firstOrNull()?.let { Tag(it) }
                 sp.rating?.takeIf { it > 0 }?.let { Tag("★ %.1f".format(it), color = Tv.star) }
+                RatingsTag(extras?.ratings)
                 sp.quality.forEach { q -> QualityTag(q) }
-                sp.tags.drop(1).forEach { Tag(it, color = Tv.muted, bg = Color(0x14FFFFFF)) }
+                sp.tags.drop(1).take(if (extras?.ratings != null) 1 else 2).forEach { Tag(it, color = Tv.muted, bg = Color(0x14FFFFFF)) }   // one genre fewer beside the outside ratings, so the row never runs off
             }
             if (sp.plot.isNotBlank()) {
                 Spacer(Modifier.height(10.dp))
                 // Two lines above the buttons; three once the buttons make way; one fewer under a two-line title.
                 Text(sp.plot.trim(), fontSize = Tv.bodySmall, color = Tv.text2, lineHeight = Tv.bodySmallLine, overflow = TextOverflow.Ellipsis,
-                    maxLines = ((if (heroMode) 2 else 3) - (titleLines - 1)).coerceAtLeast(1))
+                    maxLines = ((if (heroMode) 2 else 3) - ((if (logo != null) 2 else titleLines) - 1)).coerceAtLeast(1))
             }
         }
     }

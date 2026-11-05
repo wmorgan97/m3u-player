@@ -27,11 +27,13 @@ function slot() {
 }
 function release() { const next = waiting.shift(); if (next) next(); else running--; }
 
-function shrink(src, w, out) {
+// png: logos keep their transparency (a JPEG turns a logo drawn on a transparent background into a block).
+function shrink(src, w, out, png = false) {
   return new Promise(resolve => {
     const tmp = `${out}.${process.pid}.tmp`;
+    const enc = png ? ['-pix_fmt', 'rgba', '-c:v', 'png'] : ['-q:v', '4', '-c:v', 'mjpeg'];
     const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-user_agent', 'Mozilla/5.0', '-rw_timeout', '15000000',
-      '-i', src, '-frames:v', '1', '-vf', `scale='min(${w},iw)':-2:flags=lanczos`, '-q:v', '4', '-f', 'image2', '-c:v', 'mjpeg', '-y', tmp],
+      '-i', src, '-frames:v', '1', '-vf', `scale='min(${w},iw)':-2:flags=lanczos`, ...enc, '-f', 'image2', '-y', tmp],
       { windowsHide: true });
     const timer = setTimeout(() => { try { p.kill(); } catch {} }, 20_000);
     p.on('error', () => { clearTimeout(timer); resolve(false); });
@@ -44,14 +46,15 @@ function shrink(src, w, out) {
 }
 
 // Make (or find) the thumbnail for src at width w. Shared by requests and the background warm-up.
-async function ensure(src, w) {
-  const file = join(DIR, `${createHash('sha1').update(`${src}|${w}`).digest('hex')}.jpg`);
+export async function ensure(src, w, png = false) {
+  w = WIDTHS.find(x => x >= w) || 1280;
+  const file = join(DIR, `${createHash('sha1').update(`${src}|${w}`).digest('hex')}.${png ? 'png' : 'jpg'}`);
   if (await fs.stat(file).then(() => true, () => false)) return file;
   if (!inflight.has(file)) {
     inflight.set(file, (async () => {
       await fs.mkdir(DIR, { recursive: true });
       await slot();
-      try { return await shrink(src, w, file); } finally { release(); }
+      try { return await shrink(src, w, file, png); } finally { release(); }
     })().finally(() => setTimeout(() => inflight.delete(file), 1000)));
   }
   return (await inflight.get(file)) ? file : null;
@@ -85,10 +88,11 @@ export async function handleImg(req, res, url, send, allowed) {
   if (!/^https?:$/.test(src.protocol) || !allowed(src)) return send(res, 400, 'Image url not allowed');
   const asked = Number(url.searchParams.get('w')) || 300;
   const w = WIDTHS.find(x => x >= asked) || 1280;
-  const file = await ensure(src.href, w);
+  const png = url.searchParams.get('f') === 'png';   // title logos: keep transparency
+  const file = await ensure(src.href, w, png);
   if (!file) { res.writeHead(302, { location: src.href, 'cache-control': 'public, max-age=3600' }); return res.end(); }   // the browser loads the original instead
   const st = await fs.stat(file);
-  res.writeHead(200, { 'content-type': 'image/jpeg', 'content-length': st.size, 'cache-control': 'public, max-age=2592000, immutable', 'access-control-allow-origin': '*' });
+  res.writeHead(200, { 'content-type': png ? 'image/png' : 'image/jpeg', 'content-length': st.size, 'cache-control': 'public, max-age=2592000, immutable', 'access-control-allow-origin': '*' });
   if (req.method === 'HEAD') return res.end();
   createReadStream(file).on('error', () => res.destroy()).pipe(res);
 }

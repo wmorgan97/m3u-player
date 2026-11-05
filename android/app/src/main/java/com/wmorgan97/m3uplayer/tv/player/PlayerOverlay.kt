@@ -122,13 +122,15 @@ fun PlayerOverlay(ui: PlayerUi) {
 // ---------- pieces shared by the banner and the controls ----------
 
 @Composable
-private fun Logo(url: String, w: Int, h: Int) {
+private fun Logo(url: String, w: Int, h: Int, gap: Int) {
     val src = remember(url) { Repo.logo(url) }
-    if (src == null) return
+    var failed by remember(url) { mutableStateOf(false) }   // no logo found for the channel: no empty box either
+    if (src == null || failed) return
     val ctx = LocalContext.current
     Box(Modifier.size(w.dp, h.dp).clip(RoundedCornerShape(Tv.radius)).background(Tv.surface2).padding(horizontal = 8.dp, vertical = 5.dp)) {
-        AsyncImage(remember(src) { ImageRequest.Builder(ctx).data(src).crossfade(false).build() }, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        AsyncImage(remember(src) { ImageRequest.Builder(ctx).data(src).crossfade(false).build() }, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit, onError = { failed = true })
     }
+    Spacer(Modifier.width(gap.dp))
 }
 
 @Composable
@@ -152,8 +154,7 @@ private fun Banner(ui: PlayerUi, b: PlayerUi.Banner) {
     TvPanel(Modifier.padding(start = Tv.margin, end = Tv.margin, bottom = Tv.playerSafeBottom).fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (b.num.isNotEmpty()) { Text(b.num, color = Tv.text, fontSize = Tv.display, fontWeight = FontWeight.SemiBold, modifier = Modifier.widthIn(min = 56.dp)); Spacer(Modifier.width(16.dp)) }
-            Logo(b.logo, 112, 63)
-            if (Repo.logo(b.logo) != null) Spacer(Modifier.width(20.dp))
+            Logo(b.logo, 112, 63, gap = 20)
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(b.name, color = Tv.text, fontSize = Tv.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
@@ -205,8 +206,7 @@ private fun Controls(ui: PlayerUi) {
         }
         Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, bottom = Tv.playerSafeBottom)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Logo(m.logo, 80, 45)
-                if (Repo.logo(m.logo) != null) Spacer(Modifier.width(14.dp))
+                Logo(m.logo, 80, 45, gap = 14)
                 if (m.live && m.num.isNotEmpty()) { Text(m.num, color = Tv.muted, fontSize = Tv.title, fontWeight = FontWeight.SemiBold); Spacer(Modifier.width(12.dp)) }
                 Text(m.title, color = Tv.text, fontSize = Tv.display, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 Spacer(Modifier.weight(1f))

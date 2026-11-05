@@ -210,9 +210,10 @@ fun ChannelCard(name: String, logo: String?, now: String, progress: Float? = nul
 /** Channel logo tile used in lists and the guide. */
 @Composable
 fun LogoTile(c: Channel, modifier: Modifier = Modifier) {
+    val src = remember(c) { Repo.chLogo(c) }
     Box(modifier.background(Tv.surface2, Tv.shapeS), contentAlignment = Alignment.Center) {
-        if (c.logo.isBlank()) Text(initials(c.name), fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Bold)
-        else Picture(Repo.logo(c.logo), Modifier.fillMaxSize().padding(4.dp).background(Color.Transparent), ContentScale.Fit, fade = false) {
+        if (src.isBlank()) Text(initials(c.name), fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Bold)
+        else Picture(Repo.logo(src), Modifier.fillMaxSize().padding(4.dp).background(Color.Transparent), ContentScale.Fit, fade = false) {
             Text(initials(c.name), fontSize = Tv.caption, color = Tv.muted, fontWeight = FontWeight.Bold)
         }
     }
@@ -227,7 +228,7 @@ fun channelItem(c: Channel): JSONObject {
     val sub = when { now != null -> "${now.title} · ends ${hhmm(now.end)}"; else -> prettyGroup(c.group) }
     return JSONObject().put("url", c.url).put("title", c.name).put("subtitle", sub).put("info", now?.desc ?: "").put("live", true)
         .put("num", if (c.num > 0 && Repo.showNumbers) "${c.num}" else "").put("nowTitle", now?.title ?: "").put("nowStart", now?.start ?: 0).put("nowEnd", now?.end ?: 0).put("nextTitle", next?.title ?: "")
-        .put("headers", JSONObject(c.headers)).put("art", c.logo).put("listTitle", c.name).put("listSub", now?.title ?: next?.title ?: "")
+        .put("headers", JSONObject(c.headers)).put("art", Repo.chLogo(c)).put("listTitle", c.name).put("listSub", now?.title ?: next?.title ?: "")
         .put("sync", JSONObject().put("kind", "live").put("name", c.name).put("url", c.url).put("logo", c.logo).put("group", c.group).put("tvgId", c.tvgId))
         .put("listTitleOverride", "Channels")
 }

@@ -70,7 +70,10 @@ import org.json.JSONObject
 @Composable
 fun DetailsScreen(act: TvActivity, v: Vod) {
     var infoDone by remember { mutableStateOf(false) }
-    val info by produceState<JSONObject?>(null) { value = Repo.tmdbInfo(v); infoDone = true }
+    // (Starts from what's already in memory, e.g. from the spotlight, so the title logo is there on the first frame.)
+    val info by produceState(Repo.cachedTmdbInfo(v)) { value = Repo.tmdbInfo(v); infoDone = true }
+    // IMDb / Rotten Tomatoes (OMDb), only with the server's key; asked for here, on opening the page.
+    val ratings by produceState<JSONObject?>(null, info?.optString("imdb")) { value = info?.optString("imdb")?.let { Repo.ratings(it) } }
     // "More like this": titles from your catalogue in this one's first matching TMDB genre (else what's popular).
     val similar by produceState<List<Vod>?>(null, infoDone) {
         if (!infoDone) return@produceState
@@ -128,7 +131,9 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
                     Column(Modifier.weight(1f).widthIn(max = 560.dp).padding(end = 64.dp)) {
                         Text(if (v.kind == "series") "SERIES" else "MOVIE", fontSize = Tv.label, color = Tv.muted, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, maxLines = 1,
                             modifier = Modifier.padding(bottom = 4.dp))
-                        Text(v.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine)
+                        TitleLogo(Repo.logoImg(info?.optString("logo")), v.title, 330.dp, 76.dp, Modifier.padding(top = 4.dp, bottom = 6.dp)) {
+                            Text(v.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine)
+                        }
                         info?.optString("tagline")?.takeIf { it.isNotBlank() }?.let { Text(it, fontSize = Tv.bodySmall, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp)) }
                         Spacer(Modifier.height(10.dp))
                         val genres = info?.optJSONArray("genres")?.let { g -> (0 until g.length()).map { g.getString(it) } } ?: emptyList()
@@ -138,6 +143,7 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
                             v.year?.let { Tag("$it") }
                             info?.optInt("runtime")?.takeIf { it > 0 }?.let { Tag(runtime(it)) }
                             vote?.let { Tag("★ %.1f".format(it), color = Tv.star) }
+                            RatingsTag(ratings)
                             qualityTags(v.name, v.group).forEach { QualityTag(it) }
                             if (v.copies > 1) Tag("${v.copies} versions")
                             merged?.takeIf { it.size > 1 }?.let { Tag("${it.size} seasons") }
@@ -177,6 +183,7 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
                             WatchLaterButton(v, down)
                             }
                         }
+                        AlsoOn(info?.optJSONArray("providers"))
                     }
                 }
             }
@@ -201,6 +208,30 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
             similar?.takeIf { it.isNotEmpty() }?.let { more -> item(key = "more") { MoreLikeThis(act, more) } }
         }
         }
+    }
+}
+
+/** "Also on": where the title streams in the UK (TMDB's watch providers): each service's small logo and name, then
+ *  the JustWatch credit their terms ask for. Information only (not focusable); nothing when it isn't streaming. */
+@Composable
+private fun AlsoOn(arr: org.json.JSONArray?) {
+    val list = remember(arr) { (0 until (arr?.length() ?: 0)).mapNotNull { arr!!.optJSONObject(it) }.filter { it.optString("name").isNotBlank() } }
+    if (list.isEmpty()) return
+    Column(Modifier.padding(top = 18.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Also on", fontSize = Tv.label, color = Tv.muted, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(end = 2.dp))
+            list.forEach { p ->
+                val logo = p.optString("logo").takeIf { it.startsWith("http") }
+                Row(Modifier.background(Color(0x14FFFFFF), RoundedCornerShape(50)).padding(start = if (logo != null) 3.dp else 10.dp, end = 10.dp, top = 3.dp, bottom = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (logo != null) {
+                        Picture(Repo.img(logo, 120), Modifier.size(20.dp).clip(RoundedCornerShape(5.dp)))
+                        Spacer(Modifier.width(7.dp))
+                    }
+                    Text(p.optString("name"), fontSize = Tv.label, color = Tv.text2, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                }
+            }
+        }
+        Text("Streaming data: JustWatch", fontSize = 12.sp, color = Tv.muted.copy(alpha = .75f), modifier = Modifier.padding(top = 6.dp))
     }
 }
 

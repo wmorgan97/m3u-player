@@ -72,7 +72,9 @@ fun SettingsScreen(act: TvActivity) {
     var formError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     fun ask(f: FormAsk) { formError = null; formBusy = false; form = f }
-    val tmdbOn by produceState<Boolean?>(null, v + tick) { value = Repo.tmdbConfigured() }
+    val keys by produceState<JSONObject?>(null, v + tick) { value = Repo.keysStatus() }
+    val tmdbOn = keys?.optBoolean("configured")
+    val omdbOn = keys?.optBoolean("omdb")
     fun askPin(title: String, check: Boolean, then: (String) -> Unit) {
         if (check && PinGuard.secondsLeft() > 0) { say("Too many wrong PINs. Try again in ${PinGuard.secondsLeft()} s"); return }
         pinAsk = PinAsk(title, check, ++pinSeq, then)
@@ -95,7 +97,7 @@ fun SettingsScreen(act: TvActivity) {
     // Back in the pane returns to the section column; Back there falls through to the app (act.back(), then the menu).
     BackHandler(enabled = inPane && menu == null && pinAsk == null) { backToSections() }
 
-    val rows = sectionRows(act, shown, v + tick, ::say, { t, o -> menuSelected = null; menu = t to o }, { t, o, sel -> menuSelected = sel; menu = t to o }, ::askPin, { choosePin() }, ::ask, tmdbOn) { tick++ }
+    val rows = sectionRows(act, shown, v + tick, ::say, { t, o -> menuSelected = null; menu = t to o }, { t, o, sel -> menuSelected = sel; menu = t to o }, ::askPin, { choosePin() }, ::ask, tmdbOn, omdbOn) { tick++ }
 
     Column(Modifier.fillMaxSize()) {
         PageTitle("Settings", "Shared with your phone and computer through your server")
@@ -165,7 +167,7 @@ private fun sectionRows(
     menu: (String, List<Pair<String, () -> Unit>>) -> Unit,
     chooser: (String, List<Pair<String, () -> Unit>>, String?) -> Unit,   // a menu of choices with the current one marked
     askPin: (String, Boolean, (String) -> Unit) -> Unit,
-    choosePin: () -> Unit, ask: (FormAsk) -> Unit, tmdbOn: Boolean?, changed: () -> Unit,
+    choosePin: () -> Unit, ask: (FormAsk) -> Unit, tmdbOn: Boolean?, omdbOn: Boolean?, changed: () -> Unit,
 ): List<SettingRow> {
     fun refreshLists() { Repo.clearCache(); say("Channel lists will download again") }
     val player = act.getSharedPreferences("player", android.content.Context.MODE_PRIVATE)
@@ -292,6 +294,14 @@ private fun sectionRows(
                         listOf(FormField("TMDB key", "", if (tmdbOn == true) "Saved on your server" else "Paste your TMDB key", secret = true))) { (k) ->
                         if (k.isEmpty()) return@FormAsk if (tmdbOn == true) null else "Enter a TMDB key"   // empty: keep the saved key
                         Repo.setTmdbKey(k) ?: run { say(if (k.isEmpty()) "TMDB key removed" else "TMDB connected"); null }
+                    })
+                },
+                SettingRow.Action(Icons.Default.StarRate, "Ratings (OMDb)", "Adds IMDb and Rotten Tomatoes ratings", when (omdbOn) { true -> "Connected"; false -> "Not set up"; null -> "" }, opens = true) {
+                    ask(FormAsk("Ratings (OMDb)", "Get a free key at omdbapi.com (API Key, Free). It's kept on your server only; ratings are looked up when a page opens and kept for weeks. Ratings by OMDb, non-commercial use." +
+                        if (omdbOn == true) " A key is already saved: enter a new one to replace it." else "",
+                        listOf(FormField("OMDb key", "", if (omdbOn == true) "Saved on your server" else "Paste your OMDb key", secret = true))) { (k) ->
+                        if (k.isEmpty()) return@FormAsk if (omdbOn == true) null else "Enter an OMDb key"   // empty: keep the saved key
+                        Repo.setOmdbKey(k) ?: run { say("Ratings connected"); changed(); null }
                     })
                 },
                 SettingRow.Action(Icons.Default.NetworkCheck, "Check connection", "Contact your server now and report back") {

@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens offline. Streams, logos and
 // playlist downloads (other origins) always go straight to the network.
 
-const CACHE = 'm3u-player-v238';
+const CACHE = 'm3u-player-v239';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/polish.css', 'css/desktop.css',
   'js/app.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/epg-worker.js', 'js/vod.js', 'js/native.js', 'js/sports.js', 'js/fixtures.js', 'js/follow.js', 'js/watchlater.js', 'vendor/hls.min.js',
@@ -23,8 +23,8 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const req = e.request;
   const url = new URL(req.url);
-  // Poster thumbnails: cache first (they never change), in their own cache, trimmed now and then.
-  if (req.method === 'GET' && url.origin === location.origin && url.pathname === '/img') {
+  // Poster thumbnails and channel logos: cache first (they rarely change), in their own cache, trimmed now and then.
+  if (req.method === 'GET' && url.origin === location.origin && (url.pathname === '/img' || url.pathname === '/logo')) {
     e.respondWith(caches.open('m3u-img').then(async cache => {
       const hit = await cache.match(req);
       if (hit) return hit;

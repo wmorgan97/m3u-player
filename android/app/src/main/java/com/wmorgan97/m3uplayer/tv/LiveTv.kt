@@ -72,7 +72,7 @@ fun ChannelRowCards(act: TvActivity, all: List<Channel>, tick: Int, keyPrefix: S
     CardRow(chans, { it.url }) { c, i ->
         val (now, _) = remember(tick, c) { Repo.nowNext(c) }
         val p = now?.let { ((System.currentTimeMillis() - it.start).toFloat() / (it.end - it.start)) }
-        ChannelCard(c.name, c.logo, now?.title ?: prettyGroup(c.group), p, restoreKey = keyPrefix?.let { it + c.url }, onLong = { onLong(c) }) { act.playLive(chans, i) }
+        ChannelCard(c.name, Repo.chLogo(c), now?.title ?: prettyGroup(c.group), p, restoreKey = keyPrefix?.let { it + c.url }, onLong = { onLong(c) }) { act.playLive(chans, i) }
     }
 }
 

@@ -20,6 +20,8 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -152,7 +154,7 @@ object SportsHub {
     val total get() = COMPETITIONS.sumOf { it.queries.size }
     /** Competitions (labels, and classifySport names) the fixtures feed covers. */
     val FEED_COMPS = setOf("Premier League", "Champions League", "Europa League", "Conference League", "FA Cup", "EFL", "Carabao Cup", "Scottish Premiership",
-        "LaLiga", "Serie A", "Bundesliga", "MLS", "Formula 1", "F1", "Six Nations", "Rugby", "UFC", "NFL", "NBA")
+        "LaLiga", "Serie A", "Bundesliga", "MLS", "Formula 1", "F1", "Six Nations", "Rugby", "UFC", "NFL", "NBA", "Tennis", "ATP", "WTA")
     private val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
     /** One read of the channel list for the page and its searches (each used to read all ~19k channels at the same time). */
     private val liveLock = kotlinx.coroutines.sync.Mutex()
@@ -527,7 +529,7 @@ object SportsHub {
         val gUp = g?.rows.orEmpty().filter { !feedSport(it.first) }.flatMap { it.second }.filter { it.p.start in (now + 1)..until }.map(::guide)
         val live = (fx.filter { it.isOn(now) }.map(::item) + gLive).filter(shown)
             .sortedWith(compareByDescending<FxItem> { it.rank }.thenByDescending { it.c != null }.thenBy { it.start }).take(16)
-        val up = (fx.filter { it.status == "scheduled" && it.start > now }.map(::item) + gUp).filter(shown)
+        val up = (fx.filter { it.upcoming(now) }.map(::item) + gUp).filter(shown)
             .sortedWith(compareBy<FxItem> { it.start }.thenByDescending { it.rank })
         val dateFmt = java.text.SimpleDateFormat("EEE d MMM", java.util.Locale.UK)
         val days = up.groupBy { dayWord(it.start, now) }.map { (label, items) -> FxDay(label, dateFmt.format(java.util.Date(items.first().start)), items.take(40)) }
@@ -722,6 +724,7 @@ fun SportsScreen(act: TvActivity) {
     var info by remember { mutableStateOf<SportItem?>(null) }
     var infoTeams by remember { mutableStateOf<List<String>?>(null) }   // a fixture's two sides (else read from the title)
     var fxInfo by remember { mutableStateOf<Fixture?>(null) }
+    var fxDetail by remember { mutableStateOf<SportsHub.FxItem?>(null) }
     var teamInfo by remember { mutableStateOf<String?>(null) }
     val first = remember { FocusRequester() }
     var pageFocused by remember { mutableStateOf(false) }
@@ -748,8 +751,10 @@ fun SportsScreen(act: TvActivity) {
         val now = System.currentTimeMillis()
         val c = it.c; val pr = it.p
         when {
-            c == null || pr == null -> fxInfo = it.f
+            c == null || pr == null -> if (it.f?.detailed == true) fxDetail = it else fxInfo = it.f
             !longPress && (it.f?.isOn(now) == true || (it.f == null && pr.start <= now) || (it.ch?.teamCh == true && now >= pr.start)) -> watch(c)
+            // F1, tennis, UFC coming up: the session / order of play / fight card first (Remind me from there); hold OK for the programme.
+            !longPress && it.f?.detailed == true -> fxDetail = it
             else -> { info = SportItem(c, pr, it.comp); infoTeams = it.f?.let(::sides) }
         }
     }
@@ -816,7 +821,7 @@ fun SportsScreen(act: TvActivity) {
                     val list = chans.map { it.first }
                     CardRow(chans, { it.first.url }) { (c, now), i ->
                         val prog = now?.let { ((minute - it.start).toFloat() / (it.end - it.start)) }
-                        ChannelCard(c.name, c.logo, now?.title ?: prettyGroup(c.group), prog, restoreKey = "sp:ch:" + c.url) { act.playLive(list, i) }
+                        ChannelCard(c.name, Repo.chLogo(c), now?.title ?: prettyGroup(c.group), prog, restoreKey = "sp:ch:" + c.url) { act.playLive(list, i) }
                     }
                 }
             }
@@ -881,7 +886,7 @@ fun SportsScreen(act: TvActivity) {
                 val list = chans.map { it.first }
                 CardRow(chans, { it.first.url }) { (c, now), i ->
                     val prog = now?.let { ((minute - it.start).toFloat() / (it.end - it.start)) }
-                    ChannelCard(c.name, c.logo, now?.title ?: prettyGroup(c.group), prog, restoreKey = "sp:ch:" + c.url) { act.playLive(list, i) }
+                    ChannelCard(c.name, Repo.chLogo(c), now?.title ?: prettyGroup(c.group), prog, restoreKey = "sp:ch:" + c.url) { act.playLive(list, i) }
                 }
             }
         }
@@ -898,6 +903,8 @@ fun SportsScreen(act: TvActivity) {
         when (SportsHub.test) {
             "dialog" -> { val it = f.days.flatMap { d -> d.items }.firstOrNull { it.c != null } ?: return@LaunchedEffect; SportsHub.test = null; open(it, longPress = true) }
             "fxinfo" -> { val it = f.days.flatMap { d -> d.items }.firstOrNull { it.c == null && it.f != null } ?: return@LaunchedEffect; SportsHub.test = null; fxInfo = it.f }
+            // `--es testSports detail:tennis|f1|ufc`: the first such card's detail (F1 / tennis / UFC)
+            "detail:f1", "detail:tennis", "detail:ufc" -> { val sp = SportsHub.test!!.substringAfter(':'); val it = (f.live + f.days.flatMap { d -> d.items }).firstOrNull { it.f?.sport == sp } ?: return@LaunchedEffect; SportsHub.test = null; fxDetail = it }
             "teamch" -> { val it = (f.live + f.days.flatMap { d -> d.items }).firstOrNull { it.ch?.teamCh == true } ?: return@LaunchedEffect; SportsHub.test = null; open(it, longPress = true) }
         }
     }
@@ -914,6 +921,8 @@ fun SportsScreen(act: TvActivity) {
     }
     info?.let { s -> ProgrammeDialog(act, s.c, s.p, System.currentTimeMillis(), group(s.c), teams = infoTeams ?: teamsIn(s.p.title, s.comp)) { info = null; infoTeams = null } }
     fxInfo?.let { f -> FixtureDialog(f, fp?.chansKnown == true) { fxInfo = null } }
+    fxDetail?.let { d -> FixtureDetailDialog(d, fp?.chansKnown == true, reminded, onWatch = { fxDetail = null; d.c?.let(::watch) },
+        onProgramme = { fxDetail = null; val c = d.c; val pr = d.p; if (c != null && pr != null) { info = SportItem(c, pr, d.comp); infoTeams = d.f?.let(::sides) } }) { fxDetail = null } }
     teamInfo?.let { t -> TeamDialog(t) { teamInfo = null } }
 }
 
@@ -994,9 +1003,10 @@ private fun SportsRowTitle(text: String, count: Int? = null, first: Boolean = fa
 /** The channel's logo, small, on its own dark tile (initials when it has none). */
 @Composable
 private fun SmallLogo(c: Channel, w: Dp, h: Dp) {
+    val src = remember(c) { Repo.chLogo(c) }
     Box(Modifier.size(w, h).clip(RoundedCornerShape(5.dp)).background(Color(0x1FFFFFFF)), contentAlignment = Alignment.Center) {
-        if (c.logo.isBlank()) Text(initials(c.name), fontSize = Tv.micro, color = Tv.muted, fontWeight = FontWeight.Bold)
-        else Picture(Repo.logo(c.logo), Modifier.fillMaxSize().padding(3.dp).background(Color.Transparent), androidx.compose.ui.layout.ContentScale.Fit, fade = false) {
+        if (src.isBlank()) Text(initials(c.name), fontSize = Tv.micro, color = Tv.muted, fontWeight = FontWeight.Bold)
+        else Picture(Repo.logo(src), Modifier.fillMaxSize().padding(3.dp).background(Color.Transparent), androidx.compose.ui.layout.ContentScale.Fit, fade = false) {
             Text(initials(c.name), fontSize = Tv.micro, color = Tv.muted, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.Center))
         }
     }
@@ -1131,7 +1141,7 @@ private fun Crest(t: FxTeam?, size: Dp) {
 @Composable
 private fun CompTile(f: Fixture, size: Dp) {
     Box(Modifier.size(size).clip(Tv.shapeS).background(Tv.surface3), contentAlignment = Alignment.Center) {
-        Text(when (f.sport) { "f1" -> "F1"; "ufc" -> "UFC"; else -> f.comp.take(2) }, fontSize = Tv.micro, fontWeight = FontWeight.Bold, color = Tv.text2, maxLines = 1)
+        Text(when (f.sport) { "f1" -> "F1"; "ufc" -> "UFC"; "tennis" -> f.comp.take(3); else -> f.comp.take(2) }, fontSize = if (f.sport == "tennis") 10.sp else Tv.micro, fontWeight = FontWeight.Bold, color = Tv.text2, maxLines = 1)
     }
 }
 
@@ -1157,14 +1167,63 @@ private fun FixtureLines(it: SportsHub.FxItem, live: Boolean, crest: Dp, big: Bo
             TeamLine(f.home, if (scored) f.home.score else null, crest, big)
             TeamLine(f.away, if (scored) f.away.score else null, crest, big)
         }
-        f != null -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        f != null -> Column(verticalArrangement = Arrangement.spacedBy(if (live && (f.order.isNotEmpty() || f.matches.isNotEmpty())) 2.dp else 4.dp)) {
+            val dense = live && ((f.sport == "f1" && f.order.isNotEmpty()) || (f.sport == "tennis" && f.matches.any { m -> m.status == "live" }))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CompTile(f, crest); Spacer(Modifier.width(10.dp))
-                Text(f.title, fontSize = if (big) Tv.body else Tv.bodySmall, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(f.title, fontSize = if (big && !dense) Tv.body else Tv.bodySmall, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Text(f.session.ifBlank { f.venue }, fontSize = Tv.label, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = crest + 10.dp))
+            val pad = Modifier.padding(start = crest + 10.dp)
+            val on = f.matches.filter { m -> m.status == "live" }
+            when {
+                // F1 on: the top three, the gap to the leader.
+                live && f.sport == "f1" && f.order.isNotEmpty() -> f.order.forEach { d -> AthRow(d, null, pad, pos = d.pos, gap = d.gap) }
+                // Tennis on: the first match on court with its sets.
+                live && on.isNotEmpty() -> { AthRow(on[0].a, on[0].b, pad); AthRow(on[0].b, on[0].a, pad)
+                    if (on.size > 1) Text("+${on.size - 1} more on court", fontSize = Tv.micro, color = Tv.muted, maxLines = 1, modifier = pad) }
+                else -> Text(subLine(f, live), fontSize = Tv.label, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = pad)
+            }
         }
         else -> Text(it.title, fontSize = if (big) Tv.body else Tv.bodySmall, lineHeight = if (big) Tv.bodyLine else Tv.bodySmallLine, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** The line under an F1 / tennis / UFC title: session and circuit; round and how many matches; the main event. */
+private fun subLine(f: Fixture, live: Boolean): String = when (f.sport) {
+    "f1" -> listOf(f.session, f.venue, f.country).filter { it.isNotBlank() }.joinToString(" · ")
+    "tennis" -> { val n = f.matches.count { it.status == "scheduled" }; val m = f.focusMatch
+        listOfNotNull(f.session.ifBlank { null }, if (n > 1) "$n matches" else m?.let { "${it.a.surname} v ${it.b.surname}" }).joinToString(" · ") }
+    "ufc" -> if (live && !f.minute.isNullOrBlank()) "Now: ${f.minute}" else f.mainEvent?.let { "Main event · ${it.weight}".removeSuffix(" · ") } ?: "Main card ${hhmm(f.start)}"
+    else -> f.session.ifBlank { f.venue }
+}
+
+/** A country flag from the feed's CDN (a 3-letter code), round and small; nothing when there is none. */
+@Composable
+private fun Flag(code: String, size: Dp) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    Box(Modifier.size(size).clip(RoundedCornerShape(50)).background(Tv.surface3)) {
+        if (code.isNotBlank()) {
+            val url = "https://a.espncdn.com/combiner/i?img=/i/teamlogos/countries/500/${code.lowercase()}.png&w=40&h=40"
+            coil.compose.AsyncImage(model = remember(url) { coil.request.ImageRequest.Builder(ctx).data(url).size(40).crossfade(false).build() },
+                contentDescription = null, contentScale = androidx.compose.ui.layout.ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        }
+    }
+}
+
+/** A driver / player / fighter on one line: (place), flag, name, seed, and a tennis score by set or a race gap. */
+@Composable
+private fun AthRow(a: FxAth, other: FxAth?, modifier: Modifier = Modifier, pos: Int? = null, gap: String = "", full: Boolean = false, size: androidx.compose.ui.unit.TextUnit = Tv.bodySmall) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        if (pos != null) Text("$pos", Modifier.width(16.dp), fontSize = Tv.label, fontWeight = FontWeight.Bold, color = Tv.muted, maxLines = 1)
+        Flag(a.flag, 16.dp); Spacer(Modifier.width(8.dp))
+        Text((if (full) a.name else a.surname) + (a.seed?.let { "  ($it)" } ?: ""), Modifier.weight(1f), fontSize = size,
+            fontWeight = if (a.win || pos == 1) FontWeight.Bold else FontWeight.SemiBold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (gap.isNotBlank()) Text(gap, fontSize = Tv.label, color = Tv.muted, maxLines = 1)
+        a.sets.forEachIndexed { i, v ->
+            val won = (v.toIntOrNull() ?: 0) > (other?.sets?.getOrNull(i)?.toIntOrNull() ?: 99)
+            Text(v, Modifier.width(18.dp), fontSize = size, fontWeight = if (won) FontWeight.Bold else FontWeight.Normal, color = if (won) Tv.text else Tv.muted, maxLines = 1,
+                textAlign = androidx.compose.ui.text.style.TextAlign.End)
+        }
     }
 }
 
@@ -1236,7 +1295,12 @@ private fun FxTeamCard(team: String, it: SportsHub.FxItem, now: Long, known: Boo
     val f = it.f!!
     val on = f.isOn(now)
     val mine = FixtureRules.followedSide(team, f)
-    val whenText = if (on) (if (f.status == "live" && f.home != null) "${f.minute ?: "Live"} · ${f.home.score ?: 0}–${f.away?.score ?: 0}" else "Live now") else "${dayWord(f.start, now)} ${hhmm(f.start)}"
+    // A player or fighter: their own match on the day's order of play / the card, not the whole event.
+    val bout = (f.matches + f.fights).firstOrNull { it.has(team) }
+    val title = bout?.let { "${it.a.surname} v ${it.b.surname} · ${f.title}" } ?: it.title
+    val at = bout?.start?.takeIf { s -> s > 0 } ?: f.start
+    val boutOn = if (bout != null && f.sport == "tennis") bout.status == "live" else on
+    val whenText = if (boutOn) (if (f.status == "live" && f.home != null) "${f.minute ?: "Live"} · ${f.home.score ?: 0}–${f.away?.score ?: 0}" else "Live now") else "${dayWord(at, now)} ${hhmm(at)}"
     val where = whereText(it, known)
     FocusCard(modifier.width(FX_NEXT_W).height(NEXT_H), scale = Tv.scaleWide, restoreKey = "sp:team:" + team.lowercase(),
         label = "$team: ${it.title}, $whenText${where?.let { w -> ", $w" } ?: ""}", onLongClick = onLong, onClick = onClick) {
@@ -1248,10 +1312,10 @@ private fun FxTeamCard(team: String, it: SportsHub.FxItem, now: Long, known: Boo
                     if (reminded) Icon(Icons.Default.NotificationsActive, "Reminder set", tint = Tv.star, modifier = Modifier.size(18.dp))
                 }
                 Spacer(Modifier.weight(1f))
-                Text(it.title, fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(title, fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (on) { LiveDot(); Spacer(Modifier.width(6.dp)) }
+                    if (boutOn) { LiveDot(); Spacer(Modifier.width(6.dp)) }
                     Text(whenText + (where?.let { w -> "  ·  " + w.removePrefix("On ") } ?: ""), fontSize = Tv.micro, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
@@ -1286,5 +1350,108 @@ private fun FixtureDialog(f: Fixture, known: Boolean, onDismiss: () -> Unit) {
             }
         }
         LaunchedEffect(Unit) { delay(50); runCatching { first.requestFocus() } }
+    }
+}
+
+
+/** An F1 session, a tennis day or a UFC card in full (as the iPhone's sheet): the running order and the weekend's
+ *  sessions; the order of play with scores; the fight card, main event first. Watch / Remind me when one of your
+ *  channels shows it, Follow for the sport and the people in the match that matters now. */
+@Composable
+private fun FixtureDetailDialog(it: SportsHub.FxItem, known: Boolean, reminded: Set<String>, onWatch: () -> Unit, onProgramme: () -> Unit, onDismiss: () -> Unit) {
+    val f = it.f ?: return
+    val first = remember { FocusRequester() }
+    val now = System.currentTimeMillis()
+    val on = f.isOn(now)
+    val people = when (f.sport) {
+        "tennis" -> f.focusMatch?.let { m -> listOf(m.a.name, m.b.name) }.orEmpty()
+        "ufc" -> f.mainEvent?.let { m -> listOf(m.a.name, m.b.name) }.orEmpty()
+        else -> f.order.take(1).map { d -> d.name }
+    }
+    val follows = listOf(when (f.sport) { "f1" -> "F1"; "ufc" -> "UFC"; else -> "Tennis" }) + people
+    val following = remember { mutableStateMapOf<String, Boolean>().apply { follows.forEach { put(it, Repo.isFollowing(it)) } } }
+    val reminder = it.c != null && it.p != null && "${it.c!!.url}|${it.p!!.start}" in reminded
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        TvDialogCard(760.dp) {
+            Text(listOf(f.comp, if (f.sport == "f1") f.session else f.session).filter { s -> s.isNotBlank() }.distinct().joinToString(" · "), fontSize = Tv.label, color = Tv.muted, fontWeight = Tv.wStrong, maxLines = 1)
+            Text(f.title, fontSize = Tv.title, lineHeight = Tv.titleLine, fontWeight = Tv.wTitle, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+            val whenText = if (on) "On now" + (f.minute?.let { m -> " · $m" } ?: "") else if (f.status == "final") "Finished" else "${dayWord(f.start, now)} ${hhmm(f.start)}"
+            val where = it.where?.let { w -> "On $w" } ?: if (known) "Not on your ${if (Repo.sportsAll) "" else "UK "}channels" else "Finding the channel…"
+            Text(listOf(whenText, listOf(f.venue, f.country).filter { s -> s.isNotBlank() }.joinToString(", "), where).filter { s -> s.isNotBlank() }.joinToString("  ·  "),
+                fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
+            Spacer(Modifier.height(14.dp))
+            // The list scrolls under the D-pad (each match / bout takes the focus in turn); the buttons stay below it.
+            Column(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                when (f.sport) {
+                    "f1" -> {
+                        if (f.order.isNotEmpty()) {
+                            DetailHead(if (f.status == "final") "Result" else "Running order")
+                            f.order.forEach { d -> AthRow(d, null, pos = d.pos, gap = d.gap, full = true) }
+                            Spacer(Modifier.height(6.dp))
+                        }
+                        DetailHead("The weekend")
+                        FixturesHub.list.value.orEmpty().filter { x -> x.sport == "f1" && x.title == f.title }.sortedBy { x -> x.start }.forEach { x ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(if (x.isOn(now)) "Live" else if (x.status == "final") "Done" else "${dayWord(x.start, now)} ${hhmm(x.start)}", Modifier.width(140.dp), fontSize = Tv.label,
+                                    color = if (x.isOn(now)) Tv.live else Tv.muted, maxLines = 1)
+                                Text(x.session, fontSize = Tv.bodySmall, fontWeight = if (x.id == f.id) FontWeight.Bold else FontWeight.Normal, color = if (x.id == f.id) Tv.text else Tv.text2, maxLines = 1)
+                            }
+                        }
+                    }
+                    "tennis" -> {
+                        // On court first, then still to come, then played; as many as fit.
+                        val list = f.matches.sortedBy { m -> when (m.status) { "live" -> 0; "scheduled" -> 1; else -> 2 } }
+                        list.forEach { m -> BoutRow(m, now) }
+                    }
+                    "ufc" -> {
+                        for (card in listOf("Main card", "Prelims", "Early prelims")) {
+                            val l = f.fights.filter { b -> b.card == card }
+                            if (l.isEmpty()) continue
+                            DetailHead(card + when (card) { "Main card" -> "  ·  ${hhmm(f.start)}"; "Prelims" -> if (f.prelims > 0) "  ·  ${hhmm(f.prelims)}" else ""; else -> "" })
+                            l.forEach { b -> BoutRow(b, now) }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                var firstSet = false
+                fun focusFirst(): Modifier = if (!firstSet) { firstSet = true; Modifier.focusRequester(first) } else Modifier
+                if (it.c != null && it.p != null) {
+                    if (on || it.p!!.start <= now) TvButton("Watch", onWatch, focusFirst(), style = TvButtonStyle.Primary)
+                    else TvButton(if (reminder) "Reminder set ✓" else "Remind me", onProgramme, focusFirst(), style = TvButtonStyle.Primary)
+                }
+                follows.forEach { q ->
+                    val label = if (q.contains(' ')) q.substringAfterLast(' ') else q
+                    TvButton(if (following[q] == true) "Following $label ✓" else "Follow $label", { following[q] = Repo.toggleFollow(q) }, focusFirst())
+                }
+                TvButton("Close", onDismiss)
+            }
+        }
+        LaunchedEffect(Unit) { delay(50); runCatching { first.requestFocus() } }
+    }
+}
+
+@Composable
+private fun DetailHead(t: String) = Text(t.uppercase(), fontSize = Tv.micro, fontWeight = FontWeight.Bold, color = Tv.muted, letterSpacing = 1.sp, modifier = Modifier.padding(top = 2.dp))
+
+/** A tennis match or UFC bout in the detail: when / where on the left, the two names (and sets) on the right; the main event marked. */
+@Composable
+private fun BoutRow(m: FxBout, now: Long) {
+    var focused by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().clip(Tv.shapeS).background(if (focused) Tv.surface3 else if (m.main) Tv.accent.copy(alpha = .10f) else Color.Transparent)
+        .onFocusChanged { focused = it.isFocused }.focusable().padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.width(150.dp)) {
+            val live = m.status == "live"
+            Text(when { m.main -> "Main event"; live -> m.detail.ifBlank { "Live" }; m.status == "final" -> m.detail.ifBlank { "Done" }; m.start > 0 -> hhmm(m.start); else -> m.weight },
+                fontSize = Tv.label, fontWeight = FontWeight.SemiBold, color = if (live) Tv.live else if (m.main) Tv.accent else Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val sub = listOf(m.round, m.court).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { if (m.main) m.weight else "" }
+            if (sub.isNotBlank()) Text(sub, fontSize = Tv.micro, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            AthRow(m.a, m.b, full = true, size = Tv.label)
+            AthRow(m.b, m.a, full = true, size = Tv.label)
+        }
     }
 }

@@ -9,7 +9,7 @@ import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
 import { wlKey, wlEntry, watchLaterList, adoptWatchLater } from './watchlater.js';
 import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport, importance } from './sports.js';
-import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup, isEventGroup, eventChannelsFor } from './fixtures.js';
+import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup, isEventGroup, eventChannelsFor, namesPerson } from './fixtures.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, nativeVlcClose, nativeDl, headersFromOpts } from './native.js';
 import { handoffEntry, hasTv, openTvs } from './handoff.js';
@@ -396,11 +396,33 @@ function watchLaterShelf(kind, asHome) {
 function favoritesChanged() { syncMeta.favAt = Date.now(); syncSoon(); }
 
 // ---------- TMDB: trending, backdrops, plots, cast, trailers (the key lives on your server) ----------
-let tmdbOn = null;   // null = unknown yet
+let tmdbOn = null, omdbOn = false;   // null = unknown yet
 async function tmdbStatus() {
   if (!canSync()) return false;
-  if (tmdbOn === null) { try { tmdbOn = !!(await (await fetch(serverApi('tmdb/status'), { cache: 'no-store' })).json()).configured; } catch { tmdbOn = false; } }
+  if (tmdbOn === null) { try { const j = await (await fetch(serverApi('tmdb/status'), { cache: 'no-store' })).json(); tmdbOn = !!j.configured; omdbOn = !!j.omdb; } catch { tmdbOn = false; } }
   return tmdbOn;
+}
+// Ratings from OMDb (IMDb, Rotten Tomatoes, Metacritic): its free key allows 1,000 lookups a day, so they're only
+// asked for when a details page opens (the server keeps each answer for weeks). Without a key: nothing.
+async function omdbSheet() {
+  if (!canSync()) { toast('Connect your server first'); return; }
+  await tmdbStatus();
+  const v = await formSheet({
+    title: 'Ratings (OMDb)',
+    intro: `Adds IMDb and Rotten Tomatoes ratings to film and series pages. Get a free key at omdbapi.com (API Key, Free). It's kept on your server only. Ratings by OMDb, under its non-commercial licence.${omdbOn ? ' A key is already saved: enter a new one to replace it, or leave it empty to remove it.' : ''}`,
+    fields: [{ name: 'key', label: 'OMDb key', value: '', required: !omdbOn, placeholder: omdbOn ? 'Saved on your server' : 'Paste your OMDb key' }],
+    submit: 'Save',
+  });
+  if (!v) return;
+  toast('Checking the key with OMDb…', { busy: true });
+  try {
+    const res = await fetch(serverApi('tmdb/omdb-key'), { method: 'POST', body: JSON.stringify({ key: v.key.trim() }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(d.error || `The server replied ${res.status}`); return; }
+    omdbOn = d.configured;
+    toast(d.configured ? 'Ratings connected' : 'OMDb key removed');
+    rerender();
+  } catch (e) { toast(e.message); }
 }
 async function tmdbSheet() {
   if (!canSync()) { toast('Connect your server first'); return; }
@@ -435,6 +457,27 @@ async function tmdbInfo(it) {
   if (!tmdbInfoCache.has(k)) tmdbInfoCache.set(k, fetch(`${base}${base.includes('?') ? '&' : '?'}kind=${kind}&name=${encodeURIComponent(name)}&year=${year}`).then(r => r.ok ? r.json() : null).then(d => (d?.tid ? d : null)).catch(() => null));
   return tmdbInfoCache.get(k);
 }
+const ratingsCache = new Map();
+async function omdbRatings(t) {
+  if (!t?.imdb || !omdbOn) return null;
+  const base = serverApi('tmdb/ratings');
+  if (!ratingsCache.has(t.imdb)) ratingsCache.set(t.imdb, fetch(`${base}${base.includes('?') ? '&' : '?'}imdb=${encodeURIComponent(t.imdb)}`).then(r => r.ok ? r.json() : null).then(d => (d && (d.imdb || d.rt || d.mc) ? d : null)).catch(() => null));
+  return ratingsCache.get(t.imdb);
+}
+// The title as its logo (TMDB's transparent title treatment, through the server's image cache as a PNG), the text
+// when there's none or it fails to load. The text stays for screen readers (and for Home's section matching).
+function titleLogoSrc(t) {
+  if (!t?.logo) return '';
+  if (/\.svg$/i.test(t.logo) || !canSync()) return t.logo;
+  const base = serverApi('img');
+  return `${base}${base.includes('?') ? '&' : '?'}w=800&f=png&u=${encodeURIComponent(t.logo)}`;
+}
+const titleLogoInner = (title, t) => `<img class="title-logo" src="${esc(titleLogoSrc(t))}" alt="" ${t.logoAspect ? `style="aspect-ratio:${t.logoAspect}"` : ''} onerror="this.parentNode.classList.remove('has-logo');this.remove()"><span class="title-text">${esc(title)}</span>`;
+const titleHtml = (cls, title, t) => t?.logo ? `<div class="${cls} has-logo">${titleLogoInner(title, t)}</div>` : `<div class="${cls}">${esc(title)}</div>`;
+// "IMDb 8.8 · RT 87%" (Metacritic only when Rotten Tomatoes has no score): one quiet pill beside the TMDB rating.
+const extRatingsHtml = r => { const parts = r ? [r.imdb && `<b>IMDb</b> ${r.imdb.toFixed(1)}`, r.rt != null && `<b>RT</b> ${r.rt}%`, r.rt == null && r.mc && `<b>MC</b> ${r.mc}`].filter(Boolean) : []; return parts.length ? `<span class="pill ext-rating"><span>${parts.join(' · ')}</span></span>` : ''; };
+// "Also on": UK streaming services (TMDB's watch providers, data from JustWatch, credited as their terms ask).
+const alsoOnHtml = t => t?.providers?.length ? `<div class="also-on"><span class="also-label">Also on</span>${t.providers.map(p => `<span class="prov">${p.logo ? `<img src="${esc(thumb(p.logo, 120))}" alt="" loading="lazy" onerror="this.remove()">` : ''}${esc(p.name)}</span>`).join('')}<span class="jw-credit">Streaming data: JustWatch</span></div>` : '';
 // Fill gaps in the provider's own details with TMDB's (the provider's stay when it has them).
 function withTmdb(i, t) {
   if (!t) return i;
@@ -1323,8 +1366,23 @@ function homeRowHtml(r) {
 // First sentence of a plot: the hero's one-line hook.
 const hookOf = s => { s = String(s || '').replace(/\s+/g, ' ').trim(); const m = s.match(/^.{24,}?[.!?](?=\s|$)/); return m ? m[0] : s; };
 let heroTimer = 0, heroHold = 0;
+// Hero titles as logos: TMDB's details for the (at most four) slides, fetched once. The markup always has the text
+// title (so Home's unchanged-section check keeps the live carousel); the logo is put in place once it's on screen.
+const heroLogos = new Map();   // kind|name -> Promise of details with a logo, or null
+const heroLogoKey = it => `${it.kind}|${it.name}`;
+const heroTitleHtml = it => `<div class="hero-title" data-hl="${esc(heroLogoKey(it))}">${esc(displayTitle(it.name))}</div>`;
+function heroLogosLoad(items) {
+  for (const it of items) {
+    const k = heroLogoKey(it);
+    if (!heroLogos.has(k)) heroLogos.set(k, tmdbInfo(it).then(t => (t?.logo ? t : null)).catch(() => null));
+    heroLogos.get(k).then(t => requestAnimationFrame(() => {
+      if (t) document.querySelectorAll('.hero-title[data-hl]:not(.has-logo)').forEach(el => { if (el.dataset.hl === k) { el.classList.add('has-logo'); el.innerHTML = titleLogoInner(displayTitle(it.name), t); } });
+    }));
+  }
+}
 function heroHtml(items) {
   clearInterval(heroTimer);
+  heroLogosLoad(items);
   const go = (car, i) => { const n = car.children.length; car.scrollTo({ left: ((i + n) % n) * car.clientWidth, behavior: 'smooth' }); };
   queueMicrotask(() => {
     const car = $('.hero-car'), dots = $('.hero-dots');
@@ -1357,7 +1415,7 @@ function heroHtml(items) {
       <div class="hero-body">
         <div class="hero-text">
           <span class="hero-kicker">${icon(series ? 'grid' : 'film')} ${esc(kicker)}</span>
-          <div class="hero-title">${esc(displayTitle(it.name))}</div>
+          ${heroTitleHtml(it)}
           <div class="hero-meta">${meta.map(x => `<span>${esc(x)}</span>`).join('')}</div>
           ${plot ? `<p class="hero-plot">${esc(plot)}</p>` : ''}
           <div class="hero-actions"><button type="button" class="btn primary" data-hero-play="${k}">${icon('play')} Play</button><button type="button" class="btn">More info</button></div>
@@ -2639,9 +2697,17 @@ function initials(name) {
 
 // A stable per-channel hue so logo-less channels get a distinct coloured tile, not grey.
 const hueOf = s => { let h = 7; for (const ch of String(s || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h % 360; };
+// Live channels' logos come from the server's matcher (clean tv-logos / iptv-org artwork, else the provider's own,
+// shrunk and cached); a logo the user set by hand, films and offline use keep the channel's own picture.
+function logoSrc(c) {
+  if (!canSync() || !isLiveChannel(c) || c.edited || !c.name) return c.logo || '';
+  const base = serverApi('logo');
+  return `${base}${base.includes('?') ? '&' : '?'}w=200&name=${encodeURIComponent(c.name)}${c.tvgId ? `&id=${encodeURIComponent(c.tvgId)}` : ''}${/^https?:/i.test(c.logo || '') ? `&u=${encodeURIComponent(c.logo)}` : ''}`;
+}
 function logoHtml(c, extra = '') {
-  return `<span class="logo" ${extra} style="--hue:${hueOf(c.name)}" data-initials="${initials(c.name)}">${c.logo
-    ? `<img src="${esc(c.logo)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>`;
+  const src = logoSrc(c);
+  return `<span class="logo" ${extra} style="--hue:${hueOf(c.name)}" data-initials="${initials(c.name)}">${src
+    ? `<img src="${esc(src)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>`;
 }
 
 const nowChannel = () => state.playing && state.playing.list[state.playing.index];
@@ -3112,9 +3178,9 @@ function detailHtml(m, info = {}) {
     <div class="detail-top">
       <span class="detail-poster" data-initials="${initials(displayTitle(m.name))}">${(i.movie_image || i.cover_big || m.logo) ? `<img src="${esc(i.movie_image || i.cover_big || m.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
       <div class="detail-head">
-        <div class="detail-title">${esc(displayTitle(m.name))}</div>
+        ${titleHtml('detail-title', displayTitle(m.name), i.tmdb)}
         ${i.tmdb?.tagline ? `<div class="muted detail-tagline">${esc(i.tmdb.tagline)}</div>` : ''}
-        <div class="film-meta">${meta.map(x => `<span class="pill">${esc(x)}</span>`).join('')}${i.tmdb?.vote ? `<span class="pill rating">★ ${i.tmdb.vote.toFixed(1)} · ${i.tmdb.votes >= 1000 ? `${(i.tmdb.votes / 1000).toFixed(1)}k` : i.tmdb.votes} votes</span>` : m.rating ? `<span class="pill rating">★ ${m.rating.toFixed(1)}</span>` : ''}</div>
+        <div class="film-meta">${meta.map(x => `<span class="pill">${esc(x)}</span>`).join('')}${i.tmdb?.vote ? `<span class="pill rating">★ ${i.tmdb.vote.toFixed(1)} · ${i.tmdb.votes >= 1000 ? `${(i.tmdb.votes / 1000).toFixed(1)}k` : i.tmdb.votes} votes</span>` : m.rating ? `<span class="pill rating">★ ${m.rating.toFixed(1)}</span>` : ''}${extRatingsHtml(info.ratings)}</div>
         ${pr && !pr.done && pr.t > 30 ? `<span class="bar film-bar"><i style="width:${Math.min(100, (pr.t / pr.d) * 100).toFixed(1)}%"></i></span><span class="muted">${fmtDur(pr.d - pr.t)} left</span>` : ''}
       </div>
     </div>
@@ -3134,6 +3200,7 @@ function detailHtml(m, info = {}) {
     ${i.plot || i.description || m.plot ? `<p class="detail-plot clamp3" data-plot>${esc(i.plot || i.description || m.plot)}</p>` : ''}
     ${i.cast || i.actors ? `<p class="muted film-credit clamp" data-plot><b>Cast</b> ${esc(i.cast || i.actors)}</p>` : ''}
     ${i.director ? `<p class="muted film-credit"><b>Director</b> ${esc(i.director)}</p>` : ''}
+    ${alsoOnHtml(i.tmdb)}
   </div>`;
 }
 
@@ -3239,13 +3306,14 @@ async function movieSheet(m) {
   });
   open();
   const still = () => $('#sheet .detail')?.dataset.id === m.id;
-  tmdbInfo(m).then(t => { if (t) { info = { ...info, tmdb: t }; if (still()) open(true); } });
+  tmdbInfo(m).then(t => { if (t) { info = { ...info, tmdb: t }; if (still()) open(true); } return omdbRatings(t); })
+    .then(r => { if (r) { info = { ...info, ratings: r }; if (still()) open(true); } });
   versionsOf(m).then(vs => { if (vs.length > 1) { info = { ...info, versions: vs }; if (still()) open(true); } });
   const x = xtOf(playlistOf(m));
   if (!x || !m.sid) return;
   try {
     const pi = await x.vodInfo(m.sid) || {};
-    info = { ...pi, tmdb: info.tmdb, versions: info.versions };
+    info = { ...pi, tmdb: info.tmdb, versions: info.versions, ratings: info.ratings };
     if (still()) open(true);
   } catch {}
 }
@@ -3298,6 +3366,8 @@ async function seriesSheet(s, { play = false } = {}) {
   const last = Object.values(state.progress).filter(e => urls.has(e.item.url)).sort((a, b) => b.at - a.at)[0];
   let season = last ? urls.get(last.item.url) : seasons[0];
   const i = info.info || {};
+  let ratings = null;
+  omdbRatings(tm).then(r => { if (r) { ratings = r; if ($('#sheet .detail')?.dataset.id === s.id) render(true); } });
 
   // "Continue": the most recently watched unfinished episode, else the first unwatched one.
   const allEps = seasons.flatMap(se => episodesOf(se));
@@ -3316,14 +3386,15 @@ async function seriesSheet(s, { play = false } = {}) {
       <div class="detail-top">
         <span class="detail-poster" data-initials="${initials(displayTitle(s.name))}">${(i.cover || s.logo) ? `<img src="${esc(i.cover || s.logo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</span>
         <div class="detail-head">
-          <div class="detail-title">${esc(displayTitle(s.name))}</div>
-          <div class="film-meta">${[s.year, i.genre || s.genre, plural(seasons.length, 'season'), plural(allEps.length, 'episode')].filter(Boolean).map(m => `<span class="pill">${esc(m)}</span>`).join('')}${s.rating ? `<span class="pill rating">★ ${s.rating.toFixed(1)}</span>` : ''}</div>
+          ${titleHtml('detail-title', displayTitle(s.name), tm)}
+          <div class="film-meta">${[s.year, i.genre || s.genre, plural(seasons.length, 'season'), plural(allEps.length, 'episode')].filter(Boolean).map(m => `<span class="pill">${esc(m)}</span>`).join('')}${s.rating ? `<span class="pill rating">★ ${s.rating.toFixed(1)}</span>` : ''}${extRatingsHtml(ratings)}</div>
           ${watched ? `<span class="muted">${watched} of ${allEps.length} watched</span>` : ''}
         </div>
       </div>
       ${continueEp ? `<div class="detail-actions film-play"><button class="btn primary" data-continue>${icon('play')} ${state.progress[continueEp.url]?.t > 30 && !state.progress[continueEp.url]?.done ? 'Continue' : 'Play'} S${esc(continueEp.season ?? seasons.find(se => episodesOf(se).includes(continueEp)))} E${esc(continueEp.num)}</button></div>` : ''}
       <div class="film-tools"><button data-sfav>${icon('star', favUrls.has(s.url || s.id) ? 'on' : '')}<span>${favUrls.has(s.url || s.id) ? 'Saved' : 'Save'}</span></button>${wlButton(s)}${i.youtube_trailer ? `<button data-trailer>${icon('film')}<span>Trailer</span></button>` : ''}</div>
       ${i.plot || s.plot ? `<p class="detail-plot clamp3" data-plot>${esc(i.plot || s.plot)}</p>` : ''}
+      ${alsoOnHtml(tm)}
       ${seasons.length > 1 ? `<div class="chips season-chips">${seasons.map(se => `<button class="chip ${se === season ? 'active' : ''}" data-season="${esc(se)}">Season ${esc(se)}</button>`).join('')}</div>` : ''}
       ${list.length ? `<ul class="eps cards-eps">${list.map((e, k) => {
         const pr = state.progress[e.url];
@@ -3893,7 +3964,7 @@ const renderSportsSoon = debounce(() => renderSports(), 120);
 // asked which of your channels shows each game (POST /fixtures/channels). An older server without /fixtures, or a feed
 // that fails, leaves the guide-only page above as it was. Sports the feed doesn't cover (darts, snooker, cricket, golf…)
 // still come from the guide search and sit in the same lists.
-const FEED_SPORTS = new Set(['football', 'f1', 'nfl', 'nba', 'nhl', 'mlb', 'ufc', 'rugby']);
+const FEED_SPORTS = new Set(['football', 'f1', 'nfl', 'nba', 'nhl', 'mlb', 'ufc', 'rugby', 'tennis']);
 const FX_BIG = 70;   // Premier League … LaLiga: shown even when not on your channels; smaller ones only under their chip
 const fxHub = { at: 0, ok: undefined, list: null, loading: null, chAt: 0, chLoading: null, on: new Map() };   // fixture id -> [{ channel, prog, live }]
 const fxUsable = () => fxHub.ok === true && !!fxHub.list;
@@ -3987,7 +4058,42 @@ const fxName = t => (t.name.length <= 16 || !t.short ? t.name : t.short);
 // Club crests from the feed's CDN, asked for at the size shown (a 4 KB picture instead of a 36 KB one).
 const crestSrc = u => /^https:\/\/a\.espncdn\.com\/i\//.test(u || '') ? `https://a.espncdn.com/combiner/i?img=${u.slice(22)}&w=64&h=64` : u || '';
 const crest = t => t?.crest ? `<img class="sp-crest" src="${esc(crestSrc(t.crest))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<span class="sp-crest"></span>';
-const fxBadge = f => `<span class="sp-crest sp-badge">${esc(f.sport === 'f1' ? 'F1' : f.sport === 'ufc' ? 'UFC' : f.sport === 'golf' ? 'G' : (f.comp || '?').slice(0, 2))}</span>`;
+const fxBadge = f => `<span class="sp-crest sp-badge">${esc(f.sport === 'f1' ? 'F1' : f.sport === 'ufc' ? 'UFC' : f.sport === 'golf' ? 'G' : f.sport === 'tennis' ? f.comp : (f.comp || '?').slice(0, 2))}</span>`;
+// ---- F1, tennis, UFC: drivers, players and fighters (flags from the feed's CDN, at the size shown) ----
+const flagImg = code => code ? `<img class="sp-flag" src="https://a.espncdn.com/combiner/i?img=/i/teamlogos/countries/500/${esc(code.toLowerCase())}.png&w=40&h=40" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<span class="sp-flag"></span>';
+const surname = p => (p.short || p.name).replace(/^[A-Z]\.\s+/, '');
+const seedTag = p => p.seed ? `<small class="sp-seed">${p.seed}</small>` : '';
+const setCells = (p, o) => (p.sets || []).map((v, i) => `<i class="${+v > +((o.sets || [])[i] ?? -1) ? 'won' : ''}">${esc(v)}${p.tb?.[i] != null && +v < +((o.sets || [])[i] ?? 0) ? `<sup>${esc(p.tb[i])}</sup>` : ''}</i>`).join('');
+// One player's line of a tennis match: flag, name, seed, sets (the set they won in full colour).
+const tennisLine = (p, o, cls = '') => `<span class="sp-fx-team sp-ath${p.win ? ' win' : ''}${cls}">${flagImg(p.flag)}<span>${esc(surname(p))}${seedTag(p)}</span>${p.sets ? `<span class="sp-sets">${setCells(p, o)}</span>` : ''}</span>`;
+// The match to show for a tennis day: the first on court, else the next to start, else the last played.
+const tennisFocus = f => f.matches.find(m => m.status === 'live') || f.matches.find(m => m.status === 'scheduled') || f.matches[f.matches.length - 1];
+const f1Place = f => [f.venue, f.country].filter(Boolean).join(', ');
+const f1OrderLines = f => f.order.map(d => `<span class="sp-fx-team sp-ath"><small class="sp-pos">${d.pos}</small>${flagImg(d.flag)}<span>${esc(surname(d))}</span>${d.gap ? `<small class="sp-gap">${esc(d.gap)}</small>` : ''}</span>`).join('');
+const ufcMain = f => f.fights?.find(b => b.main);
+// "Main 01:00 · Prelims 23:00": when each part of a card starts.
+const ufcTimes = f => [`Main card ${fmtTime(f.start)}`, f.prelims && f.prelims < f.start ? `Prelims ${fmtTime(f.prelims)}` : ''].filter(Boolean).join(' · ');
+/** The F1 / tennis / UFC lines of a card or row: the event, then what matters about it now. */
+function athLines(f, live) {
+  const head = `<span class="sp-fx-team">${fxBadge(f)}<span>${esc(f.title)}</span></span>`;
+  const sub = t => `<span class="sp-fx-team sp-fx-sub"><span class="sp-crest"></span><span>${esc(t)}</span></span>`;
+  if (f.sport === 'f1') return head + (f.order?.length && live ? f1OrderLines(f) : sub([f.session, f1Place(f)].filter(Boolean).join(' · ')));
+  if (f.sport === 'tennis' && f.matches?.length) {
+    const on = f.matches.filter(m => m.status === 'live');
+    if (live && on.length) {
+      const m = on[0];
+      return head + tennisLine(m.a, m.b) + tennisLine(m.b, m.a) + (on.length > 1 ? sub(`+${on.length - 1} more on court`) : sub([m.round, m.court].filter(Boolean).join(' · ')));
+    }
+    const m = tennisFocus(f), n = f.matches.filter(x => x.status === 'scheduled').length;
+    return head + sub([f.session, n > 1 ? `${n} matches` : `${surname(m.a)} v ${surname(m.b)}`].filter(Boolean).join(' · '));
+  }
+  if (f.sport === 'ufc') {
+    const m = ufcMain(f);
+    return head + sub(live && f.minute ? `Now: ${f.minute}` : m ? `Main event · ${m.weight || ''}`.replace(/ · $/, '') : ufcTimes(f));
+  }
+  return head + sub(f.session || f.venue || '');
+}
+const hasDetail = f => !!f && ((f.sport === 'tennis' && f.matches?.length) || (f.sport === 'ufc' && f.fights?.length) || f.sport === 'f1');
 // One shown item, fixture or guide programme: { f?, channel, prog, live, title, comp, sport, start, rank }.
 // Club / match channels from the playlist's team groups ("UK| CHAMPIONSHIP PPV", "UK| SPFL PPV", …), for games no main
 // channel lists: a Championship game with no Sky slot is usually on the home club's own channel.
@@ -4024,28 +4130,32 @@ const fxWhere = it => it.channel && it.evGroup ? `<span class="sp-on">On ${esc(p
   : it.channel
   ? (it.ev === 'likely' ? `<span class="sp-likely">Likely on ${esc(teamChLabel(it.channel))} channel</span>` : `<span class="sp-on">On ${esc(it.teamCh ? `${teamChLabel(it.channel)} channel` : channelLabel(it.channel.name))}</span>`)
   : fxHub.chAt || !it.f ? '<span class="sp-off">Not on your channels</span>' : '';
-const fxLines = it => it.f?.home
+const fxLines = (it, live = false) => it.f?.home
   ? `<span class="sp-fx-team">${crest(it.f.home)}<span>${esc(fxName(it.f.home))}</span>${it.f.status !== 'scheduled' && it.f.home.score != null ? `<b>${esc(it.f.home.score)}</b>` : ''}</span>
      <span class="sp-fx-team">${crest(it.f.away)}<span>${esc(fxName(it.f.away))}</span>${it.f.status !== 'scheduled' && it.f.away.score != null ? `<b>${esc(it.f.away.score)}</b>` : ''}</span>`
-  : it.f ? `<span class="sp-fx-team">${fxBadge(it.f)}<span>${esc(it.f.title)}</span></span><span class="sp-fx-team sp-fx-sub"><span class="sp-crest"></span><span>${esc(it.f.session || it.f.venue || '')}</span></span>`
+  : it.f ? athLines(it.f, live)
   : `<span class="sp-fx-team sp-fx-one"><span>${esc(it.title)}</span></span>`;
 const fxMeta = it => { const w = fxWhere(it), c = esc([it.comp, it.f?.round].filter(Boolean).join(' · ')); return c && w ? `${c} · ${w}` : c || w; };
 
 const spFxLive = (it, k) => {
   const clock = it.f ? (it.f.status === 'live' ? it.f.minute || 'Live' : 'Starting') : `until ${fmtTime(it.prog[1])}`;
-  return `<li class="sp-fxl${it.channel ? '' : ' off'}" data-live="${k}"${it.channel ? ' role="button" tabindex="0"' : ''}>
+  return `<li class="sp-fxl${it.channel ? '' : ' off'}${it.f && !it.f.home ? ` sp-fxl-${esc(it.f.sport)}` : ''}" data-live="${k}"${it.channel || hasDetail(it.f) ? ' role="button" tabindex="0"' : ''}>
     <span class="sp-fxl-head"><i class="nc-dot"></i><span>${esc(clock)}</span><span class="muted">${esc(it.comp || channelLabel(it.channel?.name || ''))}</span></span>
-    <span class="sp-fxl-teams">${fxLines(it)}</span>
+    <span class="sp-fxl-teams">${fxLines(it, true)}</span>
     <span class="sp-fxl-ch">${fxWhere(it)}</span></li>`;
 };
-const spFxRow = (it, k, attr = 'data-up') => `<li class="sp-row sp-fx${it.channel ? '' : ' off'}" ${attr}="${k}"${it.channel ? ' role="button" tabindex="0"' : ''}>
+const spFxRow = (it, k, attr = 'data-up') => `<li class="sp-row sp-fx${it.channel || hasDetail(it.f) ? '' : ' off'}" ${attr}="${k}"${it.channel || hasDetail(it.f) ? ' role="button" tabindex="0"' : ''}>
     <span class="sp-time">${it.f?.allDay && !it.channel ? '<small>All</small>day' : fmtTime(it.start)}</span>
     <span class="sp-text"><span class="sp-fx-teams">${fxLines(it)}</span><span class="sp-fx-meta">${fxMeta(it)}</span></span>
     ${it.channel && it.prog[0] > Date.now() ? spBell(it, `data-bell="${attr}:${k}"`) : '<span class="sp-bell-gap"></span>'}</li>`;
 const spFxTeamCard = (fl, k) => {
   const f = fxTeam(fl.q)[0], it = fxItem(f), on = fxIsOn(f);
   const mine = [f.home, f.away].find(t => t && followMatches(fl.q, { home: t, away: { name: '' } })) || null;
-  const when = on ? `<i class="nc-dot"></i>${esc(f.status === 'live' && f.home ? `${f.minute || 'Live'} · ${f.home.score}–${f.away.score}` : 'Live now')}` : esc(`${shortDay(f.start)} ${fmtTime(f.start)}`);
+  // A player or fighter: their own match on the day's order of play / the card, not the whole event.
+  const bout = !f.home && [...(f.matches || []), ...(f.fights || [])].find(m => namesPerson(fl.q, m.a.name) || namesPerson(fl.q, m.b.name));
+  if (bout) it.title = `${surname(bout.a)} v ${surname(bout.b)} · ${f.title}`;
+  const at = bout?.start || f.start, boutOn = bout ? bout.status === 'live' : on;
+  const when = boutOn ? `<i class="nc-dot"></i>${esc(f.status === 'live' && f.home ? `${f.minute || 'Live'} · ${f.home.score}–${f.away.score}` : 'Live now')}` : esc(`${shortDay(at)} ${fmtTime(at)}`);
   const where = fxWhere(it).replace(/<[^>]+>/g, '').replace(/^On /, '');   // already escaped
   return `<li class="sp-team" data-team="${k}" role="button" tabindex="0"><b>${mine ? crest(mine) : ''}<span>${esc(fl.q)}</span></b>
     <span class="sp-team-title">${esc(it.title)}</span><span class="sp-team-when">${when}${where ? ` · ${where}` : ''}</span></li>`;
@@ -4054,7 +4164,8 @@ const spFxTeamCard = (fl, k) => {
 function renderFixtureSports(body, chipsEl) {
   const now = Date.now(), until = now + 3 * DAY;
   const all = (fxHub.list || []).filter(f => f.status !== 'postponed' && f.start < until);
-  const liveFx = all.filter(f => fxIsOn(f, now)), upFx = all.filter(f => f.status === 'scheduled' && f.start > now);
+  // (a tennis day between matches, play not yet resumed, stays under Today until its last match is done)
+  const liveFx = all.filter(f => fxIsOn(f, now)), upFx = all.filter(f => f.status === 'scheduled' && (f.start > now || (f.matches && f.end > now)));
   // Guide-only sports: what the feed doesn't cover, found the old way.
   const g = buildSports(sportsHub.results, sportsNow(), now);
   // (golf is in both: the feed's tournaments, and the guide for the tours it doesn't list — the same slot once)
@@ -4101,6 +4212,60 @@ function renderFixtureSports(body, chipsEl) {
   body.innerHTML = html;
   for (const [key, left] of keep) { const el = body.querySelector(`[data-keep="${key}"]`); if (el) el.scrollLeft = left; }
   addRowArrows(body);
+}
+
+// An F1 session, a tennis day or a UFC card in full: the weekend's sessions (and the running order), the order of play
+// with scores, the fight card (main event first). Watch / Remind for its channel; Follow for the people in it.
+function fxDetailSheet(it) {
+  const f = it.f, now = Date.now();
+  const fol = q => `<button type="button" class="sp-fol${isFollowing(q) ? ' on' : ''}" data-fq="${esc(q)}" aria-pressed="${isFollowing(q)}">${esc(isFollowing(q) ? 'Following' : 'Follow')}</button>`;
+  const who = (p, o, extra = '') => `<span class="sp-dm-p${p.win ? ' win' : ''}">${flagImg(p.flag)}<span class="sp-dm-name">${esc(p.name)}${seedTag(p)}${extra}</span>${p.sets ? `<span class="sp-sets">${setCells(p, o)}</span>` : ''}</span>`;
+  let body = '', follows = [];
+  if (f.sport === 'tennis') {
+    body = `<ul class="sp-dm">${f.matches.map(m => `<li class="sp-dm-m${m.status === 'live' ? ' on' : ''}">
+      <span class="sp-dm-when">${m.status === 'live' ? `<i class="nc-dot"></i>${esc(m.detail || 'Live')}` : m.status === 'final' ? 'Done' : esc(fmtTime(m.start))}<small>${esc([m.round, m.court].filter(Boolean).join(' · '))}</small></span>
+      <span class="sp-dm-pair">${who(m.a, m.b)}${who(m.b, m.a)}</span>
+      <span class="sp-dm-fol">${fol(m.a.name)}${fol(m.b.name)}</span></li>`).join('')}</ul>`;
+  } else if (f.sport === 'ufc') {
+    const parts = ['Main card', 'Prelims', 'Early prelims'].map(c => [c, f.fights.filter(b => b.card === c)]).filter(([, l]) => l.length);
+    body = parts.map(([c, l]) => `<div class="section-title sp-sheet-day">${esc(c)}${c === 'Main card' ? ` · ${esc(fmtTime(f.start))}` : c === 'Prelims' && f.prelims ? ` · ${esc(fmtTime(f.prelims))}` : ''}</div>
+      <ul class="sp-dm">${l.map(b => `<li class="sp-dm-m${b.main ? ' main' : ''}${b.status === 'live' ? ' on' : ''}">
+        <span class="sp-dm-when">${b.main ? '<b>Main event</b>' : ''}<small>${esc(b.weight)}</small>${b.status === 'live' ? `<small class="sp-live-t"><i class="nc-dot"></i>${esc(b.detail || 'Live')}</small>` : b.detail ? `<small>${esc(b.detail)}</small>` : ''}</span>
+        <span class="sp-dm-pair">${who(b.a, {}, b.a.record ? ` <small class="muted">${esc(b.a.record)}</small>` : '')}${who(b.b, {}, b.b.record ? ` <small class="muted">${esc(b.b.record)}</small>` : '')}</span>
+        <span class="sp-dm-fol">${fol(b.a.name)}${fol(b.b.name)}</span></li>`).join('')}</ul>`).join('');
+    follows = ['UFC'];
+  } else if (f.sport === 'f1') {
+    const weekend = (fxHub.list || []).filter(x => x.sport === 'f1' && x.title === f.title).sort((a, b) => a.start - b.start);
+    if (f.order?.length) body += `<div class="section-title sp-sheet-day">${esc(f.status === 'final' ? 'Result' : `Running order${f.minute ? ` · ${f.minute}` : ''}`)}</div><ul class="sp-dm">${f.order.map(d => `<li class="sp-dm-m"><span class="sp-dm-when"><b>P${d.pos}</b></span><span class="sp-dm-pair">${who(d, {}, d.gap ? ` <small class="muted">${esc(d.gap)}</small>` : '')}</span><span class="sp-dm-fol">${fol(d.name)}</span></li>`).join('')}</ul>`;
+    body += `<div class="section-title sp-sheet-day">The weekend</div><ul class="sp-dm">${weekend.map(x => `<li class="sp-dm-m${x.id === f.id ? ' main' : ''}${fxIsOn(x, now) ? ' on' : ''}"><span class="sp-dm-when">${fxIsOn(x, now) ? '<i class="nc-dot"></i>Live' : x.status === 'final' ? 'Done' : esc(`${shortDay(x.start)} ${fmtTime(x.start)}`)}</span><span class="sp-dm-pair"><span class="sp-dm-p"><span class="sp-dm-name">${esc(x.session)}</span></span></span></li>`).join('')}</ul>`;
+    follows = ['F1'];
+  }
+  const when = fxIsOn(f, now) ? 'On now' : f.status === 'final' ? 'Finished' : `${fmtDay(f.start)} ${fmtTime(f.start)}`;
+  const sub = [f.sport === 'tennis' ? f.comp : f.sport === 'f1' ? f.session : '', when, f.sport === 'f1' ? f1Place(f) : f.venue].filter(Boolean).join(' · ');
+  const canWatch = it.channel && it.prog && (fxIsOn(f, now) || it.prog[0] <= now);
+  sheet(`<div class="sheet-title">${esc(f.title)}</div>
+    <p class="muted sheet-intro">${esc(sub)}<br>${fxWhere(it)}</p>
+    <div class="sp-sheet-list sp-detail">${body}</div>
+    <div class="form-actions">${follows.map(q => `<button type="button" class="btn" data-fq="${esc(q)}">${esc(isFollowing(q) ? `Following ${q}` : `Follow ${q}`)}</button>`).join('')}
+      ${it.channel ? (canWatch ? `<button type="button" class="btn primary" data-fx-watch>Watch</button>` : `<button type="button" class="btn primary" data-fx-remind>${hasReminder(it.channel, it.prog) ? 'Reminder set' : 'Remind me'}</button>`) : ''}</div>`, {
+    onMount: el => {
+      el.onclick = e => {
+        const fq = e.target.closest('[data-fq]');
+        if (fq) {
+          const q = fq.dataset.fq;
+          toggleFollow(q).then(() => {
+            const on = isFollowing(q);
+            el.querySelectorAll(`[data-fq="${CSS.escape(q)}"]`).forEach(b => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); b.textContent = b.classList.contains('btn') ? `${on ? 'Following' : 'Follow'} ${q}` : on ? 'Following' : 'Follow'; });
+            sportsHub.teams.delete(q.toLowerCase()); renderSports();
+          });
+          return;
+        }
+        if (e.target.closest('[data-fx-watch]')) { closeSheet(); playChannel([it.channel], 0); return; }
+        const r = e.target.closest('[data-fx-remind]');
+        if (r) toggleReminder(it.channel, it.prog).then(() => { r.textContent = hasReminder(it.channel, it.prog) ? 'Reminder set' : 'Remind me'; repaintSportsBells(); });
+      };
+    },
+  });
 }
 
 function fixtureTeamSheet(fl) {
@@ -4256,10 +4421,11 @@ function sportsClick(e) {
   if (lv) {
     const it = sportsHub.shown.live[+lv.dataset.live], list = sportsHub.shown.live.filter(x => x.channel);
     if (it?.channel) playChannel(list.map(x => x.channel), list.indexOf(it));
+    else if (hasDetail(it?.f)) fxDetailSheet(it);
     return;
   }
   const up = e.target.closest('[data-up]');
-  if (up) { const it = sportsHub.shown.up[+up.dataset.up]; if (it?.channel) programmeSheet(it.channel, it.prog); return; }
+  if (up) { const it = sportsHub.shown.up[+up.dataset.up]; if (hasDetail(it?.f)) fxDetailSheet(it); else if (it?.channel) programmeSheet(it.channel, it.prog); return; }
   const tm = e.target.closest('[data-team]');
   if (tm) return teamSheet((state.follows || [])[+tm.dataset.team]);
   if (e.target.closest('[data-follow-new]')) return followTeamSheet();
@@ -5306,7 +5472,8 @@ async function settingsSheet() {
           <label>Play live TV in${sel('livePlayer', s.livePlayer)}</label>
           <p class="muted small">Another player opens the provider's stream itself, untouched. ${/Macintosh/.test(navigator.userAgent) && !isIOS ? 'On a Mac, VLC gets a small playlist file: click it in your downloads and VLC plays the stream.' : ''}</p>`;
       })()}
-      ${canSync() ? `<label class="switch"><span><b>Film &amp; TV info (TMDB)</b><span class="muted">Trending this week, backdrops, plots, cast and trailers.</span></span><button type="button" class="btn small" id="tmdb-btn">${tmdbOn ? 'Connected' : 'Set up'}</button></label>` : ''}
+      ${canSync() ? `<label class="switch"><span><b>Film &amp; TV info (TMDB)</b><span class="muted">Trending this week, backdrops, plots, cast and trailers.</span></span><button type="button" class="btn small" id="tmdb-btn">${tmdbOn ? 'Connected' : 'Set up'}</button></label>
+        <label class="switch"><span><b>Ratings (OMDb)</b><span class="muted">OMDb key — adds IMDb and Rotten Tomatoes ratings.</span></span><button type="button" class="btn small" id="omdb-btn">${omdbOn ? 'Connected' : 'Set up'}</button></label>` : ''}
       <label>Movies &amp; series languages<select name="vodLanguage">
         ${[['en', 'English only'], ['all', 'All languages']].map(([v, l]) => `<option value="${v}" ${(s.vodLanguage || 'en') === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
@@ -5329,6 +5496,7 @@ async function settingsSheet() {
     onMount: el => {
       el.querySelector('#server-key-2')?.addEventListener('click', enterServerKey);
       el.querySelector('#tmdb-btn')?.addEventListener('click', tmdbSheet);
+      el.querySelector('#omdb-btn')?.addEventListener('click', omdbSheet);
       el.querySelector('form').onsubmit = async e => {
         e.preventDefault();
         const f = new FormData(e.target);
@@ -5828,7 +5996,7 @@ function playNative(list, index, c) {
     url: c.url, title: niceName(c), live, start,
     subtitle: now ? `${now[2]} · ends ${fmtTime(now[1])}` : live ? prettyGroup(c.group) || '' : vodLine(c),
     info: now ? now[3] || '' : c.plot || '',
-    headers: headersFromOpts(c.opts), hasPrev: index > 0, hasNext: index < list.length - 1, art: c.logo || '',
+    headers: headersFromOpts(c.opts), hasPrev: index > 0, hasNext: index < list.length - 1, art: logoSrc(c),
     ...nativeList(list, index, live), ...(live ? nativeNowNext(c, nn) : {}),
   }).catch(e => toast(e.message || 'Couldn’t open the player'));
 }
@@ -5865,7 +6033,7 @@ function nativeList(list, index, live) {
     if (isLiveChannel(x)) {
       const g = guideFor(x), now = g && g.nowNext(x).now;
       // l / n: logo and number; pa / pb: when what's on now started and ends (the mini guide's progress line)
-      return { t: x.name, s: now ? now[2] : prettyGroup(x.group) || '', l: x.logo || '', n: x.num || 0, pa: now ? now[0] : 0, pb: now ? now[1] : 0 };
+      return { t: x.name, s: now ? now[2] : prettyGroup(x.group) || '', l: logoSrc(x), n: x.num || 0, pa: now ? now[0] : 0, pb: now ? now[1] : 0 };
     }
     return { t: niceName(x), s: vodLine(x) };
   };

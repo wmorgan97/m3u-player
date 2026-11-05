@@ -89,4 +89,35 @@ class FixtureRulesTest {
         assertEquals("Barrow vs Eastleigh", FixtureRules.teamChannelLabel("National League 4 | Barrow vs Eastleigh // 15:00"))
         assertEquals("Blackburn Rovers", FixtureRules.teamChannelLabel("Blackburn Rovers"))
     }
+
+    // F1 / tennis / UFC (the shapes server/fixtures.js gives: tests/espn-samples has the recorded replies they come from).
+    private fun ath(n: String, short: String, sets: List<String> = emptyList()) = FxAth(n, short, sets = sets)
+
+    @Test fun followsADriverATeamAPlayerOrAFighter() {
+        val race = fx(null, null, comp = "F1", sport = "f1", title = "São Paulo Grand Prix", session = "Race").copy(drivers = listOf("Lewis Hamilton", "Max Verstappen", "Kimi Antonelli"))
+        for (q in listOf("Lewis Hamilton", "Hamilton", "verstappen", "McLaren", "Ferrari", "F1")) assertTrue(q, FixtureRules.followMatches(q, race))
+        for (q in listOf("Lewis", "Arsenal", "Alcaraz", "UFC", "Tennis")) assertFalse(q, FixtureRules.followMatches(q, race))
+        val m = FxBout(5_000_000L, "scheduled", ath("Ben Shelton", "B. Shelton"), ath("Tomas Martin Etcheverry", "T. Etcheverry"), round = "Round 3", court = "Court Central")
+        val day = fx(null, null, comp = "ATP", sport = "tennis", title = "Paris Masters", session = "Round 3").copy(matches = listOf(m))
+        for (q in listOf("Shelton", "Ben Shelton", "Etcheverry", "Martin Etcheverry", "Tennis")) assertTrue(q, FixtureRules.followMatches(q, day))
+        for (q in listOf("Ben", "Sinner", "F1")) assertFalse(q, FixtureRules.followMatches(q, day))
+        assertTrue(m.has("shelton")); assertEquals("Etcheverry", m.b.surname)
+        val card = fx(null, null, comp = "UFC", sport = "ufc", title = "UFC Fight Night: Cortes Acosta v Walker").copy(
+            fights = listOf(FxBout(0, "scheduled", ath("Waldo Cortes Acosta", "W. Cortes Acosta"), ath("Johnny Walker", "J. Walker"), weight = "Heavyweight", card = "Main card", main = true)))
+        for (q in listOf("UFC", "Johnny Walker", "Cortes Acosta")) assertTrue(q, FixtureRules.followMatches(q, card))
+        assertEquals("Johnny Walker", card.mainEvent?.b?.name)
+    }
+
+    @Test fun aTennisDayIsLiveOnlyWithAMatchOnCourt() {
+        val start = 1_000_000L
+        val waiting = fx(null, null, comp = "ATP", sport = "tennis", start = start).copy(matches = listOf(FxBout(start, "scheduled", ath("A", "A"), ath("B", "B"))))
+        assertFalse(waiting.isOn(start + 60_000))            // a "not before" time passed: not live
+        assertTrue(waiting.upcoming(start + 60_000))         // still to come today
+        val race = fx(null, null, comp = "F1", sport = "f1", start = start)
+        assertTrue(race.isOn(start + 60_000))                // others: due on (the feed lags a minute)
+        assertFalse(race.upcoming(start + 60_000))
+        val on = waiting.copy(status = "live", matches = listOf(FxBout(start, "live", ath("A", "A", listOf("6", "3")), ath("B", "B", listOf("4", "2")))))
+        assertTrue(on.isOn(start + 60_000)); assertEquals("live", on.focusMatch?.status)
+        assertTrue(on.detailed); assertFalse(fx(MUN, TOT).detailed)
+    }
 }

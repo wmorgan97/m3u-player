@@ -24,6 +24,7 @@ import { handleGuide } from './guide.js';
 import { handleCatalog } from './catalog.js';
 import { handleTmdb } from './tmdb.js';
 import { handleImg } from './img.js';
+import { handleLogo } from './logos.js';
 import { handleFixtures } from './fixtures.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -180,6 +181,8 @@ export function createAppServer() {
     if (url.pathname === '/download') return handleDownload(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
       .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/img') return handleImg(req, res, url, send, u => allowPrivate || !isPrivateHost(u.hostname));
+    if (url.pathname === '/logo') return handleLogo(req, res, url, send, u => allowPrivate || !isPrivateHost(u.hostname))
+      .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/vod') return handleCatalog(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))
       .catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/guide') return handleGuide(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))

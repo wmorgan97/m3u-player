@@ -11,7 +11,7 @@ import { IMPORTANCE, isLiveEvent, isNotGame, isWomens, classify } from './sports
 
 const HOUR = 3600_000;
 // How long each sport's events run, for "is it still on" and channel matching (the feed only gives the start).
-const LENGTH = { football: 2 * HOUR, f1: 2 * HOUR, nfl: 3.5 * HOUR, nba: 2.5 * HOUR, ufc: 5 * HOUR, rugby: 2 * HOUR };
+const LENGTH = { football: 2 * HOUR, f1: 2 * HOUR, tennis: 3 * HOUR, nfl: 3.5 * HOUR, nba: 2.5 * HOUR, ufc: 5 * HOUR, rugby: 2 * HOUR };
 const SESSION = { FP1: 'Practice 1', FP2: 'Practice 2', FP3: 'Practice 3', Qual: 'Qualifying', Race: 'Race', Sprint: 'Sprint', SS: 'Sprint Qualifying', SQ: 'Sprint Qualifying', SR: 'Sprint' };
 const SESSION_LEN = { Race: 2 * HOUR, Sprint: HOUR, 'Sprint Qualifying': HOUR, Qualifying: 1.25 * HOUR };
 // "MSC Cruises São Paulo Grand Prix" -> "São Paulo Grand Prix": title sponsors in front of the race name.
@@ -41,15 +41,20 @@ export function normaliseEspn(ev, src) {
     const comps = ev.competitions || [];
     if (src.sport === 'f1') {
       const gp = String(ev.name || ev.shortName || '').replace(SPONSOR, '').replace(SPONSOR, '').trim();
+      const country = String(ev.circuit?.address?.country || '').trim();
+      // Everyone who took part in any session (for "follow a driver"; the server fills it in for weekends not started).
+      const drivers = [...new Set(comps.flatMap(c => (c.competitors || []).map(x => x.athlete?.displayName || x.athlete?.fullName).filter(Boolean)))];
       return comps.map(c => {
         const session = SESSION[c.type?.abbreviation] || c.type?.abbreviation || 'Session';
         const start = Date.parse(c.date || c.startDate);
         const st = statusOf(c.status);
+        const order = /^(?:Race|Sprint)$/.test(session) && st !== 'scheduled' ? f1Order(c) : [];
         return { id: `${src.key}:${c.id}`, ...base, start, end: start + (SESSION_LEN[session] || HOUR), status: st,
           ...(st === 'live' && c.status?.type?.shortDetail ? { minute: c.status.type.shortDetail } : {}),
-          title: gp, session, venue: ev.circuit?.fullName || '' };
+          title: gp, session, venue: ev.circuit?.fullName || '', ...(country ? { country } : {}), ...(order.length ? { order } : {}), ...(drivers.length ? { drivers } : {}) };
       }).filter(f => f.start);
     }
+    if (src.sport === 'tennis') return tennisDays(ev, src, base);
     if (src.sport === 'golf') {
       // A tournament: one item per round day (the feed gives the days, not tee times; the guide gives the coverage).
       const from = Date.parse(ev.date), to = Date.parse(ev.endDate) || from;
@@ -67,8 +72,10 @@ export function normaliseEspn(ev, src) {
       const prelims = Date.parse(ev.date) || Math.min(...times), start = times.length ? Math.max(...times) : prelims;
       if (!start) return [];
       const st = statusOf(ev.status || comps[0]?.status);
+      const fights = ufcCard(comps, start), on = fights.find(b => b.status === 'live');
       return [{ id: `${src.key}:${ev.id}`, ...base, start, prelims, end: start + 3 * HOUR, status: st,
-        title: String(ev.name || '').replace(/\s+vs\.?\s+/i, ' v '), venue: comps[0]?.venue?.fullName || '' }];
+        ...(st === 'live' && on ? { minute: `${on.a.short || on.a.name} v ${on.b.short || on.b.name}${on.detail ? ` · ${on.detail}` : ''}` } : {}),
+        title: String(ev.name || '').replace(/\s+vs\.?\s+/i, ' v '), venue: comps[0]?.venue?.fullName || '', ...(fights.length ? { fights } : {}) }];
     }
     const c = comps[0];
     if (!c) return [];
@@ -87,10 +94,109 @@ export function normaliseEspn(ev, src) {
   } catch { return []; }
 }
 
+// ---------- F1, tennis and UFC: the people in them ----------
+
+const flagOf = a => { const m = /countries\/500\/([a-z]{3})\.png/i.exec(a?.flag?.href || ''); return m ? m[1].toUpperCase() : ''; };
+const person = x => {
+  const a = x?.athlete || {};
+  const out = { name: a.displayName || a.fullName || '', short: a.shortName || '' };
+  const fl = flagOf(a);
+  if (fl) out.flag = fl;
+  return out;
+};
+const statValue = (x, names) => { for (const s of x?.statistics || []) if (names.includes(s.name) || names.includes(s.abbreviation)) return String(s.displayValue ?? s.value ?? ''); return ''; };
+/** A race's running order (Race / Sprint, on or done): the top 3, the gap to the leader when the feed has one. */
+function f1Order(c) {
+  return (c.competitors || []).filter(x => x.athlete).sort((a, b) => (a.order ?? 99) - (b.order ?? 99)).slice(0, 3).map((x, i) => {
+    const p = person(x), gap = i ? statValue(x, ['behindTime', 'gap', 'timeBehind', 'behind', 'GAP']) : '';
+    return { ...p, pos: x.order ?? i + 1, ...(gap && gap !== '0' ? { gap: /^[+]/.test(gap) || /lap/i.test(gap) ? gap : `+${gap}` } : {}) };
+  });
+}
+/** 2026 teams, for following a team ("McLaren") rather than a driver. Drivers not listed simply follow by name. */
+export const F1_TEAMS = { 'red bull': ['Max Verstappen', 'Isack Hadjar'], ferrari: ['Charles Leclerc', 'Lewis Hamilton'], mercedes: ['George Russell', 'Kimi Antonelli'],
+  mclaren: ['Lando Norris', 'Oscar Piastri'], 'aston martin': ['Fernando Alonso', 'Lance Stroll'], alpine: ['Pierre Gasly', 'Franco Colapinto'], williams: ['Alexander Albon', 'Carlos Sainz'],
+  'racing bulls': ['Liam Lawson', 'Arvid Lindblad'], haas: ['Esteban Ocon', 'Oliver Bearman'], audi: ['Nico Hülkenberg', 'Gabriel Bortoleto'], sauber: ['Nico Hülkenberg', 'Gabriel Bortoleto'],
+  cadillac: ['Sergio Pérez', 'Valtteri Bottas'] };
+
+// "Rolex Paris Masters" -> "Paris Masters": title sponsors in front of the tournament.
+const T_SPONSOR = /^(?:rolex|prudential|mutua|bnp paribas|reto win|lexus|nitto|cinch|hsbc|terra wortmann|libema|boss|mubadala|adidas|internazionali bnl d'italia)\s+/i;
+const T_BIG = /masters|indian wells|miami open|mutua madrid|madrid open|internazionali|italian open|canadian open|national bank|cincinnati|shanghai|wuhan|china open|dubai|qatar|doha/i;
+const tennisRank = ev => ev.major ? 90 : /\bfinals?\b/i.test(ev.name || '') && !/next ?gen/i.test(ev.name || '') ? 82 : T_BIG.test(ev.name || '') ? 74 : IMPORTANCE.Tennis ?? 52;
+const ukDay = t => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(t).replace(/-/g, '');
+const ROUND = { 'Quarterfinal': 'Quarter-final', 'Semifinal': 'Semi-final', 'Final': 'Final' };
+/** One tennis match (singles): both players, round, court, sets so far. */
+function tennisMatch(c) {
+  const st = statusOf(c.status), side = x => {
+    const p = person(x), seed = x.curatedRank?.current;
+    if (seed && seed < 99) p.seed = seed;
+    const sets = (x.linescores || []).map(l => l.value).filter(v => v != null).map(v => String(Math.round(v)));
+    if (st !== 'scheduled' && sets.length) { p.sets = sets; const tb = (x.linescores || []).map(l => l.tiebreak ?? null); if (tb.some(v => v != null)) p.tb = tb; }
+    if (x.winner && st === 'final') p.win = true;
+    return p;
+  };
+  const cs = [...(c.competitors || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  if (cs.length < 2 || !cs[0].athlete || !cs[1].athlete) return null;
+  const start = Date.parse(c.date || c.startDate);
+  const r = String(c.round?.displayName || '');
+  return { id: String(c.id), start, status: st, round: ROUND[r] || r, ...(c.venue?.court ? { court: c.venue.court } : {}),
+    ...(st === 'live' && c.status?.type?.shortDetail ? { detail: c.status.type.shortDetail } : {}), a: side(cs[0]), b: side(cs[1]) };
+}
+/** A tournament -> one item per UK day: its order of play (singles), live while any match is on. */
+function tennisDays(ev, src, base) {
+  const title = String(ev.name || ev.shortName || '').replace(T_SPONSOR, '').trim();
+  const singles = (ev.groupings || []).filter(g => /singles/i.test(g.grouping?.slug || g.grouping?.displayName || '')).flatMap(g => g.competitions || []);
+  const byDay = new Map();
+  for (const c of singles) {
+    const m = tennisMatch(c);
+    if (!m || !m.start) continue;
+    const d = ukDay(m.start);
+    if (!byDay.has(d)) byDay.set(d, []);
+    byDay.get(d).push(m);
+  }
+  const compRank = src.rank ?? tennisRank(ev);
+  return [...byDay].map(([d, matches]) => {
+    matches.sort((a, b) => a.start - b.start || String(a.court || '').localeCompare(String(b.court || '')));
+    const live = matches.some(m => m.status === 'live'), left = matches.filter(m => m.status === 'scheduled');
+    const status = live ? 'live' : left.length ? 'scheduled' : 'final';
+    // While nothing is on, the next match's time (play resumes); the day ends three hours after its last start.
+    const start = live ? matches[0].start : (left[0] || matches[0]).start;
+    const rounds = [...new Set(matches.map(m => m.round).filter(Boolean))];
+    return { id: `${src.key}:${ev.id}:${d}`, ...base, compRank, start, from: matches[0].start, end: matches[matches.length - 1].start + 3 * HOUR, status,
+      ...(live ? { minute: `${matches.filter(m => m.status === 'live').length} on court` } : {}),
+      title, session: rounds.length > 2 ? `${rounds[0]} – ${rounds[rounds.length - 1]}` : rounds.join(' · '), venue: String(ev.venue?.displayName || ''), matches };
+  });
+}
+/** A UFC card, main event first: [{ a, b, weight, card: 'Main card' | 'Prelims' | 'Early prelims', main?, status, detail?, win? }]. */
+function ufcCard(comps, mainAt) {
+  const times = [...new Set(comps.map(c => Date.parse(c.date)).filter(Boolean))].sort((a, b) => b - a);
+  const card = t => t >= mainAt ? 'Main card' : t === times[1] || times.length < 3 ? 'Prelims' : 'Early prelims';
+  return comps.map((c, i) => ({ c, i })).sort((x, y) => (Date.parse(y.c.date) || 0) - (Date.parse(x.c.date) || 0) || y.i - x.i).map(({ c }, k) => {
+    const cs = [...(c.competitors || [])].sort((x, y) => (x.order ?? 0) - (y.order ?? 0));   // as the card's name has them
+    if (cs.length < 2) return null;
+    const side = x => { const p = person(x); const rec = x.records?.[0]?.summary; if (rec) p.record = rec; if (x.winner) p.win = true; return p; };
+    const st = statusOf(c.status);
+    return { a: side(cs[0]), b: side(cs[1]), weight: String(c.type?.abbreviation || ''), card: card(Date.parse(c.date)), ...(k === 0 ? { main: true } : {}), status: st,
+      ...(st !== 'scheduled' && c.status?.type?.shortDetail && !/^\d+\/\d+ - /.test(c.status.type.shortDetail) ? { detail: c.status.type.shortDetail } : {}) };
+  }).filter(Boolean);
+}
+/** Everyone named in a fixture without teams (drivers, players, fighters), for follows. */
+export const athletesOf = f => f.drivers || (f.order || []).map(p => p.name).concat(
+  (f.matches || []).flatMap(m => [m.a.name, m.b.name]), (f.fights || []).flatMap(b => [b.a.name, b.b.name]));
+
+/** A follow names this person? "Lewis Hamilton", "Hamilton" (surname, 4+ letters), "Alcaraz"; folded. */
+export function namesPerson(q, name) {
+  const k = foldName(q), n = foldName(name);
+  if (!k || !n) return false;
+  if (k === n) return true;
+  const w = n.split(' ');
+  return k.length >= 4 && w.length > 1 && (k === w.slice(1).join(' ') || k === w[w.length - 1]);
+}
+
 /** A short line for a fixture: "Arsenal v Chelsea", "São Paulo Grand Prix · Qualifying", "UFC 334: Gane v Hokit". */
 export const fixtureTitle = f => f.home ? `${f.home.short || f.home.name} v ${f.away.short || f.away.name}` : f.session ? `${f.title} · ${f.session}` : f.title || '';
 /** Live now, or due on: started and not reported finished (feeds lag a minute or two). */
-export const isOn = (f, now = Date.now()) => f.status === 'live' || (f.status === 'scheduled' && f.start <= now && now < f.end);
+// (Tennis: only a match in progress. Its later times are "not before" guesses, so a passed time doesn't mean it's on.)
+export const isOn = (f, now = Date.now()) => f.status === 'live' || (f.status === 'scheduled' && !f.matches && f.start <= now && now < f.end);
 
 // ---------- team names ----------
 
@@ -176,7 +282,11 @@ export function followMatches(q, f) {
   if (!k || women !== !!f.women) return false;
   if (!f.home) {
     const c = classify(q);
-    return !!c && c.comp === f.comp;
+    if (c) return c.sport === f.sport && (c.comp === f.comp || ['tennis', 'f1', 'ufc'].includes(f.sport));
+    if (women) return false;
+    const people = athletesOf(f);
+    if (f.sport === 'f1') { const team = F1_TEAMS[k] || F1_TEAMS[k.replace(/ (?:f1|racing|team)$/, '')]; if (team) return true; }
+    return people.some(n => namesPerson(k, n));
   }
   const canon = ALIAS_OF.get(k) || k;
   for (const t of [f.home, f.away]) {
@@ -218,16 +328,17 @@ const F1_SESSION = { 'Practice 1': /practice 1|\bfp1\b|first practice/, 'Practic
 /** Channels showing a fixture: programmes overlapping kick-off ±30 min that name both teams (F1: the session; UFC:
  *  the card). [{ id, name, start, end, title, desc, live }], live-tagged first, at most 24. */
 export function channelsFor(f, byHour, hv, av) {
-  const from = (f.prelims || f.start) - 30 * MIN, to = f.allDay ? f.end : f.start + 30 * MIN;
+  const span = f.allDay || f.sport === 'tennis';   // a day's coverage, not one kick-off
+  const from = (f.prelims || f.from || f.start) - 30 * MIN, to = span ? f.end : f.start + 30 * MIN;
   const seen = new Set(), out = [];
   const place = f.sport === 'f1' ? foldName(f.title).split(' ').filter(w => w.length >= 4 && !/^(?:grand|prix|city)$/.test(w)) : [];
   if (f.home && !hv) { hv = teamVariants(f.home); av = teamVariants(f.away); }
   for (let h = Math.floor(from / HOUR); h <= Math.floor(to / HOUR); h++) {
     for (const p of byHour.get(h) || []) {
       // On at kick-off and still on a quarter of an hour in: not the build-up show before, not the replay after.
-      if (seen.has(p) || p.start > to || p.end < (f.allDay ? f.start : (f.prelims || f.start) + 15 * MIN)) continue;
+      if (seen.has(p) || p.start > to || p.end < (span ? f.start : (f.prelims || f.start) + 15 * MIN)) continue;
       seen.add(p);
-      if (p.women !== !!f.women) continue;
+      if (p.women !== !!f.women && f.sport !== 'tennis') continue;
       // Both teams, and not another sport's game between same-named cities ("New England v Miami": MLS, not the NFL).
       if (f.home) { if (!titleHasTeams(p.t, null, null, hv, av) || (p.sport && p.sport !== f.sport)) continue; }
       else if (f.sport === 'f1') {
@@ -242,6 +353,14 @@ export function channelsFor(f, byHour, hv, av) {
       else if (f.sport === 'golf') {
         if (classify(p.title)?.sport !== 'golf' || !p.live) continue;
         const words = foldName(f.title).split(' ').filter(w => w.length >= 5 && !/^(?:championship|open|classic|invitational|tour|world|international)$/.test(w));
+        if (words.length && !words.some(w => ` ${p.t} `.includes(` ${w} `))) continue;
+      }
+      else if (f.sport === 'tennis') {
+        // Live tennis naming the tournament's place ("ATP Masters 1000 Paris"), and not the other tour's coverage.
+        if (classify(p.title)?.sport !== 'tennis' || !p.live) continue;
+        const other = f.comp === 'ATP' ? /\bwta\b|women/ : f.comp === 'WTA' ? /\batp\b|\bmen s\b/ : /$^/;
+        if (other.test(p.t)) continue;
+        const words = foldName(f.title).split(' ').filter(w => w.length >= 4 && !/^(?:open|masters|tennis|championships?|classic|international|ladies|cup|finals?|1000|500|250)$/.test(w));
         if (words.length && !words.some(w => ` ${p.t} `.includes(` ${w} `))) continue;
       }
       else if (f.sport === 'ufc') {

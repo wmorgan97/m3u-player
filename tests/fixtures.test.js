@@ -210,3 +210,112 @@ test('real-data regressions (1-3 Nov 2026 guide)', () => {
   assert.deepEqual(channelsFor(bir, byHour).map(c => c.id), ['ssplus']);
   assert.deepEqual(channelsFor(mls, byHour), []);
 });
+
+// ---------- F1, tennis, UFC: real replies recorded once (tests/espn-samples, trimmed; ESPN site API, personal use) ----------
+import { readFileSync } from 'node:fs';
+import { athletesOf, namesPerson } from '../js/fixtures.js';
+import { fillDrivers } from '../server/fixtures.js';
+const rec = name => JSON.parse(readFileSync(new URL(`./espn-samples/${name}.json`, import.meta.url), 'utf8')).events;
+const all = (name, src) => rec(name).flatMap(ev => normaliseEspn(ev, src));
+const F1 = { key: 'f1', sport: 'f1', comp: 'F1' }, ATP = { key: 'tennis.atp', sport: 'tennis', comp: 'ATP' }, UFC = { key: 'ufc', sport: 'ufc', comp: 'UFC' };
+
+test('recorded F1: a session each, circuit + country, the race result top 3, drivers carried to the next weekend', () => {
+  const l = all('f1', F1);
+  assert.deepEqual(l.map(fixtureTitle), ['Mexico City Grand Prix · Practice 1', 'Mexico City Grand Prix · Qualifying', 'Mexico City Grand Prix · Race',
+    'São Paulo Grand Prix · Practice 1', 'São Paulo Grand Prix · Qualifying', 'São Paulo Grand Prix · Race']);
+  const race = l[2], sp = l[5];
+  assert.equal(race.country, 'Mexico');
+  assert.equal(sp.venue, 'Autodromo Jose Carlos Pace');
+  assert.equal(sp.start, Date.UTC(2026, 10, 8, 17));
+  assert.deepEqual(race.order.map(d => [d.pos, d.short, d.flag]), [[1, 'M. Verstappen', 'NED'], [2, 'L. Hamilton', 'GBR'], [3, 'K. Antonelli', 'ITA']]);
+  assert.equal(l[1].order, undefined);   // qualifying: no running order shown
+  assert.equal(sp.drivers, undefined);
+  fillDrivers(l);
+  assert.ok(sp.drivers.includes('Lewis Hamilton'));
+  // follow a driver (full name or surname), a team, or F1 itself; not someone else
+  for (const q of ['Lewis Hamilton', 'Hamilton', 'verstappen', 'McLaren', 'Ferrari', 'F1', 'Formula 1']) assert.ok(followMatches(q, sp), q);
+  for (const q of ['Arsenal', 'Lewis', 'Alcaraz', 'UFC']) assert.ok(!followMatches(q, sp), q);
+});
+
+test('F1 live: leader gap from the feed when it has one', () => {
+  const gp = { id: '1', name: 'Heineken Las Vegas Grand Prix', competitions: [{ id: 'r', type: { abbreviation: 'Race' }, date: '2026-11-22T04:00Z', status: status('in', 'STATUS_IN_PROGRESS', 'Lap 31/50'),
+    competitors: [{ order: 2, athlete: { displayName: 'Lando Norris', shortName: 'L. Norris' }, statistics: [{ name: 'behindTime', displayValue: '1.204' }] },
+      { order: 1, athlete: { displayName: 'Max Verstappen', shortName: 'M. Verstappen' } }, { order: 3, athlete: { displayName: 'Oscar Piastri', shortName: 'O. Piastri' }, statistics: [{ name: 'behindTime', displayValue: '+1 Lap' }] },
+      { order: 4, athlete: { displayName: 'George Russell' } }] }] };
+  const [f] = normaliseEspn(gp, F1);
+  assert.equal(f.title, 'Las Vegas Grand Prix');
+  assert.equal(f.minute, 'Lap 31/50');
+  assert.deepEqual(f.order.map(d => [d.short, d.gap]), [['M. Verstappen', undefined], ['L. Norris', '+1.204'], ['O. Piastri', '+1 Lap']]);
+  assert.ok(isOn(f, Date.UTC(2026, 10, 22, 5)));
+});
+
+test('recorded tennis: an order of play per tournament day, singles only, seeds, flags, sets', () => {
+  const [done, today] = all('tennis-atp', ATP);
+  assert.equal(done.id, 'tennis.atp:13-2026:20261104');
+  assert.equal(done.title, 'Paris Masters');   // "Rolex" dropped
+  assert.equal(done.compRank, 74);
+  assert.equal(done.status, 'final');
+  const m = done.matches[1];
+  assert.deepEqual([m.a.name, m.a.sets, m.a.win, m.b.name, m.b.seed, m.b.sets, m.court], ['Quentin Halys', ['6', '1', '7'], true, 'Frances Tiafoe', 7, ['3', '6', '6'], 'Court Central']);
+  assert.deepEqual(m.a.tb, [null, null, 11]);
+  assert.equal(today.status, 'scheduled');
+  assert.equal(today.session, 'Round 3');
+  assert.equal(today.matches.length, 4);
+  assert.ok(today.matches.every(x => x.a.sets === undefined));
+  assert.equal(today.matches[1].a.seed, 3);
+  assert.equal(fixtureTitle(today), 'Paris Masters · Round 3');
+  // not "on" just because a "not before" time has passed
+  assert.ok(!isOn(today, today.start + 3600_000));
+  for (const q of ['Ben Shelton', 'Shelton', 'Musetti', 'Tennis']) assert.ok(followMatches(q, today), q);
+  for (const q of ['Paul Smith', 'Sinner', 'F1']) assert.ok(!followMatches(q, today), q);
+  assert.ok(athletesOf(today).includes('Tomas Martin Etcheverry'));
+  assert.ok(namesPerson('Etcheverry', 'Tomas Martin Etcheverry') && namesPerson('martin etcheverry', 'Tomas Martin Etcheverry') && !namesPerson('Tom', 'Tom Paul'));
+});
+
+test('tennis live: the day is live while a match is on, with the set score', () => {
+  const ev = rec('tennis-atp')[0];
+  const c = ev.groupings.find(g => /singles/.test(g.grouping.slug)).competitions.find(x => x.date.startsWith('2026-11-05'));
+  c.status = status('in', 'STATUS_IN_PROGRESS', '2nd Set');
+  const [first, second] = [...c.competitors].sort((x, y) => x.order - y.order);
+  first.linescores = [{ value: 6 }, { value: 3 }]; second.linescores = [{ value: 4 }, { value: 2 }];
+  const today = normaliseEspn(ev, ATP)[1];
+  assert.equal(today.status, 'live');
+  assert.equal(today.minute, '1 on court');
+  const m = today.matches.find(x => x.status === 'live');
+  assert.equal(m.detail, '2nd Set');
+  assert.equal(m.a.sets.join(' ') + ' / ' + m.b.sets.join(' '), '6 3 / 4 2');
+  assert.ok(isOn(today, Date.now()));
+});
+
+test('recorded UFC: the card, main event first and highlighted, main card / prelims, records', () => {
+  const [u] = all('ufc', UFC);
+  assert.equal(u.title, 'UFC Fight Night: Cortes Acosta v Walker');
+  assert.equal(u.start, Date.UTC(2026, 10, 8, 1));
+  assert.equal(u.prelims, Date.UTC(2026, 10, 7, 22));
+  assert.equal(u.fights.length, 5);
+  const [main] = u.fights;
+  assert.ok(main.main);
+  assert.deepEqual([main.a.name, main.b.name, main.weight, main.card, main.a.record], ['Waldo Cortes Acosta', 'Johnny Walker', 'Heavyweight', 'Main card', '17-4-0']);
+  assert.deepEqual(u.fights.map(b => b.card), ['Main card', 'Main card', 'Main card', 'Prelims', 'Prelims']);
+  assert.equal(u.fights.filter(b => b.main).length, 1);
+  for (const q of ['UFC', 'Johnny Walker', 'Jandiroba']) assert.ok(followMatches(q, u), q);
+  assert.ok(!followMatches('Arsenal', u));
+});
+
+test('tennis channels: live coverage naming the place, not the other tour, not a replay', () => {
+  const [, today] = all('tennis-atp', ATP);
+  const t = today.start, H = 3600_000;
+  const p = (id, title, s = t - H, e = t + 6 * H) => ({ id, name: id, start: s, end: e, title });
+  const byHour = programmeIndex([p('skyt', 'Live ATP Masters 1000 Tennis: Paris'), p('skyt2', 'ATP Tennis: Paris Masters Highlights'), p('wta', 'Live WTA Tennis: Hong Kong Open'),
+    p('old', 'Live ATP Tennis: Shanghai Masters'), p('tomorrow', 'Live ATP Masters 1000 Tennis: Paris', t + 24 * H, t + 30 * H)], t - 2 * H);
+  assert.deepEqual(channelsFor(today, byHour).map(c => c.id), ['skyt']);
+});
+
+test('request budget: tennis is one request per tour, whatever the window', async () => {
+  const { requestsFor, SOURCES } = await import('../server/fixtures.js');
+  const atp = SOURCES.find(s => s.key === 'tennis.atp');
+  const now = Date.UTC(2026, 10, 5);
+  assert.deepEqual(requestsFor(atp, now, now + 7 * 86400_000).map(u => u.replace(/^.*\/sports\//, '')), ['tennis/atp/scoreboard']);
+  assert.ok(atp.liveEvery >= 5 * 60_000);
+  assert.ok(SOURCES.some(s => s.key === 'tennis.wta') && SOURCES.some(s => s.key === 'f1') && SOURCES.some(s => s.key === 'ufc'));
+});

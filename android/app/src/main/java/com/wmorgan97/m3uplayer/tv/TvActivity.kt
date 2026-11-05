@@ -365,7 +365,7 @@ class TvActivity : ComponentActivity() {
     fun playCatchup(c: Channel, p: Programme) {
         val url = Repo.catchupUrl(c, p.start, p.end) ?: return
         val item = JSONObject().put("url", url).put("title", p.title).put("subtitle", "${c.name}  ·  ${hhmm(p.start)}–${hhmm(p.end)}  ·  Catch-up").put("info", p.desc)
-            .put("live", false).put("start", 0.0).put("art", c.logo).put("headers", JSONObject(c.headers)).put("listTitle", p.title)
+            .put("live", false).put("start", 0.0).put("art", Repo.chLogo(c)).put("headers", JSONObject(c.headers)).put("listTitle", p.title)
         play(listOf(item), 0)
     }
 
@@ -398,7 +398,7 @@ class TvActivity : ComponentActivity() {
         val p = Repo.nowNext(ch).first ?: return
         val url = Repo.catchupUrl(ch, p.start, p.end) ?: return
         val item = JSONObject().put("url", url).put("title", p.title).put("subtitle", "${ch.name}  ·  ${hhmm(p.start)}–${hhmm(p.end)}  ·  From the start  ·  Back for live TV")
-            .put("info", p.desc).put("live", false).put("start", atMs / 1000.0).put("art", ch.logo).put("headers", JSONObject(ch.headers))
+            .put("info", p.desc).put("live", false).put("start", atMs / 1000.0).put("art", Repo.chLogo(ch)).put("headers", JSONObject(ch.headers))
             .put("fromLive", true).put("progStart", p.start).put("progEnd", p.end).put("listTitle", p.title)
         if (n != playIndex) { lastLive = playList to playIndex; playIndex = n }
         PlayerActivity.current?.load(com.getcapacitor.JSObject(item.toString()))
