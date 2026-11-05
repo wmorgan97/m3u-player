@@ -197,6 +197,32 @@ object Repo {
         }
         return on
     }
+    // ---------- synced preferences (per viewer profile): { prefs: { <name>: { v, at } } }, newest edit wins ----------
+    /** "Hide scores": Sports shows "Live" / "Full time" instead of the score, everywhere (spoiler-free). */
+    private val hideScoresState = androidx.compose.runtime.mutableStateOf<Boolean?>(null)
+    var hideScores: Boolean
+        get() = hideScoresState.value ?: prefs.getBoolean(pk("hideScores"), false).also { hideScoresState.value = it }
+        set(v) {
+            val now = System.currentTimeMillis()
+            prefs.edit().putBoolean(pk("hideScores"), v).putLong(pk("hideScoresAt"), now).apply(); hideScoresState.value = v; version++
+            guideScope.launch {
+                try { val d = JSONObject(http(api("sync"), JSONObject().put("prefs", localPrefs()).toString())); syncData = d; adoptPrefs(d) }
+                catch (e: Exception) { warn("saving setting failed", e) }   // sent again with the next sync
+            }
+        }
+    private fun localPrefs() = JSONObject().also { o ->
+        val at = prefs.getLong(pk("hideScoresAt"), 0L)
+        if (at > 0) o.put("hideScores", JSONObject().put("v", hideScores).put("at", at))
+    }
+    private fun adoptPrefs(d: JSONObject) {
+        val e = d.optJSONObject("prefs")?.optJSONObject("hideScores") ?: return
+        if (e.optLong("at") > prefs.getLong(pk("hideScoresAt"), 0L)) {
+            val v = e.optBoolean("v")
+            prefs.edit().putBoolean(pk("hideScores"), v).putLong(pk("hideScoresAt"), e.optLong("at")).apply()
+            if (hideScoresState.value != v) { hideScoresState.value = v; version++ }
+        }
+    }
+
     /** Takes in follows added (or removed) on the other devices. */
     private fun adoptFollows(d: JSONObject) {
         val r = d.optJSONObject("follows") ?: return
@@ -398,7 +424,7 @@ object Repo {
         val shared = JSONObject(syncData.toString()).apply { Profiles.PERSONAL.forEach { remove(it) } }
         val saved = runCatching { JSONObject(syncFile(id).readText()) }.getOrNull()
         prefs.edit().putString("profile", id).apply()
-        profileState.value = id
+        profileState.value = id; hideScoresState.value = null
         syncData = JSONObject(shared.toString()).apply { saved?.let { s -> Profiles.PERSONAL.forEach { k -> if (s.has(k)) put(k, s.get(k)) } } }
         favMemo = null
         version++
@@ -412,7 +438,7 @@ object Repo {
         (syncData.optJSONObject("profiles") ?: JSONObject().also { syncData.put("profiles", it) }).put(id, e)
         version++
         syncData = JSONObject(http(api("sync"), JSONObject().put("profiles", JSONObject().put(id, e)).toString()))
-        if (name == null) prefs.edit().apply { listOf("reminders", "remDel", "follows", "followDel", "watchlater", "chanPlays").forEach { remove(pk(it, id)) } }.apply()
+        if (name == null) prefs.edit().apply { listOf("reminders", "remDel", "follows", "followDel", "watchlater", "chanPlays", "hideScores", "hideScoresAt").forEach { remove(pk(it, id)) } }.apply()
         if (name == null) syncFile(id).delete()
         version++
     }
@@ -420,7 +446,7 @@ object Repo {
         // tvs: this TV says it exists, so the phone offers "Play on TV" (Handoff.kt).
         val me = JSONObject().put(tvName, JSONObject().put("name", tvName).put("at", System.currentTimeMillis()))
         val pid = profileId
-        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).put("watchlater", localWatchLater()).put("tvs", me).toString(), timeout = 15_000)) } catch (e: Exception) {
+        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).put("watchlater", localWatchLater()).put("tvs", me).put("prefs", localPrefs()).toString(), timeout = 15_000)) } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             warn("sync failed", e)
             lastSyncErrorState.value = if (e is org.json.JSONException) "Your server's reply couldn't be read." else describe(e, "your server")
@@ -433,6 +459,7 @@ object Repo {
         adoptReminders(d)
         adoptFollows(d)
         adoptWatchLater(d)
+        adoptPrefs(d)
         version++
         syncFile().writeText(d.toString())
         d

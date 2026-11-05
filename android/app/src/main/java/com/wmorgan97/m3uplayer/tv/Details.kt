@@ -212,7 +212,7 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
 }
 
 /** "Also on": where the title streams in the UK (TMDB's watch providers): each service's small logo and name, then
- *  the JustWatch credit their terms ask for. Information only (not focusable); nothing when it isn't streaming. */
+ *  a quiet "via JustWatch" credit beside them (TMDB's terms ask for it with the data). Information only (not focusable); nothing when it isn't streaming. */
 @Composable
 private fun AlsoOn(arr: org.json.JSONArray?) {
     val list = remember(arr) { (0 until (arr?.length() ?: 0)).mapNotNull { arr!!.optJSONObject(it) }.filter { it.optString("name").isNotBlank() } }
@@ -230,8 +230,8 @@ private fun AlsoOn(arr: org.json.JSONArray?) {
                     Text(p.optString("name"), fontSize = Tv.label, color = Tv.text2, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 }
             }
+            Text("via JustWatch", fontSize = 12.sp, color = Tv.muted.copy(alpha = .6f), maxLines = 1, modifier = Modifier.padding(start = 4.dp))
         }
-        Text("Streaming data: JustWatch", fontSize = 12.sp, color = Tv.muted.copy(alpha = .75f), modifier = Modifier.padding(top = 6.dp))
     }
 }
 

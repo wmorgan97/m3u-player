@@ -275,11 +275,18 @@ export function titleHasTeams(title, home, away, hv = teamVariants(home), av = t
 /** A follow ("Man Utd", "Spurs", "Chelsea Women", "F1") matches this fixture? "Chelsea" is the men's team, "Chelsea
  *  Women" (or "… Ladies", "… W", "… WFC") the women's. */
 const WOMEN_Q = / (?:women|womens|ladies|wfc|lfc|w)\b/g;
+// A side's name marks it as a women's or a youth / reserve side ("Chelsea Women", "Arsenal W", "Chelsea U21", "Chelsea
+// Academy"): following "Chelsea" means the men's first team only, whatever the feed or a channel calls the others.
+const WOMEN_NAME = /\b(?:women|womens|ladies|wfc|wsl|w)\b/;
+const YOUTH_NAME = /\b(?:u ?(?:1[5-9]|2[0-3])s?|under ?(?:1[5-9]|2[0-3])s?|academy|reserves?|youth|b team)\b/;
+export const isWomensName = s => WOMEN_NAME.test(foldName(s));
+export const isYouthName = s => YOUTH_NAME.test(foldName(s));
 export function followMatches(q, f) {
   let k = foldName(q);
   const women = WOMEN_Q.test(` ${k}`); WOMEN_Q.lastIndex = 0;
   if (women) k = ` ${k}`.replace(WOMEN_Q, '').trim();
   if (!k || women !== !!f.women) return false;
+  const youth = YOUTH_NAME.test(k);
   if (!f.home) {
     const c = classify(q);
     if (c) return c.sport === f.sport && (c.comp === f.comp || ['tennis', 'f1', 'ufc'].includes(f.sport));
@@ -290,6 +297,8 @@ export function followMatches(q, f) {
   }
   const canon = ALIAS_OF.get(k) || k;
   for (const t of [f.home, f.away]) {
+    if (!t?.name) continue;
+    if (isYouthName(t.name) !== youth || (!women && isWomensName(t.name))) continue;
     const vs = teamVariants(t);
     if (vs.includes(k) || vs.includes(canon)) return true;
     if (k.length >= 4 && ` ${foldName(t.name)} `.includes(` ${k} `) && !AMBIGUOUS.has(k)) return true;
@@ -446,21 +455,81 @@ export function sortFixtures(list) {
 // ---------- team channels: the fallback when no main channel lists a game ----------
 // Providers carry a channel per club ("UK| CHAMPIONSHIP PPV": "Blackburn Rovers", "UK| SPFL PPV": "Celtic TV",
 // "UK| SERIE A TEAM PPV": "UK: SERIE A - AC MILAN 4K") or per match ("National League 4 | Barrow vs Eastleigh // …").
-const TEAM_GROUP = /\bppv\b|\bteam\b|\bclubs?\b/i;
-const CHANNEL_NOISE = / (?:uk|gb|serie a|la ?liga|premier league|efl|spfl|championship|league one|league two|4k|uhd|fhd|hd|sd|raw|ppv|tv|channel|official)\b/g;
+// Premier League club channels sit in groups like "UK| PREMIER LEAGUE TEAMS", "UK| PREMIER LEAGUE CLUBS" or "EPL TEAMS".
+const TEAM_GROUP = /\bppv\b|\bteams?\b|\bclubs?\b|\bepl\b|\bpremier league\b/i;
+const CHANNEL_NOISE = / (?:uk|gb|serie a|la ?liga|premier league|epl|efl|spfl|championship|league one|league two|4k|uhd|fhd|hd|sd|raw|ppv|tv|channel|official)\b/g;
 export const isTeamChannelGroup = g => TEAM_GROUP.test(g || '');
 export const channelTeam = name => (` ${foldName(name)} `).replace(CHANNEL_NOISE, ' ').replace(/\s+/g, ' ').trim();
-/** The club's own channel for this fixture (home side first), or a channel named after the match itself. */
+/** The team channels worked out once (per channel list): the team each is named after, and whether it is a women's or a
+ *  youth side's. teamChannelFor takes this or the plain channel list. */
+const teamIxCache = new WeakMap();
+export function teamChannelIndex(chans) {
+  let ix = teamIxCache.get(chans);
+  if (!ix) {
+    ix = { chans, byKey: new Map(), list: [] };
+    for (const c of chans) {
+      const t = channelTeam(c.name), e = { c, women: isWomensName(c.name), youth: isYouthName(c.name) };
+      ix.list.push(e);
+      if (!t) continue;
+      // (a women's / youth channel is also filed under the club's own name: "chelsea women" -> "chelsea", checked by side)
+      const bare = t.replace(/\b(?:women|womens|ladies|wfc|w|u ?(?:1[5-9]|2[0-3])s?|academy|reserves?|youth)\b/g, ' ').replace(/\s+/g, ' ').trim();
+      for (const k of new Set([t, t.replace(PREFIX, '').replace(SUFFIX, ''), bare, bare.replace(PREFIX, '').replace(SUFFIX, '')])) {
+        if (!k) continue;
+        const l = ix.byKey.get(k);
+        if (!l) ix.byKey.set(k, [e]); else if (!l.includes(e)) l.push(e);
+      }
+    }
+    teamIxCache.set(chans, ix);
+  }
+  return ix;
+}
+/** The club's own channel for this fixture (home side first), or a channel named after the match itself. Never a women's
+ *  or youth side's channel for a men's game (nor the other way round). */
 export function teamChannelFor(f, chans) {
-  if (!f?.home || !f?.away || !chans?.length) return null;
+  if (!f?.home || !f?.away || !(chans?.length || chans?.list?.length)) return null;
+  const ix = chans.byKey ? chans : teamChannelIndex(chans);
+  const women = !!f.women || isWomensName(f.home.name), youth = isYouthName(f.home.name) || isYouthName(f.away.name);
+  const ok = e => e.women === women && e.youth === youth;
   const hv = teamVariants(f.home), av = teamVariants(f.away);
-  const named = side => chans.find(c => { const t = channelTeam(c.name); return t && side.some(v => v === t || v === t.replace(PREFIX, '').replace(SUFFIX, '')); });
+  const named = side => { for (const v of side) { const e = ix.byKey.get(v)?.find(ok); if (e) return e.c; } return null; };
   const home = named(hv);
   if (home) return { channel: home, side: 'home' };
   const away = named(av);
   if (away) return { channel: away, side: 'away' };
-  const match = chans.find(c => titleHasTeams(c.name, f.home, f.away, hv, av));
-  return match ? { channel: match, side: 'match' } : null;
+  const match = ix.list.find(e => ok(e) && titleHasTeams(e.c.name, f.home, f.away, hv, av));
+  return match ? { channel: match.c, side: 'match' } : null;
+}
+
+// ---------- one card per game ----------
+// US teams: the guide often says the city alone ("NHL: Seattle v Calgary" for Seattle Kraken v Calgary Flames).
+const cityOf = t => { const n = foldName(t?.name), k = foldName(t?.nick); return k && n.endsWith(` ${k}`) ? n.slice(0, -k.length - 1) : ''; };
+const sideWords = t => { const v = teamVariants(t), c = cityOf(t); if (c && !AMBIGUOUS.has(c) && !v.includes(c)) v.push(c); return v; };
+/** The fixture a guide programme is the same game as (both teams named, starting within 90 minutes, not another sport),
+ *  so the page shows the fixture's card once instead of a second card for the guide listing. */
+export function fixtureForProgramme(title, start, fixtures) {
+  const sport = classify(title)?.sport || null;
+  for (const f of fixtures || []) {
+    if (!f.home || !f.away || Math.abs(f.start - start) > 90 * MIN || (sport && sport !== f.sport)) continue;
+    if (isWomens(title, '') !== !!f.women) continue;
+    if (titleHasTeams(title, null, null, sideWords(f.home), sideWords(f.away))) return f;
+  }
+  return null;
+}
+
+/** One follow per team: "Lakers" and "Los Angeles Lakers" (or "Man Utd" and "Manchester United") name the same side, so
+ *  they show as one tile. The team a follow resolves to is the side it matches in the fixture list (else its alias). */
+export function followTeamKey(q, fixtures) {
+  const k = foldName(q);
+  for (const f of fixtures || []) {
+    if (!f.home || !followMatches(q, f)) continue;
+    const t = [f.home, f.away].find(x => followMatches(q, { ...f, home: x, away: { name: '' } }));
+    if (t) return `${f.sport}:${foldName(t.name)}${f.women ? ':w' : ''}`;
+  }
+  return ALIAS_OF.get(k) || k;
+}
+export function dedupeFollows(follows, fixtures) {
+  const seen = new Set();
+  return (follows || []).filter(fl => { const key = followTeamKey(fl.q, fixtures); if (seen.has(key)) return false; seen.add(key); return true; });
 }
 
 // ---------- event / league-pass channels: the matchup is in the channel's name ----------

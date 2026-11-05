@@ -80,6 +80,7 @@ struct M3USnapshot: Codable {
     var channels: [String: String] = [:]   // fixture id -> channel name (best copy on your channels)
     var cw: [CWItem] = []                  // Continue watching as the app shows it
     var liveActivities: Bool = true
+    var hideScores: Bool? = nil            // Settings → Hide scores: "Live" / "FT" instead of the score, no live-score activities
 }
 
 struct CWItem: Codable, Hashable {

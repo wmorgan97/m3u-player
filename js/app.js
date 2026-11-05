@@ -9,7 +9,7 @@ import { episodeList, diffEpisodes, newEpisodeText } from './newepisodes.js';
 import { matchUpcoming } from './follow.js';
 import { wlKey, wlEntry, watchLaterList, adoptWatchLater } from './watchlater.js';
 import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport, importance } from './sports.js';
-import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup, isEventGroup, eventChannelsFor, namesPerson } from './fixtures.js';
+import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup, isEventGroup, eventChannelsFor, namesPerson, fixtureForProgramme, dedupeFollows } from './fixtures.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, nativeVlcClose, nativeDl, headersFromOpts } from './native.js';
 import { handoffEntry, hasTv, openTvs } from './handoff.js';
@@ -230,6 +230,7 @@ async function syncNow() {
       const pid = deviceProfile().id;
       const res = await fetch(syncApi(), { method: 'POST', cache: 'no-store', body: JSON.stringify({
         favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {},
+        ...(state.settings.hideScoresAt ? { prefs: { hideScores: { v: !!state.settings.hideScores, at: state.settings.hideScoresAt } } } : {}),
         ...(Object.keys(state.profiles || {}).length ? { profiles: state.profiles } : {}) }) });
       if (!res.ok) return;
       const d = await res.json();
@@ -247,6 +248,8 @@ async function syncNow() {
       if (d.sources) adoptSources(d.sources);
       if (d.reminders) await adoptReminders(d.reminders);
       if (d.follows) await adoptFollows(d.follows);
+      const hs = d.prefs?.hideScores;   // Hide scores, set on another device (newest edit wins)
+      if (hs && hs.at > (state.settings.hideScoresAt || 0)) { state.settings.hideScores = !!hs.v; state.settings.hideScoresAt = hs.at; db.set('settings', state.settings).catch(() => {}); changed = true; renderSportsSoon(); }
       widgetSnapshot(); widgetFixtures();
       if (d.watchlater) {
         const before = JSON.stringify(watchLaterList(state.watchlater, state.progress).map(e => e.key));
@@ -633,8 +636,8 @@ const titleLogoInner = (title, t) => `<img class="title-logo" src="${esc(titleLo
 const titleHtml = (cls, title, t) => t?.logo ? `<div class="${cls} has-logo">${titleLogoInner(title, t)}</div>` : `<div class="${cls}">${esc(title)}</div>`;
 // "IMDb 8.8 · RT 87%" (Metacritic only when Rotten Tomatoes has no score): one quiet pill beside the TMDB rating.
 const extRatingsHtml = r => { const parts = r ? [r.imdb && `<b>IMDb</b> ${r.imdb.toFixed(1)}`, r.rt != null && `<b>RT</b> ${r.rt}%`, r.rt == null && r.mc && `<b>MC</b> ${r.mc}`].filter(Boolean) : []; return parts.length ? `<span class="pill ext-rating"><span>${parts.join(' · ')}</span></span>` : ''; };
-// "Also on": UK streaming services (TMDB's watch providers, data from JustWatch, credited as their terms ask).
-const alsoOnHtml = t => t?.providers?.length ? `<div class="also-on"><span class="also-label">Also on</span>${t.providers.map(p => `<span class="prov">${p.logo ? `<img src="${esc(thumb(p.logo, 120))}" alt="" loading="lazy" onerror="this.remove()">` : ''}${esc(p.name)}</span>`).join('')}<span class="jw-credit">Streaming data: JustWatch</span></div>` : '';
+// "Also on": UK streaming services (TMDB's watch providers, data from JustWatch, credited beside the chips, as their terms ask).
+const alsoOnHtml = t => t?.providers?.length ? `<div class="also-on"><span class="also-label">Also on</span>${t.providers.map(p => `<span class="prov">${p.logo ? `<img src="${esc(thumb(p.logo, 120))}" alt="" loading="lazy" onerror="this.remove()">` : ''}${esc(p.name)}</span>`).join('')}<span class="jw-credit">via JustWatch</span></div>` : '';
 // Fill gaps in the provider's own details with TMDB's (the provider's stay when it has them).
 function withTmdb(i, t) {
   if (!t) return i;
@@ -1361,8 +1364,8 @@ function homeHub(pl) {
   row('h-t10-series', 'Top 10 series this week', topSeries, { top10: true, min: 5 });
 
   // New on your playlist: this year's and last year's titles, newest added first.
-  const fresh = s => (art(s?.e.fresh).length >= 8 ? art(s.e.fresh) : art(s?.e.recent));
-  row('h-new', 'New on your playlist', mixKinds(fresh(M), fresh(S)), { see: M ? { p: M.p, tab: 'movies', group: null } : null });
+  const fresh = s => art(s?.e.fresh);
+  row('h-new', 'New on your playlist', mixKinds(fresh(M), fresh(S)), { see: M ? { p: M.p, tab: 'movies', group: null } : null, min: 8 });
 
   // Genres: three a day, in turn (the one "Because you watched" already covers sits out).
   const day = Math.floor((Date.now() - new Date().getTimezoneOffset() * MINUTE) / DAY);
@@ -2212,7 +2215,7 @@ function renderChips() {
   }
 }
 
-// Movies/Series front page for a server-backed catalogue: a hero, "Recently added", then a shelf per
+// Movies/Series front page for a server-backed catalogue: a hero, Top 10, Popular now and New releases, then a shelf per
 // group (loaded as you scroll). Picking a group chip or searching switches to the normal poster grid.
 const shelfItems = new Map();   // shelf key -> items shown in it (for taps)
 let shelfObserver = null;
@@ -2251,7 +2254,6 @@ function renderDiscover() {
     ? entry.trending.filter(it => it.tm?.backdrop).slice(0, 6).map(it => ({ ...it, heroLabel: `#${entry.trending.indexOf(it) + 1} trending this week` }))
     : art(entry.top).slice(0, 6));
   shelfItems.set('hero', heroItems);
-  const fresh = art(entry.fresh).length >= 8 ? art(entry.fresh) : art(entry.recent);
   // Streaming services and section shelves, in the sidebar's order.
   const svc = [];
   for (const [name, re, c1, c2] of SERVICES) { const g = groups.find(g => re.test(g.name) && !/kids|anime/i.test(g.name)); if (g && !svc.some(s => s.group === g.name)) svc.push({ name, c1, c2, group: g.name, count: g.count }); }
@@ -2267,7 +2269,7 @@ function renderDiscover() {
     ${watchLaterShelf(tab === 'series' ? 'series' : 'movie', false)}
     ${top10.length ? `<li class="shelf"><div class="shelf-head"><h3>Top 10 ${what} this week</h3><span class="muted">from TMDB</span></div><ul class="shelf-row top10">${top10.map((it, k) => `<li class="scard t10" data-shelf="t10" data-k="${k}"><span class="t10-n">${k + 1}</span>${cardHtml(it, 't10', k).replace(/^<li[^>]*>|<\/li>$/g, '')}</li>`).join('')}</ul></li>` : ''}
     ${entry.top?.length ? shelfHtml('Popular now', 'top', art(entry.top).slice(0, 40)) : ''}
-    ${fresh.length ? shelfHtml(art(entry.fresh).length >= 8 ? 'New releases' : 'Recently added', 'recent', fresh.slice(0, 40)) : ''}
+    ${art(entry.fresh).length >= 8 ? shelfHtml('New releases', 'recent', art(entry.fresh).slice(0, 40)) : ''}
     ${svc.length >= 2 ? `<li class="shelf"><div class="shelf-head"><h3>Streaming services</h3></div><ul class="shelf-row services">${svc.map(s => `<li class="svc" data-see="${esc(s.group)}" style="--c1:${s.c1};--c2:${s.c2}"><b>${esc(s.name)}</b><span>${s.count.toLocaleString()} ${what}</span></li>`).join('')}</ul></li>` : ''}
     ${ordered.slice(0, 40).map(g => { const items = (entry.groups.get(g.name) || saved?.get(g.name) || []).slice(0, 24); return shelfHtml(groupLabel(g.name), 'g:' + g.name, items, { total: g.count, group: g.name, pending: !items.length }); }).join('')}
     ${groups.length > 40 ? `<li class="muted center shelf-note">${(groups.length - 40).toLocaleString()} more groups in the sidebar.</li>` : ''}`;
@@ -4010,12 +4012,15 @@ const shortDay = t => { const d = fmtDay(t); return d === 'Today' || d === 'Tomo
 // The channels results are matched to: visible live channels — UK ones (the default), or with "All countries" on,
 // English groups unless you chose every language.
 const sportsMode = () => (state.settings.sportsAll ? (state.settings.vodLanguage === 'all' ? 'any' : 'en') : 'uk');
+const SPORTS_CANDIDATE = /tv ?guide|\bsports?\b|\bppv\b|\bevents?\b|\bteams?\b|\bclubs?\b|\bepl\b|premier league|sunday ticket|league pass|center ice|mlb\.?tv|\b(?:nfl|nba|wnba|nhl|mlb|mls|ncaa|ufc|f1|wwe|efl|spfl)\b|college|football|soccer|racing|golf|tennis|boxing|darts|cricket|rugby|dazn|espn|bein|eurosport|tnt|sky ?sports/i;
 function sportsChannels(p) {
   const all = m3uKinds(p)?.live || p.channels, mode = sportsMode();
   const hit = sportsChanCache.get(all);
   if (hit && hit.mode === mode && hit.n === all.length) return hit.list;
   // US league-pass and PPV event groups ("🏀 NBA League Pass", "🎟️ PPV Event") carry their games in English with no UK tag.
-  const list = all.filter(c => isLiveChannel(c) && !isSeparator(c) && visibleGroup(p, c.group || '') && (sportsLangOk(c) || US_PASS.test(c.group || ''))).map(c => ({ ...c, src: p.id }));
+  // Only the candidate groups (TV guide groups and sports groups), never the whole playlist; decided once per group.
+  const okGroup = new Map(), cand = g => { let v = okGroup.get(g); if (v === undefined) okGroup.set(g, v = SPORTS_CANDIDATE.test(g)); return v; };
+  const list = all.filter(c => cand(c.group || '') && isLiveChannel(c) && !isSeparator(c) && visibleGroup(p, c.group || '') && (sportsLangOk(c) || US_PASS.test(c.group || ''))).map(c => ({ ...c, src: p.id }));
   sportsChanCache.set(all, { mode, n: all.length, list });
   return list;
 }
@@ -4257,16 +4262,21 @@ const hasDetail = f => !!f && ((f.sport === 'tennis' && f.matches?.length) || (f
 // Club / match channels from the playlist's team groups ("UK| CHAMPIONSHIP PPV", "UK| SPFL PPV", …), for games no main
 // channel lists: a Championship game with no Sky slot is usually on the home club's own channel.
 const teamChanCache = new WeakMap();
+let teamChanAll = { parts: [], out: [] };
 function teamChannels() {
-  const out = [];
+  const parts = [];
   for (const p of sportsSources()) {
     const chans = sportsChannels(p);
     let l = teamChanCache.get(chans);
     if (!l) { l = chans.filter(c => isTeamChannelGroup(c.group)); teamChanCache.set(chans, l); }
-    out.push(...l);
+    parts.push(l);
   }
-  return out;
+  // The same lists as last time: the same array back, so teamChannelFor's index (keyed on it) is reused.
+  if (parts.length !== teamChanAll.parts.length || parts.some((l, i) => l !== teamChanAll.parts[i])) teamChanAll = { parts, out: parts.flat() };
+  return teamChanAll.out;
 }
+const hideScores = () => !!state.settings.hideScores;
+const shownFollows = () => dedupeFollows(state.follows || [], fxHub.list || []);
 function fxItem(f) {
   const best = fxHub.on.get(f.id)?.[0];
   if (!best && f.home && f.sport === 'football') {
@@ -4290,14 +4300,14 @@ const fxWhere = it => it.channel && it.evGroup ? `<span class="sp-on">On ${esc(p
   ? (it.ev === 'likely' ? `<span class="sp-likely">Likely on ${esc(teamChLabel(it.channel))} channel</span>` : `<span class="sp-on">On ${esc(it.teamCh ? `${teamChLabel(it.channel)} channel` : channelLabel(it.channel.name))}</span>`)
   : fxHub.chAt || !it.f ? '<span class="sp-off">Not on your channels</span>' : '';
 const fxLines = (it, live = false) => it.f?.home
-  ? `<span class="sp-fx-team">${crest(it.f.home)}<span>${esc(fxName(it.f.home))}</span>${it.f.status !== 'scheduled' && it.f.home.score != null ? `<b>${esc(it.f.home.score)}</b>` : ''}</span>
-     <span class="sp-fx-team">${crest(it.f.away)}<span>${esc(fxName(it.f.away))}</span>${it.f.status !== 'scheduled' && it.f.away.score != null ? `<b>${esc(it.f.away.score)}</b>` : ''}</span>`
-  : it.f ? athLines(it.f, live)
+  ? `<span class="sp-fx-team">${crest(it.f.home)}<span>${esc(fxName(it.f.home))}</span>${it.f.status !== 'scheduled' && it.f.home.score != null && !hideScores() ? `<b>${esc(it.f.home.score)}</b>` : ''}</span>
+     <span class="sp-fx-team">${crest(it.f.away)}<span>${esc(fxName(it.f.away))}</span>${it.f.status !== 'scheduled' && it.f.away.score != null && !hideScores() ? `<b>${esc(it.f.away.score)}</b>` : ''}</span>`
+  : it.f ? athLines(it.f, live && !hideScores())
   : `<span class="sp-fx-team sp-fx-one"><span>${esc(it.title)}</span></span>`;
 const fxMeta = it => { const w = fxWhere(it), c = esc([it.comp, it.f?.round].filter(Boolean).join(' · ')); return c && w ? `${c} · ${w}` : c || w; };
 
 const spFxLive = (it, k) => {
-  const clock = it.f ? (it.f.status === 'live' ? it.f.minute || 'Live' : 'Starting') : `until ${fmtTime(it.prog[1])}`;
+  const clock = it.f ? (it.f.status === 'live' ? (hideScores() ? 'Live' : it.f.minute || 'Live') : 'Starting') : `until ${fmtTime(it.prog[1])}`;
   return `<li class="sp-fxl${it.channel ? '' : ' off'}${it.f && !it.f.home ? ` sp-fxl-${esc(it.f.sport)}` : ''}" data-live="${k}"${it.channel || hasDetail(it.f) ? ' role="button" tabindex="0"' : ''}>
     <span class="sp-fxl-head"><i class="nc-dot"></i><span>${esc(clock)}</span><span class="muted">${esc(it.comp || channelLabel(it.channel?.name || ''))}</span></span>
     <span class="sp-fxl-teams">${fxLines(it, true)}</span>
@@ -4314,7 +4324,7 @@ const spFxTeamCard = (fl, k) => {
   const bout = !f.home && [...(f.matches || []), ...(f.fights || [])].find(m => namesPerson(fl.q, m.a.name) || namesPerson(fl.q, m.b.name));
   if (bout) it.title = `${surname(bout.a)} v ${surname(bout.b)} · ${f.title}`;
   const at = bout?.start || f.start, boutOn = bout ? bout.status === 'live' : on;
-  const when = boutOn ? `<i class="nc-dot"></i>${esc(f.status === 'live' && f.home ? `${f.minute || 'Live'} · ${f.home.score}–${f.away.score}` : 'Live now')}` : esc(`${shortDay(at)} ${fmtTime(at)}`);
+  const when = boutOn ? `<i class="nc-dot"></i>${esc(f.status === 'live' && f.home && !hideScores() ? `${f.minute || 'Live'} · ${f.home.score}–${f.away.score}` : 'Live now')}` : esc(`${shortDay(at)} ${fmtTime(at)}`);
   const where = fxWhere(it).replace(/<[^>]+>/g, '').replace(/^On /, '');   // already escaped
   return `<li class="sp-team" data-team="${k}" role="button" tabindex="0"><b>${mine ? crest(mine) : ''}<span>${esc(fl.q)}</span></b>
     <span class="sp-team-title">${esc(it.title)}</span><span class="sp-team-when">${when}${where ? ` · ${where}` : ''}</span></li>`;
@@ -4329,7 +4339,8 @@ function renderFixtureSports(body, chipsEl) {
   const g = buildSports(sportsHub.results, sportsNow(), now);
   // (golf is in both: the feed's tournaments, and the guide for the tours it doesn't list — the same slot once)
   const fxSlots = new Set([...liveFx, ...upFx].map(fxItem).filter(it => it.channel).map(it => `${it.channel.url}|${it.prog[0]}`));
-  const gOk = it => !FEED_SPORTS.has(it.sport) && !fxSlots.has(`${it.channel.url}|${it.prog[0]}`);
+  // One card per game: a guide listing of a game the feed has ("NHL: Seattle v Calgary") is that fixture's card.
+  const gOk = it => !FEED_SPORTS.has(it.sport) && !fxSlots.has(`${it.channel.url}|${it.prog[0]}`) && !fixtureForProgramme(it.prog[2], it.prog[0], all);
   const gLive = g.live.filter(it => it.sport && gOk(it)).map(guideItem), gUp = g.upcoming.filter(it => gOk(it) && it.prog[0] < until).map(guideItem);
   const have = new Set([...liveFx, ...upFx].map(f => f.sport).concat([...gLive, ...gUp].map(it => it.sport)));
   const ids = SPORTS.filter(s => have.has(s.id)).map(s => s.id);
@@ -4348,7 +4359,7 @@ function renderFixtureSports(body, chipsEl) {
   const keep = [...body.querySelectorAll('[data-keep]')].map(el => [el.dataset.keep, el.scrollLeft]);
 
   let html = '';
-  const follows = state.follows;
+  const follows = state.follows && shownFollows();
   if (sportsFilter === 'all' && follows) {
     html += follows.length
       ? `<section class="hub-sec sp-teams"><div class="hub-head"><h2>My teams</h2><span class="hub-links"><button type="button" class="link" data-follow-new>Follow</button></span></div>
@@ -4505,7 +4516,7 @@ function renderSports() {
   } else if (detectedServer && !canSync()) {
     html = `<div class="empty sp-empty">${icon('trophy', 'big')}<p><b>Connect your server</b></p><p class="muted">Sports searches the whole TV guide for the next three days, which needs your server.</p><button class="btn primary" data-sp-server>Connect</button></div>`;
   } else {
-    const follows = state.follows;   // undefined until read from storage: show neither the teams nor the prompt yet
+    const follows = state.follows && shownFollows();   // undefined until read from storage: show neither the teams nor the prompt yet
     if (sportsFilter === 'all' && follows && detectedServer) {
       html += follows.length
         ? `<section class="hub-sec sp-teams"><div class="hub-head"><h2>My teams</h2><span class="hub-links"><button type="button" class="link" data-follow-new>Follow</button></span></div>
@@ -5555,7 +5566,7 @@ const widgetSnapshot = debounce(() => {
     return { k: fnv(e.item.url), url: e.item.url, name: displayTitle(e.item.name), ...(m.episode != null ? { sub: `S${m.season || 1} E${m.episode}` } : {}),
       art: bd || e.item.logo || '', poster: !bd, t: e.t, d: e.d, at: e.at };
   });
-  widgetCall('snapshot', { json: JSON.stringify({ at: now, follows, followed: games.map(f => f.id), channels, cw, liveActivities: state.settings.liveActivities !== false }) });
+  widgetCall('snapshot', { json: JSON.stringify({ at: now, follows, followed: games.map(f => f.id), channels, cw, liveActivities: state.settings.liveActivities !== false, hideScores: hideScores() }) });
 }, 1500);
 
 // Your teams' fixtures (and their channels), so the widgets and live scores know them without a visit to Sports.
@@ -5620,6 +5631,8 @@ async function settingsSheet() {
       <label class="switch"><span><b>Channel logos</b></span><input type="checkbox" name="logos" ${s.logos !== false ? 'checked' : ''}></label>
       <label class="switch"><span><b>Channel numbers</b></span><input type="checkbox" name="numbers" ${s.numbers ? 'checked' : ''}></label>
       <label class="switch"><span><b>Show what’s on next</b><span class="muted">After the current programme on each channel row.</span></span><input type="checkbox" name="showNext" ${s.showNext !== false ? 'checked' : ''}></label>
+      <div class="section-title">Sports</div>
+      <label class="switch"><span><b>Hide scores</b><span class="muted">Live and finished games say “Live” or “Full time” instead of the score.</span></span><input type="checkbox" name="hideScores" ${s.hideScores ? 'checked' : ''}></label>
       <div class="section-title">Channels</div>
       <label class="switch"><span><b>Merge duplicate channels</b><span class="muted">Show each channel once; the copies become backup streams, used automatically if one fails.</span></span><input type="checkbox" name="mergeDupes" ${s.mergeDupes !== false ? 'checked' : ''}></label>
       <label class="switch"><span><b>Prefer 4K live channels</b><span class="muted">Where a channel also comes in 4K, play that copy (Safari and the iPhone app; the normal copy stays as backup).</span></span><input type="checkbox" name="prefer4k" ${s.prefer4k !== false ? 'checked' : ''}></label>
@@ -5668,9 +5681,10 @@ async function settingsSheet() {
           ...(isNative ? {} : { tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto') }), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'), prefer4k: f.get('prefer4k') === 'on', livePlayer: String(f.get('livePlayer') || state.settings.livePlayer || 'app'),
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
           showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on',
+          ...((f.get('hideScores') === 'on') !== !!state.settings.hideScores ? { hideScores: f.get('hideScores') === 'on', hideScoresAt: Date.now() } : {}),
           ...(isNative ? { liveActivities: f.get('liveActivities') === 'on' } : {}),
         });
-        widgetSnapshot();
+        widgetSnapshot(); syncNow();
         if (mergeWas !== state.settings.mergeDupes) state.playlists.forEach(invalidate);
         if (langWas !== state.settings.vodLanguage) vodCache.clear();   // rebuilt with the new language filter on next view
         applySettings();

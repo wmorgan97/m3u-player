@@ -31,7 +31,7 @@ object Profiles {
     const val MAIN = "main"
     const val MAX = 5
     /** The personal parts of /sync: per profile. Everything else (playlists, TVs, Play on TV) is shared. */
-    val PERSONAL = listOf("favorites", "favAt", "recents", "recReset", "progress", "reminders", "follows", "watchlater")
+    val PERSONAL = listOf("favorites", "favAt", "recents", "recReset", "progress", "reminders", "follows", "watchlater", "prefs")
     /** Calm tile colours, the web app's PROFILE_COLORS in the same order (a profile's colour is an index). */
     val COLORS = listOf(0xFF3D7BE0, 0xFFD4813A, 0xFF2A9D8F, 0xFF8A6FD1, 0xFFC95B8A, 0xFF5B8C3A, 0xFFC0504D, 0xFF4F6D8F)
     fun color(p: Profile) = Color(COLORS[Math.floorMod(p.color, COLORS.size)])

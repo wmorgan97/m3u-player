@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normaliseEspn, fixtureTitle, isOn, foldName, teamVariants, titleHasTeams, followMatches, programmeIndex, channelsFor, matchChannels, sortFixtures, clubIndex, clubChannelsFor, eventChannelsFor, nameDate, isEventGroup } from '../js/fixtures.js';
+import { normaliseEspn, fixtureTitle, isOn, foldName, teamVariants, titleHasTeams, followMatches, programmeIndex, channelsFor, matchChannels, sortFixtures, clubIndex, clubChannelsFor, eventChannelsFor, nameDate, isEventGroup,
+  teamChannelFor, teamChannelIndex, isTeamChannelGroup, fixtureForProgramme, dedupeFollows, followTeamKey } from '../js/fixtures.js';
 
 // Trimmed from ESPN's scoreboard replies of 1 Nov 2026 (site.api.espn.com/apis/site/v2/sports/…/scoreboard).
 const team = (id, displayName, shortDisplayName, name = displayName) => ({ id, displayName, shortDisplayName, name, logo: `https://a.espncdn.com/i/teamlogos/soccer/500/${id}.png` });
@@ -318,4 +319,64 @@ test('request budget: tennis is one request per tour, whatever the window', asyn
   assert.deepEqual(requestsFor(atp, now, now + 7 * 86400_000).map(u => u.replace(/^.*\/sports\//, '')), ['tennis/atp/scoreboard']);
   assert.ok(atp.liveEvery >= 5 * 60_000);
   assert.ok(SOURCES.some(s => s.key === 'tennis.wta') && SOURCES.some(s => s.key === 'f1') && SOURCES.some(s => s.key === 'ufc'));
+});
+
+// ---------- sports polish: men's first team only, Premier League club channels, one card per game, one tile per team ----------
+const side = (name, extra = {}) => ({ name, short: name, crest: '', ...extra });
+test('following "Chelsea" is the men\'s first team: never Chelsea Women or Chelsea U21', () => {
+  const t = Date.UTC(2026, 10, 8, 15);
+  const men = { id: 'eng.1:1', sport: 'football', comp: 'Premier League', start: t, end: t + 7200_000, status: 'scheduled', home: side('Chelsea'), away: side('Arsenal') };
+  const wsl = { ...men, id: 'eng.w.1:1', comp: 'WSL', women: true };
+  const named = { ...men, id: 'x:2', home: side('Chelsea Women'), away: side('Arsenal Women') };
+  const youth = { ...men, id: 'eng.trophy:1', comp: 'EFL Trophy', home: side('Chelsea U21'), away: side('Exeter City') };
+  const academy = { ...men, id: 'x:3', home: side('Chelsea Academy'), away: side('Fulham Academy') };
+  assert.ok(followMatches('Chelsea', men));
+  for (const f of [wsl, named, youth, academy]) assert.ok(!followMatches('Chelsea', f), f.id);
+  assert.ok(followMatches('Chelsea Women', wsl));
+  assert.ok(followMatches('Chelsea U21', youth));
+  assert.ok(!followMatches('Chelsea U21', men));
+  assert.ok(followMatches('Exeter City', youth));   // the senior side in the same game still counts
+  // F1, tennis and UFC follows never pick up a club, and a club follow never picks up a person
+  const f1 = { id: 'f1:1', sport: 'f1', comp: 'F1', title: 'Las Vegas Grand Prix', session: 'Race', start: t, end: t + 7200_000, status: 'scheduled', drivers: ['Lewis Hamilton'] };
+  const ten = { id: 'tennis.wta:1', sport: 'tennis', comp: 'WTA', title: 'WTA Finals', start: t, end: t, status: 'scheduled', matches: [{ a: { name: 'Chelsea Smith' }, b: { name: 'Coco Gauff' } }] };
+  const ufc = { id: 'ufc:1', sport: 'ufc', comp: 'UFC', title: 'UFC 334', start: t, end: t, status: 'scheduled', fights: [{ a: { name: 'Jon Jones' }, b: { name: 'Tom Aspinall' } }] };
+  for (const f of [f1, ten, ufc]) assert.ok(!followMatches('Chelsea', f), f.id);
+  for (const q of ['F1', 'Tennis', 'UFC', 'Hamilton', 'Gauff', 'Aspinall']) assert.ok(!followMatches(q, men), q);
+});
+
+test('team channels: Premier League club groups, never a women\'s or U21 channel for a men\'s game; indexed once', () => {
+  for (const g of ['UK| PREMIER LEAGUE TEAMS', 'EPL TEAMS', 'UK| PREMIER LEAGUE CLUBS', 'UK| CHAMPIONSHIP PPV', 'UK| SERIE A TEAM PPV']) assert.ok(isTeamChannelGroup(g), g);
+  for (const g of ['UK| SPORTS', 'UK| ENTERTAINMENT', 'US| NBA']) assert.ok(!isTeamChannelGroup(g), g);
+  const t = Date.UTC(2026, 10, 8, 15);
+  const chans = ['UK: Chelsea Women HD', 'UK: Chelsea U21 HD', 'UK: Arsenal Women HD', 'Chelsea Women v Arsenal Women', 'UK: Everton HD', 'Fulham FC', 'UK: Chelsea TV HD']
+    .map((name, i) => ({ name, url: `u${i}`, group: 'UK| PREMIER LEAGUE TEAMS' }));
+  const ix = teamChannelIndex(chans);
+  assert.equal(teamChannelIndex(chans), ix);   // cached per list
+  const fx = (h, a, extra = {}) => ({ id: 'x', sport: 'football', start: t, end: t + 7200_000, status: 'scheduled', home: side(h), away: side(a), ...extra });
+  assert.equal(teamChannelFor(fx('Chelsea', 'Arsenal'), ix)?.channel.name, 'UK: Chelsea TV HD');
+  assert.equal(teamChannelFor(fx('Chelsea', 'Arsenal'), chans.filter(c => !/Chelsea TV/.test(c.name))), null);   // only the women's / U21 ones: none
+  assert.equal(teamChannelFor(fx('Chelsea', 'Arsenal', { women: true }), ix)?.channel.name, 'UK: Chelsea Women HD');
+  assert.equal(teamChannelFor(fx('Everton', 'Spurs'), ix)?.channel.name, 'UK: Everton HD');
+  assert.equal(teamChannelFor(fx('Wolves', 'Fulham'), ix)?.side, 'away');
+});
+
+test('one card per game: a guide listing of a fixture is the fixture', () => {
+  const t = Date.UTC(2026, 10, 8, 2);
+  const nhl = { id: 'nhl:1', sport: 'nhl', comp: 'NHL', start: t, end: t + 3 * 3600_000, status: 'scheduled', home: side('Seattle Kraken', { nick: 'Kraken' }), away: side('Calgary Flames', { nick: 'Flames' }) };
+  const pl = { id: 'eng.1:1', sport: 'football', comp: 'Premier League', start: t, end: t + 7200_000, status: 'scheduled', home: side('Manchester United'), away: side('Tottenham Hotspur') };
+  assert.equal(fixtureForProgramme('Live NHL: Seattle v Calgary', t + 5 * 60_000, [pl, nhl])?.id, 'nhl:1');
+  assert.equal(fixtureForProgramme('Seattle Kraken @ Calgary Flames', t, [nhl])?.id, 'nhl:1');
+  assert.equal(fixtureForProgramme('Man Utd v Spurs', t - 30 * 60_000, [pl])?.id, 'eng.1:1');
+  assert.equal(fixtureForProgramme('Seattle v Calgary', t + 5 * 3600_000, [nhl]), null);         // another day's game
+  assert.equal(fixtureForProgramme('NBA: Seattle v Calgary', t, [nhl]), null);                    // another sport
+  assert.equal(fixtureForProgramme("Women's Super League: Man Utd v Spurs", t, [pl]), null);      // the women's game
+});
+
+test('one tile per followed team: Lakers and Los Angeles Lakers', () => {
+  const t = Date.UTC(2026, 10, 8, 2);
+  const nba = { id: 'nba:1', sport: 'nba', comp: 'NBA', start: t, end: t + 3 * 3600_000, status: 'scheduled', home: side('Los Angeles Lakers', { nick: 'Lakers' }), away: side('Boston Celtics', { nick: 'Celtics' }) };
+  const pl = { id: 'eng.1:1', sport: 'football', comp: 'Premier League', start: t, end: t + 7200_000, status: 'scheduled', home: side('Manchester United'), away: side('Chelsea') };
+  const follows = ['Lakers', 'Los Angeles Lakers', 'Man Utd', 'Manchester United', 'Chelsea', 'Chelsea Women', 'Celtics'].map(q => ({ q }));
+  assert.deepEqual(dedupeFollows(follows, [nba, pl]).map(f => f.q), ['Lakers', 'Man Utd', 'Chelsea', 'Chelsea Women', 'Celtics']);
+  assert.equal(followTeamKey('Spurs', []), followTeamKey('Tottenham Hotspur', []));   // no fixtures: by alias
 });

@@ -41,7 +41,7 @@ public class WidgetsPlugin: CAPPlugin, CAPBridgedPlugin {
         if old?.followed != snap.followed || old?.follows != snap.follows || old?.channels != snap.channels {
             WidgetCenter.shared.reloadTimelines(ofKind: "MyTeams"); WidgetCenter.shared.reloadTimelines(ofKind: "NextGame")
         }
-        if old?.liveActivities != snap.liveActivities || old?.followed != snap.followed { LiveScores.shared.kick() }
+        if old?.liveActivities != snap.liveActivities || old?.hideScores != snap.hideScores || old?.followed != snap.followed { LiveScores.shared.kick() }
         call.resolve()
     }
 
@@ -108,7 +108,7 @@ final class LiveScores {
     func refresh(done: (() -> Void)? = nil) {
         guard #available(iOS 16.2, *) else { done?(); return }
         let snap = M3UShared.snapshot
-        guard let cfg = M3UShared.config, let snap = snap, snap.liveActivities, !(snap.follows.isEmpty && snap.followed.isEmpty) else {
+        guard let cfg = M3UShared.config, let snap = snap, snap.liveActivities, snap.hideScores != true, !(snap.follows.isEmpty && snap.followed.isEmpty) else {
             endAll(); done?(); return
         }
         busy = true; lastFetch = Date()

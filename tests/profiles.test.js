@@ -151,3 +151,19 @@ test('client: profile list, colours, remember on this device', () => {
   assert.equal(a.pb.name, 'Maz', 'a newer local rename is kept');
   assert.equal(adoptProfiles({ pa: { name: 'X', at: 9 } }, m).pa.deleted, true, 'a removal always wins');
 });
+
+test('prefs: "Hide scores" syncs per profile, newest edit wins, unknown names and bad values dropped', () => {
+  let s = mergeState({}, { prefs: { hideScores: { v: true, at: 10 }, theme: { v: 'x', at: 10 } } });
+  assert.deepEqual(s.prefs, { hideScores: { v: true, at: 10 } });
+  s = mergeState(s, { prefs: { hideScores: { v: false, at: 5 } } });
+  assert.equal(s.prefs.hideScores.v, true);                       // older edit loses
+  s = mergeState(s, { prefs: { hideScores: { v: 'yes', at: 20 } } });
+  assert.equal(s.prefs.hideScores.v, true);                       // not a boolean
+  s = mergeState(s, { prefs: { hideScores: { v: false, at: 30 } } });
+  assert.equal(s.prefs.hideScores.v, false);
+  s = mergeState(s, { profiles: { kid: { name: 'Kid', at: 1 } } });
+  s = mergeState(s, { prefs: { hideScores: { v: true, at: 40 } } }, 'kid');
+  assert.equal(s.prefs.hideScores.v, false);                      // main unchanged
+  assert.equal(viewFor(s, 'kid').prefs.hideScores.v, true);
+  assert.deepEqual(viewFor(s, 'other').prefs, {});
+});

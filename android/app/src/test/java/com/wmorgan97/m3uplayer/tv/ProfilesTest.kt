@@ -22,6 +22,6 @@ class ProfilesTest {
         assertEquals(2, Profiles.nextColor(Profiles.list(listOf(Profile("main", "Will", 0), Profile("pb", "Mazie", 1)))))
         assertEquals("M", Profiles.initial(" mazie")); assertEquals("?", Profiles.initial(""))
         assertTrue(Profiles.newId().matches(Regex("p[a-z0-9]{1,24}")))
-        assertEquals(Profiles.PERSONAL.toSet(), setOf("favorites", "favAt", "recents", "recReset", "progress", "reminders", "follows", "watchlater"))
+        assertEquals(Profiles.PERSONAL.toSet(), setOf("favorites", "favAt", "recents", "recReset", "progress", "reminders", "follows", "watchlater", "prefs"))
     }
 }

@@ -26,7 +26,7 @@ class FixtureRulesTest {
     @Test fun followsMatchTheMensTeamByAnyName() {
         val f = fx(MUN, TOT)
         for (q in listOf("Man Utd", "Manchester United", "man united", "Spurs", "Tottenham")) assertTrue(q, FixtureRules.followMatches(q, f))
-        // Ambiguous, another club, or a women's follow (no women's feed: the guide search covers those).
+        // Ambiguous, another club, or a women's follow (the men's game is never the women's side's).
         for (q in listOf("Manchester", "Chelsea", "Man Utd Women", "Spurs W", "Chelsea Ladies")) assertFalse(q, FixtureRules.followMatches(q, f))
         assertEquals("Manchester United", FixtureRules.followedSide("Man Utd", f)?.name)
         assertEquals("Tottenham Hotspur", FixtureRules.followedSide("Spurs", f)?.name)
@@ -120,4 +120,60 @@ class FixtureRulesTest {
         assertTrue(on.isOn(start + 60_000)); assertEquals("live", on.focusMatch?.status)
         assertTrue(on.detailed); assertFalse(fx(MUN, TOT).detailed)
     }
+
+    // ---------- sports polish: men's first team only, Premier League club channels, one card per game, one tile per team ----------
+    private fun side(n: String, nick: String? = null) = FxTeam(n, n, "", null, nick)
+    private fun game(h: FxTeam, a: FxTeam, id: String = "x:1", sport: String = "football", comp: String = "Premier League", start: Long = 1_000_000L, women: Boolean = false) =
+        Fixture(id, sport, comp, 100, start, start + 7_200_000L, "scheduled", null, h, a, "", "", "", "", women = women)
+
+    @Test fun chelseaMeansTheMensFirstTeam() {
+        val men = game(side("Chelsea"), side("Arsenal"))
+        assertTrue(FixtureRules.followMatches("Chelsea", men))
+        for (f in listOf(game(side("Chelsea"), side("Arsenal"), comp = "WSL", women = true), game(side("Chelsea Women"), side("Arsenal Women")),
+                game(side("Chelsea U21"), side("Exeter City"), comp = "EFL Trophy"), game(side("Chelsea Academy"), side("Fulham Academy"))))
+            assertFalse(f.home!!.name + " " + f.comp, FixtureRules.followMatches("Chelsea", f))
+        assertTrue(FixtureRules.followMatches("Chelsea Women", game(side("Chelsea"), side("Arsenal"), women = true)))
+        assertFalse(FixtureRules.followMatches("Chelsea Women", men))
+        assertTrue(FixtureRules.followMatches("Chelsea U21", game(side("Chelsea U21"), side("Exeter City"))))
+        assertTrue(FixtureRules.followMatches("Exeter City", game(side("Chelsea U21"), side("Exeter City"))))
+        // F1 / tennis / UFC follows never pick up a club; a club follow never picks up a race, a tennis day or a card.
+        val race = Fixture("f1:1", "f1", "F1", 92, 1L, 2L, "scheduled", null, null, null, "Las Vegas Grand Prix", "Race", "", "", drivers = listOf("Lewis Hamilton"))
+        val day = Fixture("t:1", "tennis", "WTA", 52, 1L, 2L, "scheduled", null, null, null, "WTA Finals", "", "", "",
+            matches = listOf(FxBout(1L, "scheduled", FxAth("Chelsea Smith", "C. Smith"), FxAth("Coco Gauff", "C. Gauff"))))
+        for (f in listOf(race, day)) assertFalse(f.id, FixtureRules.followMatches("Chelsea", f))
+        for (q in listOf("F1", "Tennis", "UFC", "Hamilton", "Gauff")) assertFalse(q, FixtureRules.followMatches(q, men))
+        assertTrue(FixtureRules.followMatches("Hamilton", race))
+    }
+
+    @Test fun premierLeagueClubChannelsAndNeverTheWomensOrU21() {
+        for (g in listOf("UK| PREMIER LEAGUE TEAMS", "EPL TEAMS", "UK| PREMIER LEAGUE CLUBS", "UK| CHAMPIONSHIP PPV")) assertTrue(g, FixtureRules.isTeamChannelGroup(g))
+        for (g in listOf("UK| SPORTS", "UK| ENTERTAINMENT")) assertFalse(g, FixtureRules.isTeamChannelGroup(g))
+        val chans = listOf("UK: Chelsea Women HD", "UK: Chelsea U21 HD", "Chelsea Women v Arsenal Women", "UK: Everton HD", "Fulham FC", "UK: Chelsea TV HD")
+        val ix = FixtureRules.TeamChannels(chans) { it }
+        assertEquals("UK: Chelsea TV HD", FixtureRules.teamChannelFor(game(side("Chelsea"), side("Arsenal")), ix)?.first)
+        assertNull(FixtureRules.teamChannelFor(game(side("Chelsea"), side("Arsenal")), chans.filter { !it.contains("Chelsea TV") }) { it })
+        assertEquals("UK: Chelsea Women HD", FixtureRules.teamChannelFor(game(side("Chelsea"), side("Arsenal"), women = true), ix)?.first)
+        assertEquals("UK: Everton HD", FixtureRules.teamChannelFor(game(side("Everton"), side("Tottenham Hotspur")), ix)?.first)
+        assertEquals(FixtureRules.Side.Away, FixtureRules.teamChannelFor(game(side("Wolverhampton Wanderers"), side("Fulham")), ix)?.second)
+    }
+
+    @Test fun aGuideListingOfAFixtureIsThatFixture() {
+        val t = 1_800_000_000_000L
+        val nhl = game(side("Seattle Kraken", "Kraken"), side("Calgary Flames", "Flames"), id = "nhl:1", sport = "nhl", comp = "NHL", start = t)
+        val pl = game(MUN, TOT, id = "eng.1:1", start = t)
+        assertEquals("nhl:1", FixtureRules.fixtureForProgramme("Live NHL: Seattle v Calgary", t + 300_000L, listOf(pl, nhl))?.id)
+        assertEquals("eng.1:1", FixtureRules.fixtureForProgramme("Man Utd v Spurs", t - 1_800_000L, listOf(pl, nhl))?.id)
+        assertNull(FixtureRules.fixtureForProgramme("Seattle v Calgary", t + 5 * 3_600_000L, listOf(nhl)))
+        assertNull(FixtureRules.fixtureForProgramme("NBA: Seattle v Calgary", t, listOf(nhl)))
+        assertNull(FixtureRules.fixtureForProgramme("Women's Super League: Man Utd v Spurs", t, listOf(pl)))
+    }
+
+    @Test fun oneTilePerFollowedTeam() {
+        val nba = game(side("Los Angeles Lakers", "Lakers"), side("Boston Celtics", "Celtics"), id = "nba:1", sport = "nba", comp = "NBA")
+        val pl = game(MUN, side("Chelsea"))
+        val qs = listOf("Lakers", "Los Angeles Lakers", "Man Utd", "Manchester United", "Chelsea", "Chelsea Women", "Celtics")
+        assertEquals(listOf("Lakers", "Man Utd", "Chelsea", "Chelsea Women", "Celtics"), FixtureRules.dedupeFollows(qs, listOf(nba, pl)) { it })
+        assertEquals(FixtureRules.followTeamKey("Spurs", emptyList()), FixtureRules.followTeamKey("Tottenham Hotspur", emptyList()))
+    }
+
 }

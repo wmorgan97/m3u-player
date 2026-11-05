@@ -7,6 +7,7 @@
 //               { deleted } marker until the programme has passed, so other devices drop it too
 //   follows     teams and shows followed, per lower-cased name ({ q, at }), newest edit wins; an unfollow stays as a
 //               { deleted } marker (for 90 days) so other devices drop it too
+//   prefs       viewer preferences ({ hideScores: { v, at } }), newest edit per name wins
 //   watchlater  films and series saved for later, per "<movie|series>:<id>" ({ kind, id, name, logo, … at }), newest
 //               edit wins; a removed one stays as a { deleted } marker (for 90 days) so other devices drop it too
 //
@@ -105,6 +106,7 @@ export function merge(a, b) {
     out.follows = keys.length > 200 ? Object.fromEntries(keys.sort((x, y) => f[y].at - f[x].at).slice(0, 200).map(k => [k, f[k]])) : f;
   }
   if (b.watchlater && typeof b.watchlater === 'object' && !Array.isArray(b.watchlater)) out.watchlater = mergeWatchLater(a.watchlater, b.watchlater);
+  if (b.prefs && typeof b.prefs === 'object' && !Array.isArray(b.prefs)) out.prefs = mergePrefs(a.prefs, b.prefs);
   if (b.handoff && typeof b.handoff === 'object') out.handoff = mergeHandoff(a.handoff, b.handoff);
   if (out.handoff && !(out.handoff.sent > Date.now() - HANDOFF_KEEP)) delete out.handoff;
   if (b.tvs && typeof b.tvs === 'object' && !Array.isArray(b.tvs)) {
@@ -119,10 +121,23 @@ export function merge(a, b) {
   return out;
 }
 
+// Preferences that follow the viewer (per profile): { <name>: { v, at } }, newest edit per name wins. Only known names
+// with a plain value: "hideScores" (Sports shows "Live" / "Full time" instead of scores).
+const PREFS = { hideScores: v => typeof v === 'boolean' };
+export function mergePrefs(a, b) {
+  const out = { ...(a && typeof a === 'object' ? a : {}) };
+  for (const [k, e] of Object.entries(b || {})) {
+    if (!PREFS[k] || !e || typeof e !== 'object' || !PREFS[k](e.v)) continue;
+    const at = +e.at || 0;
+    if (at > (out[k]?.at || 0)) out[k] = { v: e.v, at };
+  }
+  return out;
+}
+
 // ---------- viewer profiles ----------
 export const MAIN = 'main', MAX_PROFILES = 5;
-export const PERSONAL = ['favorites', 'favAt', 'recents', 'recReset', 'progress', 'reminders', 'follows', 'watchlater'];
-const EMPTY = () => ({ favorites: [], favAt: 0, recents: [], recReset: 0, progress: {}, reminders: {}, follows: {}, watchlater: {} });
+export const PERSONAL = ['favorites', 'favAt', 'recents', 'recReset', 'progress', 'reminders', 'follows', 'watchlater', 'prefs'];
+const EMPTY = () => ({ favorites: [], favAt: 0, recents: [], recReset: 0, progress: {}, reminders: {}, follows: {}, watchlater: {}, prefs: {} });
 const PROFILE_KEEP = 30 * 86400_000;
 export const profileId = v => { const s = String(v || '').trim(); return /^[A-Za-z0-9_-]{1,24}$/.test(s) ? s : MAIN; };
 const liveProfiles = l => Object.entries(l || {}).filter(([k, v]) => k !== MAIN && v && !v.deleted).length;

@@ -290,6 +290,8 @@ private fun sectionRows(
                 },
                 SettingRow.Header("Content"),
                 SettingRow.Toggle(Icons.Default.Language, "English groups only", "Hide other-language groups, films and series", Repo.englishOnly) { Repo.englishOnly = it; Repo.version++ },
+                SettingRow.Header("Sports"),
+                SettingRow.Toggle(Icons.Default.VisibilityOff, "Hide scores", "Live and finished games say \"Live\" or \"Full time\" instead of the score", Repo.hideScores) { Repo.hideScores = it; changed() },
             )
         }
         Sec.Data -> listOf(

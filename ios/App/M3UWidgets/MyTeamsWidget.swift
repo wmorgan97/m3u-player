@@ -88,7 +88,10 @@ extension TeamsEntry.Game {
     init(f: Fixture, channel: String?, mineIsHome: Bool) { self.init(f: f, home: nil, away: nil, channel: channel, mineIsHome: mineIsHome) }
     var mine: FxTeam? { mineIsHome ? f.home : f.away }
     var opponent: FxTeam? { mineIsHome ? f.away : f.home }
-    var score: String { "\(f.home?.score ?? "0")–\(f.away?.score ?? "0")" }
+    var score: String {
+        if M3UShared.snapshot?.hideScores == true { return f.status == "final" ? "FT" : "Live" }   // spoiler-free
+        return "\(f.home?.score ?? "0")–\(f.away?.score ?? "0")"
+    }
     var statusLine: String {
         switch f.status {
         case "live": return f.minute?.isEmpty == false ? f.minute! : "Live"

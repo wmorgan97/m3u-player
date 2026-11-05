@@ -150,9 +150,19 @@ data class FormField(val label: String, val value: String = "", val hint: String
 fun FormDialog(title: String, intro: String?, fields: List<FormField>, submit: String = "Save", busy: Boolean = false, error: String? = null,
                onSubmit: (List<String>) -> Unit, onDismiss: () -> Unit) {
     val values = remember { fields.map { it.value }.toMutableStateList() }
-    val first = remember { FocusRequester() }
-    val focus = androidx.compose.ui.platform.LocalFocusManager.current
-    val kb = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    val save = remember { FocusRequester() }
+    val boxes = remember { arrayOfNulls<android.widget.EditText>(fields.size) }   // the text boxes (see FormBox.kt)
+    val busyNow by rememberUpdatedState(busy)
+    val submitNow by rememberUpdatedState(onSubmit)
+    val startOnBox = fields.isNotEmpty() && fields.first().value.isEmpty()
+    fun toBox(i: Int, keyboard: Boolean) { val b = boxes.getOrNull(i) ?: return; b.requestFocus(); if (keyboard) showKeyboard(b) }
+    fun toSave() { runCatching { save.requestFocus() } }
+    // The keyboard's Next: the next box, keyboard up again. Done (last box): keyboard down, onto Save, and submit.
+    fun next(i: Int) {
+        boxes[i]?.let { hideKeyboard(it) }
+        if (i < fields.lastIndex) toBox(i + 1, true)
+        else { toSave(); if (!busyNow) submitNow(values.map { it.trim() }) }
+    }
     Dialog(onDismissRequest = onDismiss) {
         TvDialogCard(520.dp) {
             Text(title, fontSize = Tv.title, lineHeight = Tv.titleLine, fontWeight = Tv.wTitle, color = Tv.text)
@@ -164,44 +174,30 @@ fun FormDialog(title: String, intro: String?, fields: List<FormField>, submit: S
                 // A field keeps its text readable when focused: it lifts and gets the white focus outline (no fill).
                 Box(Modifier.fillMaxWidth().height(44.dp).background(if (on) Tv.surface3 else Tv.surface2, Tv.rowShape).border(2.dp, if (on) Tv.focusRing else Color.Transparent, Tv.rowShape).padding(horizontal = 14.dp),
                     contentAlignment = Alignment.CenterStart) {
-                    if (values[i].isEmpty() && f.hint.isNotEmpty()) Text(f.hint, fontSize = Tv.body, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    androidx.compose.foundation.text.BasicTextField(values[i], { values[i] = it }, singleLine = true,
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Tv.text, fontSize = Tv.body),
-                        cursorBrush = androidx.compose.ui.graphics.SolidColor(Tv.accent),
-                        visualTransformation = if (f.secret) androidx.compose.ui.text.input.PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(autoCorrectEnabled = false,
-                            keyboardType = when { f.secret -> androidx.compose.ui.text.input.KeyboardType.Password; f.url -> androidx.compose.ui.text.input.KeyboardType.Uri; else -> androidx.compose.ui.text.input.KeyboardType.Text },
-                            imeAction = if (i < fields.lastIndex) androidx.compose.ui.text.input.ImeAction.Next else androidx.compose.ui.text.input.ImeAction.Done),
-                        // Fire TV's full-screen keyboard stays up after Next/Done unless it's closed first: close it, move on,
-                        // and (Next) open it again on the next box; Done on the last box submits the form.
-                        keyboardActions = androidx.compose.foundation.text.KeyboardActions(
-                            onNext = { kb?.hide(); focus.moveFocus(androidx.compose.ui.focus.FocusDirection.Down); kb?.show() },
-                            onDone = { kb?.hide(); if (!busy) onSubmit(values.map { it.trim() }) }),
-                        modifier = Modifier.fillMaxWidth().let { if (i == 0 && fields.first().value.isEmpty()) it.focusRequester(first) else it }.onFocusChanged { on = it.isFocused }
-                            .onPreviewKeyEvent { e ->
-                                // OK opens the keyboard on release, not press: opened on the press, the release went to the
-                                // keyboard and typed its highlighted key (a stray "a" on Fire TV).
-                                if (e.key == Key.DirectionCenter || e.key == Key.Enter || e.key == Key.NumPadEnter) {
-                                    if (e.type == KeyEventType.KeyUp) kb?.show()
-                                    return@onPreviewKeyEvent true
-                                }
-                                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                                when (e.key) {
-                                    Key.DirectionDown -> { kb?.hide(); focus.moveFocus(androidx.compose.ui.focus.FocusDirection.Down); true }
-                                    Key.DirectionUp -> { kb?.hide(); focus.moveFocus(androidx.compose.ui.focus.FocusDirection.Up); true }
-                                    else -> false
-                                }
-                            })
+                    // An EditText (FormBox.kt): Fire TV's full-screen keyboard's Next/Done only reliably reaches one.
+                    // OK opens the keyboard (on release); Up/Down move between boxes (closing it); Down on the last is Save.
+                    androidx.compose.ui.viewinterop.AndroidView(
+                        factory = { ctx ->
+                            formBox(ctx, f, i == fields.lastIndex, values[i], { values[i] = it }, FormBoxActions(
+                                onAction = { next(i) },
+                                onUp = { if (i > 0) toBox(i - 1, false) },
+                                onDown = { if (i < fields.lastIndex) toBox(i + 1, false) else toSave() },
+                                onFocus = { on = it })).also { boxes[i] = it }
+                        },
+                        onRelease = { boxes[i] = null },
+                        modifier = Modifier.fillMaxWidth())
                 }
             }
             if (error != null) Text(error, fontSize = Tv.bodySmall, color = Tv.danger, modifier = Modifier.padding(top = 12.dp))
             Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                TvButton(if (busy) "Checking…" else submit, { if (!busy) onSubmit(values.map { it.trim() }) },
-                    if (fields.isEmpty() || fields.first().value.isNotEmpty()) Modifier.focusRequester(first) else Modifier, style = TvButtonStyle.Primary)
+            // Up from the buttons goes back to the last box (an Android view, so it's said explicitly).
+            Row(Modifier.onPreviewKeyEvent { e ->
+                if (e.key == Key.DirectionUp && boxes.isNotEmpty()) { if (e.type == KeyEventType.KeyDown) toBox(fields.lastIndex, false); true } else false
+            }, horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                TvButton(if (busy) "Checking…" else submit, { if (!busy) onSubmit(values.map { it.trim() }) }, Modifier.focusRequester(save), style = TvButtonStyle.Primary)
                 TvButton("Cancel", onDismiss)
             }
         }
-        LaunchedEffect(Unit) { delay(60); runCatching { first.requestFocus() } }
+        LaunchedEffect(Unit) { delay(60); if (startOnBox) toBox(0, true) else toSave() }
     }
 }

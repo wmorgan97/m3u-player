@@ -44,7 +44,7 @@ data class Fixture(
     val id: String, val sport: String, val comp: String, val compRank: Int, val start: Long, val end: Long, val status: String,
     val minute: String?, val home: FxTeam?, val away: FxTeam?, val title: String, val session: String, val venue: String, val round: String,
     val country: String = "", val prelims: Long = 0L, val drivers: List<String> = emptyList(), val order: List<FxAth> = emptyList(),
-    val matches: List<FxBout> = emptyList(), val fights: List<FxBout> = emptyList(),
+    val matches: List<FxBout> = emptyList(), val fights: List<FxBout> = emptyList(), val women: Boolean = false,
 ) {
     /** Live now, or due on: started and not reported finished (feeds lag a minute or two). Tennis: only a match in
      *  progress (its later times are "not before" guesses). */
@@ -83,10 +83,17 @@ object FixtureRules {
 
     /** "Brighton & Hove Albion" -> "brighton and hove albion"; "Nott'm Forest" -> "nottm forest"; "Man Utd" -> "man united";
      *  "Paris Saint-Germain" -> "paris st germain" (js/fixtures.js foldName). */
+    private val APOS = Regex("['’.]")
+    /** Folded names, kept (team and channel names repeat on every pass; folding them is most of the matching work). */
+    private val folded = java.util.concurrent.ConcurrentHashMap<String, String>()
     fun foldName(s: String?): String {
-        val t = Normalizer.normalize(s ?: "", Normalizer.Form.NFD).replace(MARKS, "").replace(SUPERSCRIPT, "").lowercase()
-            .replace("&", " and ").replace(Regex("['’.]"), "").replace(NON, " ")
-        return " $t ".replace(" utd ", " united ").replace(" saint ", " st ").replace(SPACES, " ").trim()
+        val src = s ?: ""
+        folded[src]?.let { return it }
+        val t = Normalizer.normalize(src, Normalizer.Form.NFD).replace(MARKS, "").replace(SUPERSCRIPT, "").lowercase()
+            .replace("&", " and ").replace(APOS, "").replace(NON, " ")
+        val out = " $t ".replace(" utd ", " united ").replace(" saint ", " st ").replace(SPACES, " ").trim()
+        if (src.length <= 120) { if (folded.size > 50_000) folded.clear(); folded[src] = out }
+        return out
     }
 
     private val ALIASES: List<List<String>> = listOf(
@@ -113,6 +120,10 @@ object FixtureRules {
     private val ALIAS_OF: Map<String, String> = LinkedHashMap<String, String>().apply {
         for (l in ALIASES) { val canon = foldName(l[0]); for (n in l) putIfAbsent(foldName(n), canon) }
     }
+    /** canon -> the other names in its alias list(s). */
+    private val ALIAS_REST: Map<String, List<String>> = HashMap<String, MutableList<String>>().apply {
+        for (l in ALIASES) getOrPut(foldName(l[0])) { ArrayList() } += l.drop(1)
+    }
     private val PREFIX = Regex("""^(?:afc|fc|cf|ac|as|ssc|ss|us|sc|sv|vfb|vfl|tsg|rc|rcd|ud|cd|sd|ca|1 fc|fk|nk|sk|bsc|kv|krc|kaa|rsc|sl|gnk)\s+""")
     private val SUFFIX = Regex("""\s+(?:fc|afc|cf|sc|ac|bc|fk|city|town|united|rovers|albion|athletic|county|wanderers|hotspur|rugby|rfc|north end|argyle|alexandra|orient|stanley)$""")
     /** Cores shared by two clubs: "Manchester" alone could be City or United. */
@@ -120,7 +131,14 @@ object FixtureRules {
     private val SHORT_OK = Regex("""^[a-z]{2}\d|^\d""")
 
     /** Every way a team might be written: its names, nickname, aliases and the core without "FC" / "City" etc. */
+    private val variants = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
     fun teamVariants(t: FxTeam?): List<String> {
+        if (t == null) return emptyList()
+        val key = "${t.name}\u0001${t.short}\u0001${t.nick}"
+        variants[key]?.let { return it }
+        return variantsOf(t).also { if (variants.size > 20_000) variants.clear(); variants[key] = it }
+    }
+    private fun variantsOf(t: FxTeam?): List<String> {
         val out = LinkedHashSet<String>()
         fun add(s: String) { val k = foldName(s); if (k.length >= 3 || SHORT_OK.containsMatchIn(k)) out += k }
         for (n in listOfNotNull(t?.name, t?.short, t?.nick)) {
@@ -131,13 +149,20 @@ object FixtureRules {
             repeat(2) { core = core.replace(SUFFIX, "") }
             if (core.isNotEmpty() && core !in AMBIGUOUS) add(core)
             val canon = ALIAS_OF[k] ?: ALIAS_OF[core]
-            if (canon != null) { add(canon); for (l in ALIASES) if (foldName(l[0]) == canon) l.drop(1).forEach(::add) }
+            if (canon != null) { add(canon); ALIAS_REST[canon]?.forEach(::add) }
         }
         out.removeAll(AMBIGUOUS)
         return out.sortedByDescending { it.length }
     }
 
-    private val WOMEN = Regex("""\b(?:women|womens|ladies|wsl|w)\b""")
+    private val WOMEN_Q = Regex(""" (?:women|womens|ladies|wfc|lfc|w)\b""")
+    /** A side's name marks it as a women's or a youth / reserve side ("Chelsea Women", "Arsenal W", "Chelsea U21",
+     *  "Chelsea Academy"): following "Chelsea" means the men's first team only (js/fixtures.js). */
+    private val WOMEN_NAME = Regex("""\b(?:women|womens|ladies|wfc|wsl|w)\b""")
+    private val YOUTH_NAME = Regex("""\b(?:u ?(?:1[5-9]|2[0-3])s?|under ?(?:1[5-9]|2[0-3])s?|academy|reserves?|youth|b team)\b""")
+    private val SIDE_TAGS = Regex("""\b(?:women|womens|ladies|wfc|w|u ?(?:1[5-9]|2[0-3])s?|academy|reserves?|youth)\b""")
+    fun isWomensName(s: String?) = WOMEN_NAME.containsMatchIn(foldName(s))
+    fun isYouthName(s: String?) = YOUTH_NAME.containsMatchIn(foldName(s))
 
     /** 2026 teams, for following a team ("McLaren") rather than a driver (js/fixtures.js F1_TEAMS). */
     val F1_TEAMS = setOf("red bull", "ferrari", "mercedes", "mclaren", "aston martin", "alpine", "williams", "racing bulls", "haas", "audi", "sauber", "cadillac")
@@ -150,19 +175,26 @@ object FixtureRules {
         return k.length >= 4 && w.size > 1 && (k == w.drop(1).joinToString(" ") || k == w.last())
     }
 
-    /** A follow ("Man Utd", "Spurs", "Chelsea Women", "F1", "Hamilton", "Alcaraz") matches this fixture? Women's follows
-     *  never match (the feed has no women's games, so those stay with the guide search). F1 / tennis / UFC: the follow
-     *  names the sport, a driver or F1 team, a player or a fighter. */
+    /** A follow ("Man Utd", "Spurs", "Chelsea Women", "F1", "Hamilton", "Alcaraz") matches this fixture? "Chelsea" is the
+     *  men's first team: never a women's game (the feed's WSL) or a side named "… Women" / "… U21" / "… Academy";
+     *  "Chelsea Women" the women's. F1 / tennis / UFC: the follow names the sport, a driver or F1 team, a player or a
+     *  fighter. Same rules as js/fixtures.js followMatches. */
     fun followMatches(q: String, f: Fixture): Boolean {
-        val k = foldName(q)
-        if (k.isEmpty() || WOMEN.containsMatchIn(k)) return false
+        var k = foldName(q)
+        val women = WOMEN_Q.containsMatchIn(" $k")
+        if (women) k = " $k".replace(WOMEN_Q, "").trim()
+        if (k.isEmpty() || women != f.women) return false
+        val youth = YOUTH_NAME.containsMatchIn(k)
         if (f.home == null || f.away == null) {
             classifySport(q)?.let { c -> return c == f.comp || (c == "F1" && f.sport == "f1") || (c == "Tennis" && f.sport == "tennis") || (c == "UFC" && f.sport == "ufc") }
-            if (f.sport == "f1" && (k in F1_TEAMS || k.replace(Regex(" (?:f1|racing|team)$"), "") in F1_TEAMS)) return true
+            if (women) return false
+            if (f.sport == "f1" && (k in F1_TEAMS || k.replace(F1_TEAM_TAIL, "") in F1_TEAMS)) return true
             return f.people.any { namesPerson(k, it) }
         }
         val canon = ALIAS_OF[k] ?: k
         for (t in listOf(f.home, f.away)) {
+            if (t.name.isBlank()) continue
+            if (isYouthName(t.name) != youth || (!women && isWomensName(t.name))) continue
             val vs = teamVariants(t)
             if (k in vs || canon in vs) return true
             if (k.length >= 4 && " ${foldName(t.name)} ".contains(" $k ") && k !in AMBIGUOUS) return true
@@ -170,6 +202,7 @@ object FixtureRules {
         return false
     }
 
+    private val F1_TEAM_TAIL = Regex(" (?:f1|racing|team)$")
     /** Which side of a fixture a follow is about (for its crest), or null. */
     fun followedSide(q: String, f: Fixture): FxTeam? = listOfNotNull(f.home, f.away).firstOrNull { t ->
         followMatches(q, f.copy(home = t, away = FxTeam("", "", "", null)))
@@ -186,8 +219,8 @@ object FixtureRules {
         return out
     }
     /** True when a title names both teams (either order, not the same words twice). */
-    fun titleHasTeams(title: String, hv: List<String>, av: List<String>): Boolean {
-        val t = foldName(title)
+    fun titleHasTeams(title: String, hv: List<String>, av: List<String>): Boolean = foldedHasTeams(foldName(title), hv, av)
+    private fun foldedHasTeams(t: String, hv: List<String>, av: List<String>): Boolean {
         val a = spans(t, hv); if (a.isEmpty()) return false
         return spans(t, av).any { b -> a.any { x -> b.last < x.first || x.last < b.first } }
     }
@@ -195,8 +228,9 @@ object FixtureRules {
     // ---------- team channels: the fallback when no main channel lists a game (js/fixtures.js teamChannelFor) ----------
     // Providers carry a channel per club ("UK| CHAMPIONSHIP PPV": "Blackburn Rovers", "UK| SPFL PPV": "Celtic TV",
     // "UK| SERIE A TEAM PPV": "UK: SERIE A - AC MILAN 4K") or per match ("National League 4 | Barrow vs Eastleigh // …").
-    private val TEAM_GROUP = Regex("""\bppv\b|\bteam\b|\bclubs?\b""", RegexOption.IGNORE_CASE)
-    private val CHANNEL_NOISE = Regex(""" (?:uk|gb|serie a|la ?liga|premier league|efl|spfl|championship|league one|league two|4k|uhd|fhd|hd|sd|raw|ppv|tv|channel|official)\b""")
+    // Premier League club channels sit in groups like "UK| PREMIER LEAGUE TEAMS", "UK| PREMIER LEAGUE CLUBS" or "EPL TEAMS".
+    private val TEAM_GROUP = Regex("""\bppv\b|\bteams?\b|\bclubs?\b|\bepl\b|\bpremier league\b""", RegexOption.IGNORE_CASE)
+    private val CHANNEL_NOISE = Regex(""" (?:uk|gb|serie a|la ?liga|premier league|epl|efl|spfl|championship|league one|league two|4k|uhd|fhd|hd|sd|raw|ppv|tv|channel|official)\b""")
     fun isTeamChannelGroup(g: String?) = TEAM_GROUP.containsMatchIn(g ?: "")
     /** "UK: SERIE A - AC MILAN 4K" -> "ac milan"; "Celtic TV" -> "celtic". */
     fun channelTeam(name: String): String {
@@ -205,17 +239,67 @@ object FixtureRules {
         return s.replace(SPACES, " ").trim()
     }
     enum class Side { Home, Away, Match }
-    /** The club's own channel for this fixture (home side first), or a channel named after the match itself. */
-    fun <T> teamChannelFor(f: Fixture, chans: List<T>, name: (T) -> String): Pair<T, Side>? {
-        if (f.home == null || f.away == null || chans.isEmpty()) return null
-        val hv = teamVariants(f.home); val av = teamVariants(f.away)
-        fun named(side: List<String>) = chans.firstOrNull { c ->
-            val t = channelTeam(name(c))
-            t.isNotEmpty() && side.any { v -> v == t || v == t.replace(PREFIX, "").replace(SUFFIX, "") }
+    /** The team channels worked out once per channel list: the team each is named after (and the club's bare name for a
+     *  women's / youth channel, checked by side), so each fixture is a few map lookups instead of a pass over them all. */
+    class TeamChannels<T>(chans: List<T>, name: (T) -> String) {
+        class E<T>(val c: T, val folded: String, val women: Boolean, val youth: Boolean)
+        val list: List<E<T>> = chans.map { val n = name(it); E(it, foldName(n), isWomensName(n), isYouthName(n)) }
+        val byKey: Map<String, List<E<T>>> = HashMap<String, MutableList<E<T>>>().also { m ->
+            for (e in list) {
+                val t = channelTeam(e.folded); if (t.isEmpty()) continue
+                val bare = t.replace(SIDE_TAGS, " ").replace(SPACES, " ").trim()
+                for (k in linkedSetOf(t, t.replace(PREFIX, "").replace(SUFFIX, ""), bare, bare.replace(PREFIX, "").replace(SUFFIX, ""))) if (k.isNotEmpty()) m.getOrPut(k) { ArrayList() }.let { if (e !in it) it += e }
+            }
         }
+        val size get() = list.size
+    }
+    /** The club's own channel for this fixture (home side first), or a channel named after the match itself. Never a
+     *  women's or youth side's channel for a men's game (nor the other way round). */
+    fun <T> teamChannelFor(f: Fixture, ix: TeamChannels<T>): Pair<T, Side>? {
+        if (f.home == null || f.away == null || ix.size == 0) return null
+        val women = f.women || isWomensName(f.home.name); val youth = isYouthName(f.home.name) || isYouthName(f.away.name)
+        fun ok(e: TeamChannels.E<T>) = e.women == women && e.youth == youth
+        val hv = teamVariants(f.home); val av = teamVariants(f.away)
+        fun named(side: List<String>): T? { for (v in side) ix.byKey[v]?.firstOrNull(::ok)?.let { return it.c }; return null }
         named(hv)?.let { return it to Side.Home }
         named(av)?.let { return it to Side.Away }
-        return chans.firstOrNull { titleHasTeams(name(it), hv, av) }?.let { it to Side.Match }
+        return ix.list.firstOrNull { ok(it) && foldedHasTeams(it.folded, hv, av) }?.let { it.c to Side.Match }
+    }
+    fun <T> teamChannelFor(f: Fixture, chans: List<T>, name: (T) -> String): Pair<T, Side>? = teamChannelFor(f, TeamChannels(chans, name))
+
+    // ---------- one card per game ----------
+    /** US teams: the guide often says the city alone ("NHL: Seattle v Calgary" for Seattle Kraken v Calgary Flames). */
+    private fun sideWords(t: FxTeam): List<String> {
+        val v = teamVariants(t); val n = foldName(t.name); val k = foldName(t.nick)
+        val city = if (k.isNotEmpty() && n.endsWith(" $k")) n.dropLast(k.length + 1) else ""
+        return if (city.isNotEmpty() && city !in AMBIGUOUS && city !in v) v + city else v
+    }
+    private val US_SPORT = mapOf("NFL" to "nfl", "NBA" to "nba", "NHL" to "nhl", "MLB" to "mlb", "Tennis" to "tennis", "F1" to "f1", "UFC" to "ufc", "Golf" to "golf",
+        "Rugby" to "rugby", "Six Nations" to "rugby", "Cricket" to "cricket", "Darts" to "darts", "Snooker" to "snooker", "Boxing" to "boxing", "WWE" to "wwe", "MotoGP" to "motogp")
+    /** The fixture a guide programme is the same game as (both teams named, starting within 90 minutes, not another
+     *  sport, not the women's game), so the page shows the fixture's card once (js/fixtures.js fixtureForProgramme). */
+    fun fixtureForProgramme(title: String, start: Long, fixtures: List<Fixture>): Fixture? {
+        val sport = classifySport(title)?.let { US_SPORT[it] ?: "football" }
+        val t = foldName(title)
+        val women = isWomensFixture(title)
+        for (f in fixtures) {
+            if (f.home == null || f.away == null || kotlin.math.abs(f.start - start) > 90 * 60_000L || (sport != null && sport != f.sport) || women != f.women) continue
+            if (foldedHasTeams(t, sideWords(f.home), sideWords(f.away))) return f
+        }
+        return null
+    }
+
+    /** One follow per team: "Lakers" and "Los Angeles Lakers" (or "Man Utd" and "Manchester United") are the same side,
+     *  so they show as one tile (js/fixtures.js followTeamKey / dedupeFollows). */
+    fun followTeamKey(q: String, fixtures: List<Fixture>): String {
+        for (f in fixtures) {
+            if (f.home == null || f.away == null || !followMatches(q, f)) continue
+            followedSide(q, f)?.let { return "${f.sport}:${foldName(it.name)}" + if (f.women) ":w" else "" }
+        }
+        val k = foldName(q); return ALIAS_OF[k] ?: k
+    }
+    fun <T> dedupeFollows(follows: List<T>, fixtures: List<Fixture>, q: (T) -> String): List<T> {
+        val seen = HashSet<String>(); return follows.filter { seen.add(followTeamKey(q(it), fixtures)) }
     }
     /** A channel's name as a card says it: "UK: Sky Sports Main Event HD" -> "Sky Sports Main Event HD". */
     fun shortChannel(name: String): String = channelLabel(name).replace(Regex("""^\s*(?:uk|gb)\s*[:|\-]\s*""", RegexOption.IGNORE_CASE), "").ifBlank { name }
@@ -259,7 +343,7 @@ object FixtureRules {
                 o.optString("status", "scheduled"), o.optString("minute").ifBlank { null }, team(o.optJSONObject("home")), team(o.optJSONObject("away")),
                 o.optString("title"), o.optString("session"), o.optString("venue"), o.optString("round"), o.optString("country"), o.optLong("prelims"),
                 strs(o.optJSONArray("drivers")), o.optJSONArray("order")?.let { a -> (0 until a.length()).map { ath(a.optJSONObject(it)) } }.orEmpty(),
-                bouts(o.optJSONArray("matches")), bouts(o.optJSONArray("fights")))
+                bouts(o.optJSONArray("matches")), bouts(o.optJSONArray("fights")), o.optBoolean("women"))
         }
     }
 
