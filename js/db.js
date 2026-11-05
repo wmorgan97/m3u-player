@@ -99,18 +99,26 @@ async function deletePlaylist(id) {
   });
 }
 
+// Viewer profiles (js/profiles.js): the personal lists are kept per profile. The default profile uses the plain keys
+// (as before profiles existed); another one uses "<key>@<profile id>".
+const PERSONAL = new Set(['favorites', 'recents', 'progress', 'reminders', 'watchlater', 'follows', 'syncMeta']);
+let profile = 'main';
+const k = (key, as = profile) => (as !== 'main' && PERSONAL.has(key) ? `${key}@${as}` : key);
+
 export const db = {
+  setProfile: id => { profile = id || 'main'; },
   allPlaylists,
   putPlaylist,
   deletePlaylist,
   // Big values (catalogues, TV guides) are kept as JSON text and parsed on read: much faster to load on a phone.
-  get: key => run('kv', 'readonly', s => s.get(key)).then(v => (v && typeof v === 'object' && typeof v.__json === 'string' ? JSON.parse(v.__json) : v)),
+  get: (key, as) => run('kv', 'readonly', s => s.get(k(key, as))).then(v => (v && typeof v === 'object' && typeof v.__json === 'string' ? JSON.parse(v.__json) : v)),
   set: (key, value) => {
     let stored = value;
     if (value && typeof value === 'object') { const json = JSON.stringify(value); if (json.length > 20000) stored = { __json: json }; }
-    return run('kv', 'readwrite', s => s.put(stored, key));
+    return run('kv', 'readwrite', s => s.put(stored, k(key)));
   },
-  del: key => run('kv', 'readwrite', s => s.delete(key)),
+  del: key => run('kv', 'readwrite', s => s.delete(k(key))),
+  delRaw: key => run('kv', 'readwrite', s => s.delete(key)),
   clear: () => (chunkCache.clear(), Promise.all([
     run('playlists', 'readwrite', s => s.clear()),
     run('chunks', 'readwrite', s => s.clear()),

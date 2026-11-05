@@ -28,7 +28,7 @@ import org.json.JSONObject
 // phone-style web settings, so the look never changes under you.
 
 private enum class Sec(val title: String, val icon: ImageVector) {
-    Playlists("Playlists", Icons.Default.PlaylistPlay), Live("Live TV", Icons.Default.LiveTv), Guide("TV Guide", Icons.Default.CalendarViewWeek),
+    Playlists("Playlists", Icons.Default.PlaylistPlay), Profiles("Profiles", Icons.Default.People), Live("Live TV", Icons.Default.LiveTv), Guide("TV Guide", Icons.Default.CalendarViewWeek),
     Playback("Playback", Icons.Default.PlayCircle), Parental("Parental control", Icons.Default.Lock), Interface("Interface", Icons.Default.Tune),
     Data("Data", Icons.Default.Storage), About("Server & about", Icons.Default.Info)
 }
@@ -196,6 +196,35 @@ private fun sectionRows(
                 SettingRow.Header("Maintenance"),
                 SettingRow.Action(Icons.Default.Refresh, "Refresh channel lists", "Download every playlist again", count(sources.size, "playlist"), onClick = ::refreshLists),
             )
+        }
+        Sec.Profiles -> {
+            val list = Repo.profiles(); val cur = Repo.profileId
+            buildList {
+                add(SettingRow.Header("Who's watching"))
+                for (p in list) add(SettingRow.Action(if (p.id == cur) Icons.Default.AccountCircle else Icons.Default.Person, p.name,
+                    if (p.id == cur) "Watching on this TV" else "Their own Continue watching, favourites and lists", if (p.id == cur) "This TV" else "", opens = true) {
+                    menu(p.name, listOfNotNull(
+                        if (p.id != cur) "Switch to ${p.name}" to { act.pickProfile(p, Repo.rememberProfile) } else null,
+                        "Rename" to { ask(FormAsk("Rename ${p.name}", null, listOf(FormField("Name", if (p.named) p.name else "", "e.g. Will")), "Save") { (n) ->
+                            if (n.isBlank()) "Enter a name" else { Repo.saveProfile(p.id, n, p.color); say("Saved"); null } }) },
+                        if (p.id != Profiles.MAIN) "Remove profile" to { ask(FormAsk("Remove ${p.name}?", "Their Continue watching, favourites and lists go too, on every device. Playlists stay.", emptyList(), "Remove") {
+                            Repo.saveProfile(p.id, null); act.refresh++; say("Removed ${p.name}"); null }) } else null,
+                    ))
+                })
+                if (list.size > 1) add(SettingRow.Toggle(Icons.Default.PushPin, "Remember on this TV", "Open straight into ${Repo.currentProfile().name} instead of asking who's watching", Repo.rememberProfile) { Repo.rememberProfile = it; changed() })
+                if (list.size < Profiles.MAX) add(SettingRow.Action(Icons.Default.PersonAdd, "Add profile", "Up to ${Profiles.MAX}. No passwords: anyone can pick one", opens = true) {
+                    val mainUnnamed = !list.first().named
+                    ask(FormAsk("Add profile", "Their own Continue watching, favourites and lists. Playlists and settings stay shared.",
+                        (if (mainUnnamed) listOf(FormField("Your name (the first profile)", "", "e.g. Will")) else emptyList()) + FormField("New profile's name", "", "e.g. Mazie"), "Add") { vals ->
+                        val name = vals.last().trim()
+                        if (name.isEmpty()) return@FormAsk "Enter a name"
+                        if (mainUnnamed && vals.first().isNotBlank()) Repo.saveProfile(Profiles.MAIN, vals.first(), 0)
+                        Repo.saveProfile(Profiles.newId(), name, Profiles.nextColor(Repo.profiles()))
+                        say("Added $name"); null
+                    })
+                })
+                add(SettingRow.Note("Each person has their own Continue watching, favourites, Watch later, history, teams and reminders. Playlists, the PIN and settings are shared."))
+            }
         }
         Sec.Live -> listOf(
             SettingRow.Header("Channels"),

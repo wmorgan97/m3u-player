@@ -116,12 +116,12 @@ object Repo {
     fun arrange(groups: List<String>): List<String> { val hid = hiddenGroups; val pins = pinnedGroups.filter { it in groups && it !in hid }; return pins + groups.filter { it !in pins && it !in hid } }
 
     var reminders: List<Reminder>
-        get() = runCatching { JSONArray(prefs.getString("reminders", "[]")).let { a -> (0 until a.length()).map { val o = a.getJSONObject(it); Reminder(o.optString("url"), o.optString("channel"), o.optString("title"), o.optLong("start"), o.optLong("set")) } } }.getOrDefault(emptyList())
-        set(v) { prefs.edit().putString("reminders", JSONArray(v.map { JSONObject().put("url", it.url).put("channel", it.channel).put("title", it.title).put("start", it.start).put("set", it.set) }).toString()).apply(); version++ }
+        get() = runCatching { JSONArray(prefs.getString(pk("reminders"), "[]")).let { a -> (0 until a.length()).map { val o = a.getJSONObject(it); Reminder(o.optString("url"), o.optString("channel"), o.optString("title"), o.optLong("start"), o.optLong("set")) } } }.getOrDefault(emptyList())
+        set(v) { prefs.edit().putString(pk("reminders"), JSONArray(v.map { JSONObject().put("url", it.url).put("channel", it.channel).put("title", it.title).put("start", it.start).put("set", it.set) }).toString()).apply(); version++ }
     fun hasReminder(url: String, start: Long) = reminders.any { it.url == url && it.start == start }
     // Reminders are shared with the phone and the web app through /sync, keyed "<channel url>|<start ms>": set one here
     // and the iPhone notifies you too, and the other way round. A removed one goes up as a { deleted } marker.
-    private val remDel: JSONObject get() = runCatching { JSONObject(prefs.getString("remDel", "{}") ?: "{}") }.getOrDefault(JSONObject())
+    private val remDel: JSONObject get() = runCatching { JSONObject(prefs.getString(pk("remDel"), "{}") ?: "{}") }.getOrDefault(JSONObject())
     private fun remEntry(r: Reminder) = JSONObject().put("url", r.url).put("start", r.start).put("title", r.title).put("at", maxOf(1L, r.set))
         .put("channel", JSONObject().put("url", r.url).put("name", r.channel).also { o -> channelByUrl(r.url)?.let { o.put("logo", it.logo).put("group", it.group).put("tvgId", it.tvgId) } })
     private fun localReminders() = JSONObject().also { out ->
@@ -142,7 +142,7 @@ object Repo {
             reminders = l + r
             del.remove(key); entry = remEntry(r)
         }
-        prefs.edit().putString("remDel", del.toString()).apply()
+        prefs.edit().putString(pk("remDel"), del.toString()).apply()
         guideScope.launch {
             try { val d = JSONObject(http(api("sync"), JSONObject().put("reminders", JSONObject().put(key, entry)).toString())); syncData = d; adoptReminders(d) }
             catch (e: Exception) { warn("saving reminder failed", e) }   // sent again with the next sync
@@ -173,9 +173,9 @@ object Repo {
     /** adb test hook (`--es testFollows "A|B"`): pretend follows for this run only (never saved, synced or reminded). */
     @Volatile var testFollows: List<Follow>? = null
     var follows: List<Follow>
-        get() = testFollows ?: runCatching { JSONArray(prefs.getString("follows", "[]")).let { a -> (0 until a.length()).map { val o = a.getJSONObject(it); Follow(o.optString("q"), o.optLong("at")) }.filter { it.q.isNotBlank() } } }.getOrDefault(emptyList())
-        private set(v) { prefs.edit().putString("follows", JSONArray(v.map { JSONObject().put("q", it.q).put("at", it.at) }).toString()).apply(); version++ }
-    private val followDel: JSONObject get() = runCatching { JSONObject(prefs.getString("followDel", "{}") ?: "{}") }.getOrDefault(JSONObject())
+        get() = testFollows ?: runCatching { JSONArray(prefs.getString(pk("follows"), "[]")).let { a -> (0 until a.length()).map { val o = a.getJSONObject(it); Follow(o.optString("q"), o.optLong("at")) }.filter { it.q.isNotBlank() } } }.getOrDefault(emptyList())
+        private set(v) { prefs.edit().putString(pk("follows"), JSONArray(v.map { JSONObject().put("q", it.q).put("at", it.at) }).toString()).apply(); version++ }
+    private val followDel: JSONObject get() = runCatching { JSONObject(prefs.getString(pk("followDel"), "{}") ?: "{}") }.getOrDefault(JSONObject())
     fun isFollowing(q: String) = follows.any { it.q.equals(q.trim(), true) }
     private fun localFollows() = JSONObject().also { out ->
         val del = followDel
@@ -189,7 +189,7 @@ object Repo {
         val entry: JSONObject
         if (on) { follows = follows + Follow(q, now); del.remove(k); entry = JSONObject().put("q", q).put("at", now) }
         else { follows = follows.filterNot { it.q.equals(q, true) }; del.put(k, now); entry = JSONObject().put("deleted", true).put("at", now) }
-        prefs.edit().putString("followDel", del.toString()).apply()
+        prefs.edit().putString(pk("followDel"), del.toString()).apply()
         guideScope.launch {
             try { val d = JSONObject(http(api("sync"), JSONObject().put("follows", JSONObject().put(k, entry)).toString())); syncData = d; adoptFollows(d) }
             catch (e: Exception) { warn("saving follow failed", e) }   // sent again with the next sync
@@ -210,7 +210,7 @@ object Repo {
             l = l + Follow(q, v.optLong("at")); changed = true
         }
         val old = del.keys().asSequence().toList().filter { del.optLong(it) < System.currentTimeMillis() - 90 * 86_400_000L }
-        if (old.isNotEmpty()) { old.forEach { del.remove(it) }; prefs.edit().putString("followDel", del.toString()).apply() }
+        if (old.isNotEmpty()) { old.forEach { del.remove(it) }; prefs.edit().putString(pk("followDel"), del.toString()).apply() }
         if (changed) follows = l
     }
 
@@ -227,8 +227,8 @@ object Repo {
     }
     private fun wlMap(o: JSONObject?): Map<String, WatchLaterEntry> = o?.let { m -> m.keys().asSequence().mapNotNull { k -> m.optJSONObject(k)?.let { k to wlFromJson(k, it) } }.toMap() } ?: emptyMap()
     private var watchLaterAll: Map<String, WatchLaterEntry>
-        get() = runCatching { wlMap(JSONObject(prefs.getString("watchlater", "{}") ?: "{}")) }.getOrDefault(emptyMap())
-        set(v) { prefs.edit().putString("watchlater", JSONObject().also { o -> v.forEach { (k, e) -> o.put(k, wlToJson(e)) } }.toString()).apply(); version++ }
+        get() = runCatching { wlMap(JSONObject(prefs.getString(pk("watchlater"), "{}") ?: "{}")) }.getOrDefault(emptyMap())
+        set(v) { prefs.edit().putString(pk("watchlater"), JSONObject().also { o -> v.forEach { (k, e) -> o.put(k, wlToJson(e)) } }.toString()).apply(); version++ }
     private fun localWatchLater() = JSONObject().also { o -> watchLaterAll.forEach { (k, e) -> o.put(k, wlToJson(e)) } }
     /** The Watch later row: newest first; films finished since they were added have dropped off. */
     fun watchLater(): List<WatchLaterEntry> = WatchLater.visible(watchLaterAll.values, WatchLater.finished(progress().map { Triple(it.url, it.done, it.at) }))
@@ -267,7 +267,7 @@ object Repo {
             l = l + Reminder(url, v.optJSONObject("channel")?.optString("name").orEmpty(), v.optString("title"), start, v.optLong("at")); changed = true
         }
         val keep = del.keys().asSequence().toList().filter { (it.substringAfterLast('|').toLongOrNull() ?: 0) < now - 6 * 3600_000L }
-        if (keep.isNotEmpty()) { keep.forEach { del.remove(it) }; prefs.edit().putString("remDel", del.toString()).apply() }
+        if (keep.isNotEmpty()) { keep.forEach { del.remove(it) }; prefs.edit().putString(pk("remDel"), del.toString()).apply() }
         if (changed) reminders = l
     }
 
@@ -303,7 +303,7 @@ object Repo {
     fun clearCache() { app.filesDir.listFiles()?.forEach { if (it.name.startsWith("vod-") || it.name.startsWith("live-") || it.name.startsWith("group-") || it.name.startsWith("eps-") || it.name.startsWith("tmdb-") || it.name == "guide.json") it.delete() }; epsMem.clear(); overviews.clear(); groupCache.clear(); live = null; version++ }
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
-    fun api(path: String) = "$server/$path?key=${enc(key)}"
+    fun api(path: String) = "$server/$path?key=${enc(key)}" + if (path == "sync" && profileId != Profiles.MAIN) "&profile=${enc(profileId)}" else ""
     /** The original picture address behind one of our server's /img links (null if it isn't one). */
     fun imgOriginal(url: String?): String? = url?.takeIf { it.startsWith("$server/img?") || it.startsWith("$server/logo?") }?.substringAfter("&u=", "")?.substringBefore('&')?.ifEmpty { null }?.let { java.net.URLDecoder.decode(it, "UTF-8") }
     /** Background logo warm-up, once per channel list: favourites' and recents' groups first, then the first 60 channels of
@@ -374,9 +374,52 @@ object Repo {
     // ---------- sync: logins, favourites, history, progress ----------
 
     @Volatile var syncData: JSONObject = JSONObject()
+
+    // ---------- viewer profiles ("Who's watching?"; server/sync.js, Profiles.kt) ----------
+    // Playlists and settings are shared; each profile has its own favourites, history, progress, Watch later, follows and
+    // reminders. The default profile ("main") is what the server always had, so nothing moves for it. Which profile
+    // this TV uses (and whether to open straight into it) is kept on the TV only.
+    private val profileState = androidx.compose.runtime.mutableStateOf<String?>(null)
+    val profileId: String get() = profileState.value ?: (prefs.getString("profile", Profiles.MAIN) ?: Profiles.MAIN).also { profileState.value = it }
+    var rememberProfile: Boolean get() = prefs.getBoolean("profileRemember", false); set(v) { prefs.edit().putBoolean("profileRemember", v).apply(); version++ }
+    /** This TV's saved copy of a personal list: the plain key for the default profile, "<key>@<id>" for the others. */
+    private fun pk(k: String, id: String = profileId) = if (id == Profiles.MAIN) k else "$k@$id"
+    private fun syncFile(id: String = profileId) = File(app.filesDir, if (id == Profiles.MAIN) "sync.json" else "sync@$id.json")
+    fun profiles(): List<Profile> {
+        val o = syncData.optJSONObject("profiles") ?: JSONObject()
+        return Profiles.list(o.keys().asSequence().mapNotNull { k -> o.optJSONObject(k)?.let { Profile(k, it.optString("name"), it.optInt("color"), it.optBoolean("deleted")) } }.toList())
+    }
+    fun currentProfile(): Profile = profiles().let { l -> l.firstOrNull { it.id == profileId } ?: l.first() }
+    fun shouldAskProfile() = Profiles.shouldAsk(profiles(), profileId, rememberProfile)
+    /** Switches this TV to profile [id]: its lists show at once from the TV's saved copy, then fresh from the server. */
+    suspend fun switchProfile(id: String, remember: Boolean? = null) = withContext(Dispatchers.IO) {
+        if (remember != null) rememberProfile = remember
+        if (id == profileId) return@withContext
+        val shared = JSONObject(syncData.toString()).apply { Profiles.PERSONAL.forEach { remove(it) } }
+        val saved = runCatching { JSONObject(syncFile(id).readText()) }.getOrNull()
+        prefs.edit().putString("profile", id).apply()
+        profileState.value = id
+        syncData = JSONObject(shared.toString()).apply { saved?.let { s -> Profiles.PERSONAL.forEach { k -> if (s.has(k)) put(k, s.get(k)) } } }
+        favMemo = null
+        version++
+        runCatching { sync() }
+    }
+    /** Adds, renames ([name]) or removes ([name] null) a profile, for every device. */
+    suspend fun saveProfile(id: String, name: String?, color: Int = 0) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val e = if (name == null) JSONObject().put("deleted", true).put("at", now) else JSONObject().put("name", name.trim().take(24)).put("color", color).put("at", now)
+        if (name == null && id == profileId) switchProfile(Profiles.MAIN)
+        (syncData.optJSONObject("profiles") ?: JSONObject().also { syncData.put("profiles", it) }).put(id, e)
+        version++
+        syncData = JSONObject(http(api("sync"), JSONObject().put("profiles", JSONObject().put(id, e)).toString()))
+        if (name == null) prefs.edit().apply { listOf("reminders", "remDel", "follows", "followDel", "watchlater", "chanPlays").forEach { remove(pk(it, id)) } }.apply()
+        if (name == null) syncFile(id).delete()
+        version++
+    }
     suspend fun sync(): JSONObject = withContext(Dispatchers.IO) {
         // tvs: this TV says it exists, so the phone offers "Play on TV" (Handoff.kt).
         val me = JSONObject().put(tvName, JSONObject().put("name", tvName).put("at", System.currentTimeMillis()))
+        val pid = profileId
         val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).put("watchlater", localWatchLater()).put("tvs", me).toString(), timeout = 15_000)) } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             warn("sync failed", e)
@@ -384,12 +427,14 @@ object Repo {
             throw e
         }
         lastSyncErrorState.value = null
+        if (pid != profileId) return@withContext syncData   // switched profile meanwhile: that reply was the other one's
+        if (d.optBoolean("profileGone") && profileId != Profiles.MAIN) { syncData = d; switchProfile(Profiles.MAIN); return@withContext syncData }   // removed on another device
         syncData = d
         adoptReminders(d)
         adoptFollows(d)
         adoptWatchLater(d)
         version++
-        File(app.filesDir, "sync.json").writeText(d.toString())
+        syncFile().writeText(d.toString())
         d
     }
     // ---------- Play on TV (Handoff.kt): the phone's latest request, polled while the app is open ----------
@@ -405,7 +450,7 @@ object Repo {
         try { syncData = JSONObject(http(api("sync"), JSONObject().put("handoff", JSONObject().put("id", id).put("taken", tvName).put("takenAt", System.currentTimeMillis())).toString(), timeout = 10_000)) }
         catch (e: Exception) { warn("handoff ack failed", e) }
     }
-    fun cachedSync(): JSONObject = try { JSONObject(File(app.filesDir, "sync.json").readText()).also { syncData = it } } catch (e: Exception) { JSONObject() }
+    fun cachedSync(): JSONObject = try { JSONObject(syncFile().readText()).also { syncData = it } } catch (e: Exception) { JSONObject() }
 
     fun xtream(): Xtream? {
         val s = syncData.optJSONObject("sources") ?: return null
@@ -483,14 +528,14 @@ object Repo {
     }
     /** How often, and when last, this TV played each live channel: Home's "Your channels" puts the ones you watch most first. */
     fun channelPlays(): Map<String, Pair<Int, Long>> = runCatching {
-        val o = JSONObject(prefs.getString("chanPlays", "{}") ?: "{}")
+        val o = JSONObject(prefs.getString(pk("chanPlays"), "{}") ?: "{}")
         o.keys().asSequence().associateWith { k -> o.optJSONArray(k).let { (it?.optInt(0) ?: 0) to (it?.optLong(1) ?: 0L) } }
     }.getOrDefault(emptyMap())
     private fun notePlay(url: String) {
         val m = channelPlays().toMutableMap(); val now = System.currentTimeMillis()
         m[url] = ((m[url]?.first ?: 0) + 1) to now
         val keep = m.entries.sortedByDescending { it.value.second }.take(150)   // a bounded list: the channels you've watched lately
-        prefs.edit().putString("chanPlays", JSONObject().also { o -> keep.forEach { (k, v) -> o.put(k, JSONArray().put(v.first).put(v.second)) } }.toString()).apply()
+        prefs.edit().putString(pk("chanPlays"), JSONObject().also { o -> keep.forEach { (k, v) -> o.put(k, JSONArray().put(v.first).put(v.second)) } }.toString()).apply()
     }
     suspend fun saveRecent(item: JSONObject) = withContext(Dispatchers.IO) {
         if (item.optString("kind") == "live" && item.optString("url").isNotEmpty()) runCatching { notePlay(item.optString("url")) }
@@ -915,12 +960,12 @@ object Repo {
         val out = JSONObject().put(key, record.put("at", now))
         if (old != null && old != key) out.put(old, JSONObject().put("deleted", true).put("at", now))
         syncData = JSONObject(http(api("sync"), JSONObject().put("sources", out).toString()))
-        File(app.filesDir, "sync.json").writeText(syncData.toString())
+        syncFile().writeText(syncData.toString())
         clearCache()
     }
     suspend fun removeSource(key: String) = withContext(Dispatchers.IO) {
         syncData = JSONObject(http(api("sync"), JSONObject().put("sources", JSONObject().put(key, JSONObject().put("deleted", true).put("at", System.currentTimeMillis()))).toString()))
-        File(app.filesDir, "sync.json").writeText(syncData.toString())
+        syncFile().writeText(syncData.toString())
         clearCache()
     }
 

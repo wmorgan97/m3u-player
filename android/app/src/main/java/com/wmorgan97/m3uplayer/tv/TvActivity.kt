@@ -62,6 +62,16 @@ class TvActivity : ComponentActivity() {
     private var backAt = 0L
     private var lastRepeatAt = 0L
     private var pinGate by mutableStateOf<(() -> Unit)?>(null)   // a locked channel waiting for its PIN
+    // "Who's watching?" (Profiles.kt): on start when there's more than one profile and this TV doesn't remember one.
+    var who by mutableStateOf(false)
+    private var whoAsked = false
+    private fun askWhoIfNeeded() { if (!whoAsked && Repo.shouldAskProfile()) { whoAsked = true; who = true } }
+    fun pickProfile(p: Profile, remember: Boolean) {
+        who = false
+        val changed = p.id != Repo.profileId
+        lifecycleScope.launch { Repo.switchProfile(p.id, remember); refresh++ }
+        if (changed) { root(Screen.Home); android.widget.Toast.makeText(this, "Hi ${p.name}", android.widget.Toast.LENGTH_SHORT).show() }
+    }
     // ---------- voice search ----------
     // The mic beside the search field, the remote's search key, or the Assistant's "search for … on M3U Player":
     // Android's speech recogniser (Google's on the Shield) listens; what it heard goes into Search and runs.
@@ -93,6 +103,7 @@ class TvActivity : ComponentActivity() {
 
     var resumeTick by mutableIntStateOf(0)                // bumped on coming back (from the player): the preview starts again   // a reminder that just came up (shown over the app)
 
+    private val startedAt = android.os.SystemClock.uptimeMillis()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Repo.init(this)
@@ -109,9 +120,10 @@ class TvActivity : ComponentActivity() {
             .diskCache { coil.disk.DiskCache.Builder().directory(cacheDir.resolve("pictures")).maxSizeBytes(300L * 1024 * 1024).build() }
             .build())
         Repo.cachedSync()
+        askWhoIfNeeded()
         testHook(intent)   // (adb test hook: on create and on new intents only, never again on resume)
         handleSearchIntent(intent)
-        lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
+        lifecycleScope.launch { try { Repo.sync(); refresh++; if (android.os.SystemClock.uptimeMillis() - startedAt < 20_000) askWhoIfNeeded() } catch (_: Exception) {} }
         lifecycleScope.launch { runCatching { Repo.liveChannels() }; delay(4000); Repo.warmAllLogos(applicationContext) }   // channels ready before Live TV is opened
         lifecycleScope.launch { delay(1500); runCatching { Repo.overview("movies") }; runCatching { Repo.overview("series") } }   // rows ready before Movies / Series are opened
         lifecycleScope.launch { delay(2500); com.wmorgan97.m3uplayer.PlayerHolder.warm(this@TvActivity) }   // a player ready before play is pressed
@@ -133,7 +145,7 @@ class TvActivity : ComponentActivity() {
         }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Tv.accent, background = Tv.bg, surface = Tv.surface, onSurface = Tv.text, onBackground = Tv.text, surfaceVariant = Tv.surface2)) {
-                CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides TvScroll.default) { App() }
+                CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides TvScroll.default) { Box(Modifier.fillMaxSize()) { App(); if (who) WhoIsWatching(onPick = ::pickProfile) { who = false } } }
             }
         }
     }
@@ -164,6 +176,7 @@ class TvActivity : ComponentActivity() {
         // `--es testPlayer "newUi=1,frameMatch=0,newUiFail=init"`: the player's settings (and a forced new-interface failure) for tests.
         i?.getStringExtra("testPlayer")?.let { t -> i.removeExtra("testPlayer"); val ed = getSharedPreferences("player", MODE_PRIVATE).edit()
             t.split(',').map { it.split('=') }.filter { it.size == 2 }.forEach { (k, v) -> if (k == "newUiFail") { if (v.isEmpty()) ed.remove(k) else ed.putString(k, v) } else ed.putBoolean(k, v == "1") }; ed.commit() }
+        if (i?.getBooleanExtra("testWho", false) == true) { i.removeExtra("testWho"); who = true }
         i?.getStringExtra("testPreview")?.let { Preview.testUrl = it.ifEmpty { null }; i.removeExtra("testPreview") }
         i?.getStringExtra("testSports")?.let { SportsHub.test = it; i.removeExtra("testSports") }
         i?.getStringExtra("testFollows")?.let { f -> i.removeExtra("testFollows"); Repo.testFollows = f.split('|').filter { it.isNotBlank() }.map { Repo.Follow(it.trim(), 1) }.ifEmpty { null }; Repo.version++ }
@@ -271,6 +284,14 @@ class TvActivity : ComponentActivity() {
                     val item: @Composable (String, ImageVector, Boolean, () -> Unit) -> Unit = { label, icon, selected, onClick ->
                         NavigationDrawerItem(selected = selected, onClick = { drawer.setValue(DrawerValue.Closed); onClick(); if (selected) focusTick++ }, leadingContent = { Icon(icon, null) },
                             modifier = if (selected) Modifier.focusRequester(current) else Modifier) { Text(label, fontSize = Tv.body, fontWeight = FontWeight.Medium) }
+                    }
+                    // Who's watching (with more than one profile): their initial and name; OK switches.
+                    val profiles = remember(Repo.version) { Repo.profiles() }
+                    if (profiles.size > 1) {
+                        val me = profiles.firstOrNull { it.id == Repo.profileId } ?: profiles.first()
+                        NavigationDrawerItem(selected = false, onClick = { drawer.setValue(DrawerValue.Closed); who = true },
+                            leadingContent = { ProfileAvatar(me, 26.dp) }) { Text(me.name, fontSize = Tv.body, fontWeight = FontWeight.Medium, maxLines = 1) }
+                        Spacer(Modifier.height(6.dp))
                     }
                     item("Search", Icons.Default.Search, screen is Screen.Search) { root(Screen.Search) }
                     item("Home", Icons.Default.Home, section is Screen.Home && screen !is Screen.Search) { root(Screen.Home) }

@@ -13,6 +13,7 @@ import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChan
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, nativeVlcClose, nativeDl, headersFromOpts } from './native.js';
 import { handoffEntry, hasTv, openTvs } from './handoff.js';
+import { MAIN, MAX_PROFILES, profileList, colorOf, initialOf, newProfileId, nextColor, adoptProfiles, shouldAsk } from './profiles.js';
 
 const PAGE = 150;
 const UNGROUPED = 'Ungrouped';
@@ -86,6 +87,8 @@ const cloneChannel = c => ({ ...c, id: uid(), src: srcOf(c) || undefined, attrs:
 
 // ---------- boot ----------
 async function init() {
+  state.profiles = (await db.get('profiles').catch(() => null)) || {};
+  db.setProfile(deviceProfile().id);
   const [playlists, favorites, recents, settings, progress, meta, reminders] = await Promise.all([
     db.allPlaylists(), db.get('favorites'), db.get('recents'), db.get('settings'), db.get('progress'), db.get('syncMeta'), db.get('reminders'),
   ]);
@@ -113,6 +116,7 @@ async function init() {
   window.addEventListener('hashchange', route);
   window.addEventListener('resize', debounce(sizeGuide, 100));
   route();
+  maybeAskWho();
   if (!isNative && 'serviceWorker' in navigator && location.protocol !== 'file:') {
     // A new version took over: reload once so the phone runs it now, not on the next open (never mid-stream).
     const hadController = !!navigator.serviceWorker.controller;
@@ -215,16 +219,23 @@ async function adoptSources(remote) {
 }
 const canSync = () => serverProxy.available && !serverProxy.needsKey;
 const serverApi = path => serverProxy.base.replace(/proxy$/, path) + (state.settings.serverKey ? `?key=${encodeURIComponent(state.settings.serverKey)}` : '');
+// /sync for this device's profile (none for the default one, so the request is exactly what it always was).
+const syncApi = () => { const u = serverApi('sync'), id = deviceProfile().id; return id === MAIN ? u : `${u}${u.includes('?') ? '&' : '?'}profile=${encodeURIComponent(id)}`; };
 let syncing = null, syncAgain = false;
 async function syncNow() {
   if (!canSync()) return;
   if (syncing) { syncAgain = true; return syncing; }
   syncing = (async () => {
     try {
-      const res = await fetch(serverApi('sync'), { method: 'POST', cache: 'no-store', body: JSON.stringify({
-        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {} }) });
+      const pid = deviceProfile().id;
+      const res = await fetch(syncApi(), { method: 'POST', cache: 'no-store', body: JSON.stringify({
+        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {},
+        ...(Object.keys(state.profiles || {}).length ? { profiles: state.profiles } : {}) }) });
       if (!res.ok) return;
       const d = await res.json();
+      if (pid !== deviceProfile().id) return;   // switched profile meanwhile: this reply is the other one's
+      if (d.profiles) adoptProfileList(d.profiles);
+      if (d.profileGone) { switchProfile(MAIN, { quiet: true, reason: 'gone' }); return; }
       const urls = list => (list || []).map(c => c.url).join('\n');
       let changed = false;
       if (Array.isArray(d.favorites) && urls(d.favorites) !== urls(state.favorites)) {
@@ -283,7 +294,8 @@ async function playOnTv(c, { t, d } = {}) {
   if (dl) await pauseNativeDl(dl, 'tv');
   toast('Sending to your TV…', { busy: true });
   try {
-    const res = await fetch(serverApi('sync'), { method: 'POST', cache: 'no-store', body: JSON.stringify({ handoff: e, progress: state.progress }) });
+    if (deviceProfile().id !== MAIN) e.profile = deviceProfile().id;
+    const res = await fetch(syncApi(), { method: 'POST', cache: 'no-store', body: JSON.stringify({ handoff: e, progress: state.progress }) });
     if (!res.ok) throw new Error(`The server replied ${res.status}`);
     // Wait (up to ~8 s) for the TV to say it has it.
     let view = null;
@@ -394,6 +406,151 @@ function watchLaterShelf(kind, asHome) {
   return shelfHtml('Watch later', 'wl', items);
 }
 function favoritesChanged() { syncMeta.favAt = Date.now(); syncSoon(); }
+
+// ---------- viewer profiles: "Who's watching?" (js/profiles.js, server/sync.js) ----------
+// Which profile this device uses, and whether to open straight into it: kept on the device only.
+function deviceProfile() {
+  try { const d = JSON.parse(localStorage.getItem('profile') || 'null'); if (d?.id) return { id: String(d.id), remember: !!d.remember }; } catch {}
+  return { id: MAIN, remember: false };
+}
+function setDeviceProfile(d) { try { localStorage.setItem('profile', JSON.stringify({ id: d.id, remember: !!d.remember })); } catch {} }
+const profiles = () => profileList(state.profiles);
+const currentProfile = () => profiles().find(p => p.id === deviceProfile().id) || profiles()[0];
+const avatarHtml = (p, cls = '') => `<span class="pav ${cls}" style="--pc:${colorOf(p)}" aria-hidden="true">${esc(initialOf(p.name))}</span>`;
+function saveProfiles() { db.set('profiles', state.profiles).catch(() => {}); syncSoon(); updateAvatar(); }
+function adoptProfileList(remote) {
+  const before = JSON.stringify(state.profiles || {});
+  state.profiles = adoptProfiles(state.profiles, remote);
+  if (JSON.stringify(state.profiles) === before) return;
+  db.set('profiles', state.profiles).catch(() => {});
+  updateAvatar();
+  if (!profiles().some(p => p.id === deviceProfile().id)) switchProfile(MAIN, { quiet: true, reason: 'gone' });
+  else maybeAskWho();
+}
+// The topbar's profile button (Home): who's watching now; tap to switch. Only once there's more than one profile.
+function updateAvatar() {
+  const b = $('#actions [data-profile]');
+  if (b) b.innerHTML = avatarHtml(currentProfile());
+  if (!state.current && /^(#\/?)?$/.test(location.hash) && !b !== !(profiles().length > 1) && !state.playing) showHome();
+}
+let switchingProfile = false;
+async function switchProfile(id, { quiet = false, reason = '', remember } = {}) {
+  const cur = deviceProfile();
+  if (remember !== undefined && id === cur.id) { setDeviceProfile({ id, remember }); return; }
+  if (id === cur.id || switchingProfile) return;
+  switchingProfile = true;
+  try {
+    if (reason !== 'gone') await Promise.resolve(syncNow()).catch(() => {});   // the old profile's latest goes up first
+    // Read the other profile's lists first, then swap everything in one go (nothing can save into the wrong one).
+    const keys = ['favorites', 'recents', 'progress', 'syncMeta', 'reminders', 'watchlater', 'follows'];
+    const [favorites, recents, progress, meta, reminders, watchlater, follows] = await Promise.all(keys.map(k => db.get(k, id).catch(() => null)));
+    for (const r of state.reminders || []) if (r.at > Date.now()) nativeReminder(r.key, null);   // the old profile's alerts stop here
+    const srcDel = syncMeta.srcDel;   // playlists are shared: removals made on any profile still count
+    setDeviceProfile({ id, remember: remember ?? cur.remember });
+    db.setProfile(id);
+    Object.assign(state, { favorites: favorites || [], recents: recents || [], progress: progress || {}, reminders: reminders || [], watchlater: watchlater || {}, follows: follows || [] });
+    for (const k of Object.keys(syncMeta)) delete syncMeta[k];
+    Object.assign(syncMeta, { favAt: 0, recReset: 0, remDel: {} }, meta || {}, { srcDel: { ...(meta?.srcDel || {}), ...(srcDel || {}) } });
+    syncFavs();
+    sportsHub.teams.clear();
+    scheduleReminders.synced = false;
+    scheduleReminders();
+    widgetSnapshot(); widgetFixtures();
+    if (/^#\/(fav|recent)/.test(location.hash)) route(); else if (!state.playing) rerender();
+    updateAvatar();
+    if (!quiet) toast(`Hi ${currentProfile().name}`);
+    else if (reason === 'gone') toast('That profile was removed on another device');
+    syncNow();
+  } finally { switchingProfile = false; }
+}
+// "Who's watching?": on start when there's more than one profile and this device doesn't remember one.
+let whoAsked = false;
+try { whoAsked = sessionStorage.getItem('whoAsked') === '1'; } catch {}
+function maybeAskWho() {
+  if (whoAsked || state.playing || performance.now() > 20_000 || !shouldAsk(state.profiles, deviceProfile())) return;
+  whoIsWatching();
+}
+function whoIsWatching({ manage = true } = {}) {
+  whoAsked = true;
+  try { sessionStorage.setItem('whoAsked', '1'); } catch {}
+  document.getElementById('who')?.remove();
+  const cur = deviceProfile(), list = profiles();
+  const el = document.createElement('div');
+  el.id = 'who';
+  el.className = 'who';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-label', 'Who’s watching?');
+  el.innerHTML = `<div class="who-in">
+    <h2>Who’s watching?</h2>
+    <div class="who-tiles">${list.map(p => `<button class="who-tile${p.id === cur.id ? ' on' : ''}" data-id="${esc(p.id)}">${avatarHtml(p, 'big')}<span class="who-name">${esc(p.name)}</span></button>`).join('')}</div>
+    <label class="who-remember"><input type="checkbox" ${cur.remember ? 'checked' : ''}><span>Remember on this device</span></label>
+    ${manage ? '<button class="who-manage">Manage profiles</button>' : ''}
+  </div>`;
+  document.body.append(el);
+  document.documentElement.classList.add('who-open');
+  const close = () => { el.remove(); document.documentElement.classList.remove('who-open'); };
+  el.onclick = e => {
+    const t = e.target.closest('.who-tile');
+    if (t) { const remember = el.querySelector('.who-remember input').checked; close(); switchProfile(t.dataset.id, { remember }); return; }
+    if (e.target.closest('.who-manage')) { close(); settingsSheet().then(() => document.getElementById('profiles-sec')?.scrollIntoView({ block: 'start' })); }
+  };
+  el.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  requestAnimationFrame(() => (el.querySelector('.who-tile.on') || el.querySelector('.who-tile'))?.focus());
+}
+function profilesSectionHtml() {
+  const list = profiles(), cur = deviceProfile();
+  return `<div class="section-title" id="profiles-sec">Profiles</div>
+    <p class="muted">Each person has their own Continue watching, favourites, Watch later, history and teams. Playlists and settings are shared.</p>
+    <div class="prof-list">${list.map(p => `<button type="button" class="prof-row" data-pid="${esc(p.id)}">${avatarHtml(p)}<span class="prof-name">${esc(p.name)}</span>${p.id === cur.id ? '<span class="prof-here">Watching here</span>' : ''}<span class="prof-more">${icon('more')}</span></button>`).join('')}</div>
+    ${list.length > 1 ? `<label class="switch"><span><b>Remember on this device</b><span class="muted">Open straight into ${esc(currentProfile().name)} instead of asking who’s watching.</span></span><input type="checkbox" id="prof-remember" ${cur.remember ? 'checked' : ''}></label>` : ''}
+    <div class="form-actions"><button type="button" class="btn" id="prof-add" ${list.length >= MAX_PROFILES ? 'disabled' : ''}>Add profile</button></div>`;
+}
+function bindProfilesSection(el) {
+  el.querySelector('#prof-add')?.addEventListener('click', addProfileSheet);
+  el.querySelector('#prof-remember')?.addEventListener('change', e => setDeviceProfile({ ...deviceProfile(), remember: e.target.checked }));
+  el.querySelector('.prof-list')?.addEventListener('click', e => {
+    const p = profiles().find(x => x.id === e.target.closest('[data-pid]')?.dataset.pid);
+    if (!p) return;
+    menu(p.name, [
+      p.id !== deviceProfile().id && { label: `Switch to ${p.name}`, fn: () => switchProfile(p.id) },
+      { label: 'Rename', fn: () => renameProfileSheet(p) },
+      p.id !== MAIN && { label: 'Remove profile', danger: true, fn: () => removeProfile(p) },
+    ], { onCancel: settingsSheet });
+  });
+}
+async function addProfileSheet() {
+  const mainUnnamed = !profiles()[0].named;
+  const v = await formSheet({ title: 'Add profile', intro: 'Their own Continue watching, favourites and lists. No password: anyone can pick it.', fields: [
+    mainUnnamed && { name: 'me', label: 'Your name (this profile’s name until now: Main)', placeholder: 'e.g. Will', value: '' },
+    { name: 'name', label: 'New profile’s name', required: true, placeholder: 'e.g. Mazie', value: '' },
+  ].filter(Boolean), submit: 'Add' });
+  if (!v?.name) return settingsSheet();
+  const now = Date.now();
+  state.profiles = { ...(state.profiles || {}) };
+  if (mainUnnamed && v.me) state.profiles[MAIN] = { name: v.me.slice(0, 24), color: 0, at: now };
+  state.profiles[newProfileId(now)] = { name: v.name.slice(0, 24), color: nextColor(state.profiles), at: now };
+  saveProfiles();
+  toast(`Added ${v.name}`);
+  settingsSheet();
+}
+async function renameProfileSheet(p) {
+  const v = await formSheet({ title: 'Rename profile', fields: [
+    { name: 'name', label: 'Name', required: true, value: p.id === MAIN && !p.named ? '' : p.name, placeholder: 'e.g. Will' },
+    { name: 'color', label: 'Colour', type: 'select', value: String(p.color), options: ['Blue', 'Amber', 'Teal', 'Violet', 'Rose', 'Green', 'Red', 'Slate'].map((label, i) => ({ value: String(i), label })) },
+  ], submit: 'Save' });
+  if (v?.name) { state.profiles = { ...(state.profiles || {}), [p.id]: { name: v.name.slice(0, 24), color: +v.color || 0, at: Date.now() } }; saveProfiles(); }
+  settingsSheet();
+}
+async function removeProfile(p) {
+  if (!await confirmDialog(`Remove ${p.name}? Their Continue watching, favourites and lists go too, on every device. Playlists stay.`, 'Remove', true)) return settingsSheet();
+  state.profiles = { ...(state.profiles || {}), [p.id]: { deleted: true, at: Date.now() } };
+  if (deviceProfile().id === p.id) await switchProfile(MAIN, { quiet: true, reason: 'removed' });
+  saveProfiles();
+  for (const k of ['favorites', 'recents', 'progress', 'syncMeta', 'reminders', 'watchlater', 'follows']) db.delRaw(`${k}@${p.id}`).catch(() => {});
+  try { localStorage.removeItem(`chanPlays@${p.id}`); } catch {}
+  toast(`Removed ${p.name}`);
+  settingsSheet();
+}
 
 // ---------- TMDB: trending, backdrops, plots, cast, trailers (the key lives on your server) ----------
 let tmdbOn = null, omdbOn = false;   // null = unknown yet
@@ -955,7 +1112,7 @@ function setTopbar({ title, back = false, actions = [] }) {
   b.onclick = () => { if (typeof back === 'function') back(); else location.hash = back || '#/'; };
   const box = $('#actions');
   box.innerHTML = actions.map((a, i) =>
-    `<button class="icon-btn ${a.active ? 'active' : ''}" data-i="${i}" aria-label="${esc(a.label)}" title="${esc(a.label)}">${icon(a.icon)}</button>`).join('');
+    `<button class="icon-btn ${a.active ? 'active' : ''}${a.profile ? ' prof-btn' : ''}" data-i="${i}" ${a.profile ? 'data-profile' : ''} aria-label="${esc(a.label)}" title="${esc(a.label)}">${a.html || icon(a.icon)}</button>`).join('');
   box.onclick = e => { const btn = e.target.closest('button'); if (btn) actions[+btn.dataset.i].fn(); };
   document.title = back ? `${title} · M3U Player` : 'M3U Player';
 }
@@ -1334,12 +1491,13 @@ function bindTopSearch() {
   document.addEventListener('click', e => { if (!e.target.closest('#topsearch')) close(); });
 }
 // ---- Your channels: which live channels you watch most (kept for Live TV; Home no longer shows channels) ----
-function chanPlays() { try { return JSON.parse(localStorage.getItem('chanPlays') || '{}') || {}; } catch { return {}; } }
+const chanPlaysKey = () => (deviceProfile().id === MAIN ? 'chanPlays' : `chanPlays@${deviceProfile().id}`);
+function chanPlays() { try { return JSON.parse(localStorage.getItem(chanPlaysKey()) || '{}') || {}; } catch { return {}; } }
 function notePlay(url) {
   const m = chanPlays(), [n = 0] = m[url] || [];
   m[url] = [n + 1, Date.now()];
   const keep = Object.entries(m).sort((a, b) => b[1][1] - a[1][1]).slice(0, 150);   // the channels you've watched lately
-  try { localStorage.setItem('chanPlays', JSON.stringify(Object.fromEntries(keep))); } catch {}
+  try { localStorage.setItem(chanPlaysKey(), JSON.stringify(Object.fromEntries(keep))); } catch {}
 }
 /** Favourite and recent live channels, ranked: a favourite counts for a little over one viewing yesterday; a channel
  *  watched every evening outranks both. */
@@ -1461,6 +1619,7 @@ function showHome() {
       downloads && { icon: 'download', label: `Downloads (${downloads})`, fn: () => { location.hash = '#/downloads'; } },
       { icon: 'sliders', label: 'Settings', fn: settingsSheet },
       { icon: 'plus', label: 'Add playlist', fn: addPlaylistSheet },
+      profiles().length > 1 && { html: avatarHtml(currentProfile()), label: `Who’s watching: ${currentProfile().name}. Switch profile`, fn: () => whoIsWatching(), profile: true },
     ].filter(Boolean),
   });
   let dismissed = false;
@@ -5486,6 +5645,7 @@ async function settingsSheet() {
         <input type="checkbox" name="tsToHls" ${s.tsToHls ? 'checked' : ''}></label>`}
       <div class="form-actions"><button class="btn primary">Save settings</button></div>
     </form>
+    ${profilesSectionHtml()}
     <div class="section-title">Parental control</div>
     <p class="muted">${s.pinHash ? 'A PIN is set. Lock groups from a playlist’s ⋯ → Manage groups.' : 'Set a PIN, then lock adult or other groups from ⋯ → Manage groups.'}</p>
     <div class="form-actions"><button class="btn" id="pin">${s.pinHash ? 'Change PIN' : 'Set PIN'}</button>${s.pinHash ? '<button class="btn danger" id="pin-off">Remove PIN</button>' : ''}</div>
@@ -5495,6 +5655,7 @@ async function settingsSheet() {
     <div class="form-actions"><button class="btn danger" id="wipe">Erase all data</button></div>`, {
     onMount: el => {
       el.querySelector('#server-key-2')?.addEventListener('click', enterServerKey);
+      bindProfilesSection(el);
       el.querySelector('#tmdb-btn')?.addEventListener('click', tmdbSheet);
       el.querySelector('#omdb-btn')?.addEventListener('click', omdbSheet);
       el.querySelector('form').onsubmit = async e => {

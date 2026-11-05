@@ -389,3 +389,29 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 .list.pick { max-height: 60dvh; overflow-y: auto; margin-top: 8px; }
 .glist .icon-btn { width: 34px; height: 34px; font-size: 12px; color: var(--muted); }
 .glist .row-name .ico { width: 14px; height: 14px; margin-right: 4px; vertical-align: -2px; color: var(--star); }
+
+/* ---------- viewer profiles: "Who's watching?" ---------- */
+.pav { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--pc, var(--accent)); color: #fff; font-weight: 650; font-size: 15px; line-height: 1; flex: none; }
+.pav.big { width: clamp(84px, 24vw, 128px); height: clamp(84px, 24vw, 128px); border-radius: 22px; font-size: clamp(36px, 10vw, 54px); font-weight: 600; }
+.prof-btn .pav { width: 28px; height: 28px; font-size: 14px; border-radius: 8px; }
+.who { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: calc(24px + var(--safe-top)) 16px calc(24px + var(--safe-bottom)); background: var(--bg); animation: fade .25s ease-out; overflow-y: auto; }
+html.who-open body { overflow: hidden; }
+.who-in { width: 100%; max-width: 720px; text-align: center; }
+.who h2 { margin: 0 0 28px; font-size: clamp(24px, 6vw, 34px); font-weight: 600; letter-spacing: -.01em; }
+.who-tiles { display: flex; flex-wrap: wrap; justify-content: center; gap: clamp(16px, 5vw, 32px); }
+.who-tile { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 6px; border-radius: 26px; outline: none; }
+.who-tile .pav { transition: transform .15s ease, box-shadow .15s ease; box-shadow: 0 0 0 0 transparent; }
+.who-tile:hover .pav, .who-tile:focus-visible .pav { transform: scale(1.05); box-shadow: 0 0 0 3px var(--text); }
+.who-tile:active .pav { transform: scale(.97); }
+.who-name { font-size: 16px; color: var(--muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.who-tile:hover .who-name, .who-tile:focus-visible .who-name { color: var(--text); }
+.who-remember { display: inline-flex; align-items: center; gap: 10px; margin-top: 36px; color: var(--muted); font-size: 15px; cursor: pointer; }
+.who-remember input { width: 20px; height: 20px; accent-color: var(--accent); margin: 0; }
+.who-manage { display: block; margin: 18px auto 0; padding: 8px 14px; border-radius: 10px; color: var(--muted); font-size: 14px; }
+.who-manage:hover, .who-manage:focus-visible { color: var(--text); background: var(--surface-2); }
+.prof-list { display: flex; flex-direction: column; gap: 2px; margin: 4px 0 8px; border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.prof-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; text-align: left; }
+.prof-row:active, .prof-row:focus-visible { background: var(--surface-2); }
+.prof-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prof-here { font-size: 12px; color: var(--muted); }
+.prof-more { color: var(--muted); display: grid; }
