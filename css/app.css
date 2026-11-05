@@ -391,17 +391,24 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--t
 .glist .row-name .ico { width: 14px; height: 14px; margin-right: 4px; vertical-align: -2px; color: var(--star); }
 
 /* ---------- viewer profiles: "Who's watching?" ---------- */
-.pav { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--pc, var(--accent)); color: #fff; font-weight: 650; font-size: 15px; line-height: 1; flex: none; }
-.pav.big { width: clamp(84px, 24vw, 128px); height: clamp(84px, 24vw, 128px); border-radius: 22px; font-size: clamp(36px, 10vw, 54px); font-weight: 600; }
-.prof-btn .pav { width: 28px; height: 28px; font-size: 14px; border-radius: 8px; }
+.pav { position: relative; display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--pc, var(--accent)); color: #fff; font-weight: 650; font-size: 15px; line-height: 1; flex: none; overflow: hidden; }
+.pav b { font-weight: inherit; }
+/* One set, whatever the source: the same soft edge shading over every avatar (photo, ready-made or initial). */
+.pav::after { content: ''; position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle at 50% 45%, transparent 58%, rgba(0, 0, 0, .28) 100%); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .07); }
+.pav img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+.pav.pic { background: var(--surface-2); }
+.pav.big { width: clamp(84px, 24vw, 128px); height: clamp(84px, 24vw, 128px); font-size: clamp(36px, 10vw, 54px); font-weight: 600; }
+.prof-btn .pav { width: 28px; height: 28px; font-size: 14px; }
+.prof-btn .pav.pic { box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--pc); }   /* the profile's colour: a quiet ring */
 .who { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: calc(24px + var(--safe-top)) 16px calc(24px + var(--safe-bottom)); background: var(--bg); animation: fade .25s ease-out; overflow-y: auto; }
 html.who-open body { overflow: hidden; }
 .who-in { width: 100%; max-width: 720px; text-align: center; }
 .who h2 { margin: 0 0 28px; font-size: clamp(24px, 6vw, 34px); font-weight: 600; letter-spacing: -.01em; }
 .who-tiles { display: flex; flex-wrap: wrap; justify-content: center; gap: clamp(16px, 5vw, 32px); }
-.who-tile { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 6px; border-radius: 26px; outline: none; }
+.who-tile { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 6px; border-radius: 26px; outline: none; -webkit-tap-highlight-color: transparent; }
 .who-tile .pav { transition: transform .15s ease, box-shadow .15s ease; box-shadow: 0 0 0 0 transparent; }
-.who-tile:hover .pav, .who-tile:focus-visible .pav { transform: scale(1.05); box-shadow: 0 0 0 3px var(--text); }
+.who-tile:hover .pav, .who-tile:focus-visible .pav { transform: scale(1.05); box-shadow: 0 0 0 3px var(--bg), 0 0 0 6px var(--pc); }
 .who-tile:active .pav { transform: scale(.97); }
 .who-name { font-size: 16px; color: var(--muted); max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who-tile:hover .who-name, .who-tile:focus-visible .who-name { color: var(--text); }
@@ -415,3 +422,25 @@ html.who-open body { overflow: hidden; }
 .prof-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .prof-here { font-size: 12px; color: var(--muted); }
 .prof-more { color: var(--muted); display: grid; }
+/* Profile pictures: "Change picture" and the cropper */
+.pic-now { display: grid; place-items: center; margin: 4px 0 14px; }
+.pic-btns { display: flex; gap: 10px; justify-content: center; margin-bottom: 18px; }
+.pic-btns .btn { flex: 1; max-width: 180px; }
+.pic-label { font-size: 13px; font-weight: 600; color: var(--muted); margin: 6px 2px 10px; }
+.pic-row { display: flex; gap: 14px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scrollbar-width: none; margin: 0 -16px 20px; padding: 4px 16px 6px; scroll-padding: 0 16px; }
+.pic-row::-webkit-scrollbar { display: none; }
+.pic-opt { flex: none; padding: 4px; border-radius: 50%; scroll-snap-align: start; -webkit-tap-highlight-color: transparent; }
+.pic-opt .pav { width: 84px; height: 84px; font-size: 34px; transition: transform .12s ease; }
+.pic-opt:active .pav { transform: scale(.94); }
+.pic-opt.on { box-shadow: 0 0 0 3px var(--pc-now, var(--accent)); }   /* the profile's accent */
+.pic-opt:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--text); }
+.crop { position: fixed; inset: 0; z-index: 70; background: rgba(0, 0, 0, .92); display: grid; place-items: center; padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); }
+.crop-in { width: 100%; max-width: 380px; display: flex; flex-direction: column; align-items: center; gap: 18px; }
+.crop-hint { color: rgba(255, 255, 255, .7); font-size: 15px; margin: 0; }
+.crop-stage { position: relative; width: min(100%, 340px); aspect-ratio: 1; overflow: hidden; touch-action: none; cursor: grab; border-radius: 4px; }
+.crop-stage img { position: absolute; left: 0; top: 0; max-width: none; user-select: none; -webkit-user-select: none; pointer-events: none; transform-origin: 0 0; }
+.crop-ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(255, 255, 255, .5); pointer-events: none; }
+.crop-zoom { width: min(100%, 300px); accent-color: #fff; }
+.crop-btns { display: flex; gap: 12px; width: 100%; max-width: 340px; }
+.crop-btns .btn { flex: 1; }
+.greet { margin: 14px 4px 10px; font-size: 22px; font-weight: 650; letter-spacing: -.01em; color: var(--text); }

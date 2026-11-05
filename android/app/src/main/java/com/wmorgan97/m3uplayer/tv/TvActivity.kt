@@ -64,12 +64,20 @@ class TvActivity : ComponentActivity() {
     private var pinGate by mutableStateOf<(() -> Unit)?>(null)   // a locked channel waiting for its PIN
     // "Who's watching?" (Profiles.kt): on start when there's more than one profile and this TV doesn't remember one.
     var who by mutableStateOf(false)
+    var pictureFor by mutableStateOf<Profile?>(null)   // "Change picture" (Profiles.kt)
     private var whoAsked = false
     private fun askWhoIfNeeded() { if (!whoAsked && Repo.shouldAskProfile()) { whoAsked = true; who = true } }
     fun pickProfile(p: Profile, remember: Boolean) {
         who = false
         val changed = p.id != Repo.profileId
-        lifecycleScope.launch { Repo.switchProfile(p.id, remember); refresh++ }
+        val t0 = android.os.SystemClock.uptimeMillis(); Profiles.switchT0 = t0
+        // Instant: the profile's lists from this TV's saved copy now; the server's latest follows in the background.
+        lifecycleScope.launch {
+            Repo.switchProfile(p.id, remember, syncAfter = false); refresh++
+            if (!changed) return@launch
+            Profiles.logDrawn("cached", t0)
+            try { Repo.sync(); refresh++; Profiles.logDrawn("refresh", t0) } catch (_: Exception) {}
+        }
         if (changed) { root(Screen.Home); android.widget.Toast.makeText(this, "Hi ${p.name}", android.widget.Toast.LENGTH_SHORT).show() }
     }
     // ---------- voice search ----------
@@ -145,7 +153,7 @@ class TvActivity : ComponentActivity() {
         }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Tv.accent, background = Tv.bg, surface = Tv.surface, onSurface = Tv.text, onBackground = Tv.text, surfaceVariant = Tv.surface2)) {
-                CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides TvScroll.default) { Box(Modifier.fillMaxSize()) { App(); if (who) WhoIsWatching(onPick = ::pickProfile) { who = false } } }
+                CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides TvScroll.default) { Box(Modifier.fillMaxSize()) { App(); if (who) WhoIsWatching(onPick = ::pickProfile) { who = false }; pictureFor?.let { PicturePicker(it) { pictureFor = null } } } }
             }
         }
     }
@@ -177,6 +185,9 @@ class TvActivity : ComponentActivity() {
         i?.getStringExtra("testPlayer")?.let { t -> i.removeExtra("testPlayer"); val ed = getSharedPreferences("player", MODE_PRIVATE).edit()
             t.split(',').map { it.split('=') }.filter { it.size == 2 }.forEach { (k, v) -> if (k == "newUiFail") { if (v.isEmpty()) ed.remove(k) else ed.putString(k, v) } else ed.putBoolean(k, v == "1") }; ed.commit() }
         if (i?.getBooleanExtra("testWho", false) == true) { i.removeExtra("testWho"); who = true }
+        i?.getStringExtra("testPicture")?.let { id -> i.removeExtra("testPicture"); pictureFor = Repo.profiles().firstOrNull { it.id == id } }
+        // `--es testProfile <id>`: switch to that profile as if picked in "Who's watching?" (logs the switch time).
+        i?.getStringExtra("testProfile")?.let { id -> i.removeExtra("testProfile"); Repo.profiles().firstOrNull { it.id == id }?.let { pickProfile(it, Repo.rememberProfile) } }
         i?.getStringExtra("testPreview")?.let { Preview.testUrl = it.ifEmpty { null }; i.removeExtra("testPreview") }
         i?.getStringExtra("testSports")?.let { SportsHub.test = it; i.removeExtra("testSports") }
         i?.getStringExtra("testFollows")?.let { f -> i.removeExtra("testFollows"); Repo.testFollows = f.split('|').filter { it.isNotBlank() }.map { Repo.Follow(it.trim(), 1) }.ifEmpty { null }; Repo.version++ }

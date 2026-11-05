@@ -413,12 +413,28 @@ object Repo {
     private fun syncFile(id: String = profileId) = File(app.filesDir, if (id == Profiles.MAIN) "sync.json" else "sync@$id.json")
     fun profiles(): List<Profile> {
         val o = syncData.optJSONObject("profiles") ?: JSONObject()
-        return Profiles.list(o.keys().asSequence().mapNotNull { k -> o.optJSONObject(k)?.let { Profile(k, it.optString("name"), it.optInt("color"), it.optBoolean("deleted")) } }.toList())
+        return Profiles.list(o.keys().asSequence().mapNotNull { k -> o.optJSONObject(k)?.let { Profile(k, it.optString("name"), it.optInt("color"), it.optBoolean("deleted"),
+            avatar = it.optString("avatar").takeIf(Profiles::avatarOk) ?: "") } }.toList())
     }
+    /** A profile picture at [w] px (server/avatar.js through its image resizer); versioned, so cached for good. */
+    fun avatarUrl(path: String, w: Int) = "$server$path${if ('?' in path) '&' else '?'}w=$w&key=${enc(key)}"
+    /** The owner's ready-made pictures, in themed rows: (theme, picture paths). Saved on the TV, so the picker opens at once. */
+    fun cachedAvatarRows(): List<Pair<String, List<String>>> = parseAvatarRows(prefs.getString("avatarRows", null))
+    suspend fun avatarRows(): List<Pair<String, List<String>>> = withContext(Dispatchers.IO) {
+        val raw = http(api("avatars"))
+        parseAvatarRows(raw).also { prefs.edit().putString("avatarRows", raw).apply() }
+    }
+    private fun parseAvatarRows(raw: String?): List<Pair<String, List<String>>> = runCatching {
+        val a = org.json.JSONArray(raw ?: return emptyList())
+        (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let { r ->
+            val items = r.optJSONArray("items") ?: return@let null
+            val urls = (0 until items.length()).mapNotNull { j -> items.optJSONObject(j)?.optString("url")?.takeIf(Profiles::avatarOk) }
+            if (urls.isEmpty()) null else r.optString("theme", "More") to urls } }
+    }.getOrDefault(emptyList())
     fun currentProfile(): Profile = profiles().let { l -> l.firstOrNull { it.id == profileId } ?: l.first() }
     fun shouldAskProfile() = Profiles.shouldAsk(profiles(), profileId, rememberProfile)
     /** Switches this TV to profile [id]: its lists show at once from the TV's saved copy, then fresh from the server. */
-    suspend fun switchProfile(id: String, remember: Boolean? = null) = withContext(Dispatchers.IO) {
+    suspend fun switchProfile(id: String, remember: Boolean? = null, syncAfter: Boolean = true) = withContext(Dispatchers.IO) {
         if (remember != null) rememberProfile = remember
         if (id == profileId) return@withContext
         val shared = JSONObject(syncData.toString()).apply { Profiles.PERSONAL.forEach { remove(it) } }
@@ -428,12 +444,16 @@ object Repo {
         syncData = JSONObject(shared.toString()).apply { saved?.let { s -> Profiles.PERSONAL.forEach { k -> if (s.has(k)) put(k, s.get(k)) } } }
         favMemo = null
         version++
-        runCatching { sync() }
+        Profiles.logDrawn("swap", Profiles.switchT0)
+        if (syncAfter) runCatching { sync() }
     }
-    /** Adds, renames ([name]) or removes ([name] null) a profile, for every device. */
-    suspend fun saveProfile(id: String, name: String?, color: Int = 0) = withContext(Dispatchers.IO) {
-        val now = System.currentTimeMillis()
-        val e = if (name == null) JSONObject().put("deleted", true).put("at", now) else JSONObject().put("name", name.trim().take(24)).put("color", color).put("at", now)
+    /** Adds, renames ([name]) or removes ([name] null) a profile, for every device. [avatar]: its new picture ("" none);
+     *  null keeps the one it has (a rename never drops it). */
+    suspend fun saveProfile(id: String, name: String?, color: Int = 0, avatar: String? = null) = withContext(Dispatchers.IO) {
+        val cur = syncData.optJSONObject("profiles")?.optJSONObject(id)
+        val now = maxOf(System.currentTimeMillis(), (cur?.optLong("at") ?: 0L) + 1)
+        val pic = (avatar ?: cur?.optString("avatar").orEmpty()).takeIf(Profiles::avatarOk)
+        val e = if (name == null) JSONObject().put("deleted", true).put("at", now) else JSONObject().put("name", name.trim().take(24)).put("color", color).put("at", now).apply { if (pic != null) put("avatar", pic) }
         if (name == null && id == profileId) switchProfile(Profiles.MAIN)
         (syncData.optJSONObject("profiles") ?: JSONObject().also { syncData.put("profiles", it) }).put(id, e)
         version++

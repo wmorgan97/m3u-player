@@ -26,6 +26,7 @@ import { handleTmdb } from './tmdb.js';
 import { handleImg } from './img.js';
 import { handleLogo } from './logos.js';
 import { handleFixtures } from './fixtures.js';
+import { handleAvatar } from './avatar.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const port = Number(process.env.PORT) || 8080;
@@ -176,6 +177,7 @@ export function createAppServer() {
     if (req.method === 'OPTIONS') return send(res, 204, '');
     if (url.pathname === '/sync' && req.method === 'POST') console.log(`[sync] ${(req.headers['user-agent'] || '').replace(/^.*?\(([^;)]+).*$/, '$1')}`);
     if (url.pathname === '/sync') return handleSync(req, res, url, send).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
+    if (url.pathname === '/avatars' || url.pathname.startsWith('/avatar/')) return handleAvatar(req, res, url, send).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/log' && req.method === 'POST') return handleClientLog(req, res, url);
     if (url.pathname.startsWith('/tmdb/')) return handleTmdb(req, res, url, send);
     if (url.pathname === '/download') return handleDownload(req, res, url, send, u => /^https?:$/.test(u.protocol) && (allowPrivate || !isPrivateHost(u.hostname)))

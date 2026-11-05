@@ -13,7 +13,7 @@ import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChan
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, nativeVlcClose, nativeDl, headersFromOpts } from './native.js';
 import { handoffEntry, hasTv, openTvs } from './handoff.js';
-import { MAIN, MAX_PROFILES, profileList, colorOf, initialOf, newProfileId, nextColor, adoptProfiles, shouldAsk } from './profiles.js';
+import { MAIN, MAX_PROFILES, PROFILE_COLORS, profileList, colorOf, initialOf, newProfileId, nextColor, adoptProfiles, shouldAsk, editProfile, greeting } from './profiles.js';
 
 const PAGE = 150;
 const UNGROUPED = 'Ungrouped';
@@ -89,6 +89,7 @@ const cloneChannel = c => ({ ...c, id: uid(), src: srcOf(c) || undefined, attrs:
 async function init() {
   state.profiles = (await db.get('profiles').catch(() => null)) || {};
   db.setProfile(deviceProfile().id);
+  setTimeout(warmAvatars, 3000);
   const [playlists, favorites, recents, settings, progress, meta, reminders] = await Promise.all([
     db.allPlaylists(), db.get('favorites'), db.get('recents'), db.get('settings'), db.get('progress'), db.get('syncMeta'), db.get('reminders'),
   ]);
@@ -222,16 +223,17 @@ const serverApi = path => serverProxy.base.replace(/proxy$/, path) + (state.sett
 // /sync for this device's profile (none for the default one, so the request is exactly what it always was).
 const syncApi = () => { const u = serverApi('sync'), id = deviceProfile().id; return id === MAIN ? u : `${u}${u.includes('?') ? '&' : '?'}profile=${encodeURIComponent(id)}`; };
 let syncing = null, syncAgain = false;
+const syncBody = () => JSON.stringify({
+  favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {},
+  ...(state.settings.hideScoresAt ? { prefs: { hideScores: { v: !!state.settings.hideScores, at: state.settings.hideScoresAt } } } : {}),
+  ...(Object.keys(state.profiles || {}).length ? { profiles: state.profiles } : {}) });
 async function syncNow() {
   if (!canSync()) return;
   if (syncing) { syncAgain = true; return syncing; }
   syncing = (async () => {
     try {
       const pid = deviceProfile().id;
-      const res = await fetch(syncApi(), { method: 'POST', cache: 'no-store', body: JSON.stringify({
-        favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {},
-        ...(state.settings.hideScoresAt ? { prefs: { hideScores: { v: !!state.settings.hideScores, at: state.settings.hideScoresAt } } } : {}),
-        ...(Object.keys(state.profiles || {}).length ? { profiles: state.profiles } : {}) }) });
+      const res = await fetch(syncApi(), { method: 'POST', cache: 'no-store', body: syncBody() });
       if (!res.ok) return;
       const d = await res.json();
       if (pid !== deviceProfile().id) return;   // switched profile meanwhile: this reply is the other one's
@@ -419,14 +421,36 @@ function deviceProfile() {
 function setDeviceProfile(d) { try { localStorage.setItem('profile', JSON.stringify({ id: d.id, remember: !!d.remember })); } catch {} }
 const profiles = () => profileList(state.profiles);
 const currentProfile = () => profiles().find(p => p.id === deviceProfile().id) || profiles()[0];
-const avatarHtml = (p, cls = '') => `<span class="pav ${cls}" style="--pc:${colorOf(p)}" aria-hidden="true">${esc(initialOf(p.name))}</span>`;
-function saveProfiles() { db.set('profiles', state.profiles).catch(() => {}); syncSoon(); updateAvatar(); }
+// Your server's address (the web app's own origin; the iPhone app's server), known without waiting for it to answer.
+const serverRoot = () => (isNative ? (state.settings.serverUrl ? `${state.settings.serverUrl.replace(/\/+$/, '')}/` : '') : `${location.origin}${location.pathname.replace(/[^/]*$/, '')}`);
+const keyParam = () => (state.settings.serverKey ? `key=${encodeURIComponent(state.settings.serverKey)}` : '');
+// A profile picture at one of two sizes (small: topbar, lists; big: "Who's watching?"), so each is fetched once and then
+// comes from the HTTP cache / service worker (the URL changes when the picture does).
+function avatarUrl(path, w = 120) {
+  const root = serverRoot();
+  if (!path || !root) return '';
+  return `${root}${path.slice(1)}${path.includes('?') ? '&' : '?'}w=${w}${keyParam() ? `&${keyParam()}` : ''}`;
+}
+const avatarHtml = (p, cls = '') => {
+  const src = avatarUrl(p.avatar, /big/.test(cls) ? 400 : 120);
+  return `<span class="pav ${cls}${src ? ' pic' : ''}" style="--pc:${colorOf(p)}" aria-hidden="true">${src
+    ? `<img src="${esc(src)}" alt="" decoding="async" onerror="this.remove()">` : ''}<b>${esc(initialOf(p.name))}</b></span>`;
+};
+// Pictures of every profile, fetched once in the background so "Who's watching?" never waits for them.
+let avatarsWarm = '';
+function warmAvatars() {
+  const want = profiles().filter(p => p.avatar).map(p => p.avatar).join('|');
+  if (!want || want === avatarsWarm) return;
+  avatarsWarm = want;
+  (window.requestIdleCallback || setTimeout)(() => profiles().forEach(p => { if (p.avatar) for (const w of [120, 400]) { const i = new Image(); i.decoding = 'async'; i.src = avatarUrl(p.avatar, w); } }));
+}
+function saveProfiles() { db.set('profiles', state.profiles).catch(() => {}); syncSoon(); updateAvatar(); warmAvatars(); }
 function adoptProfileList(remote) {
   const before = JSON.stringify(state.profiles || {});
   state.profiles = adoptProfiles(state.profiles, remote);
   if (JSON.stringify(state.profiles) === before) return;
   db.set('profiles', state.profiles).catch(() => {});
-  updateAvatar();
+  updateAvatar(); warmAvatars();
   if (!profiles().some(p => p.id === deviceProfile().id)) switchProfile(MAIN, { quiet: true, reason: 'gone' });
   else maybeAskWho();
 }
@@ -434,6 +458,7 @@ function adoptProfileList(remote) {
 function updateAvatar() {
   const b = $('#actions [data-profile]');
   if (b) b.innerHTML = avatarHtml(currentProfile());
+  if (!state.current && /^(#\/?)?$/.test(location.hash)) { $('#title').textContent = homeTitle(); const g = $('#view .greet'); if (g) g.textContent = homeTitle(); }
   if (!state.current && /^(#\/?)?$/.test(location.hash) && !b !== !(profiles().length > 1) && !state.playing) showHome();
 }
 let switchingProfile = false;
@@ -442,8 +467,10 @@ async function switchProfile(id, { quiet = false, reason = '', remember } = {}) 
   if (remember !== undefined && id === cur.id) { setDeviceProfile({ id, remember }); return; }
   if (id === cur.id || switchingProfile) return;
   switchingProfile = true;
+  const t0 = performance.now();
   try {
-    if (reason !== 'gone') await Promise.resolve(syncNow()).catch(() => {});   // the old profile's latest goes up first
+    // The old profile's latest goes up in the background (its request is made now, before anything below swaps).
+    if (reason !== 'gone' && canSync()) fetch(syncApi(), { method: 'POST', cache: 'no-store', keepalive: true, body: syncBody() }).catch(() => {});
     // Read the other profile's lists first, then swap everything in one go (nothing can save into the wrong one).
     const keys = ['favorites', 'recents', 'progress', 'syncMeta', 'reminders', 'watchlater', 'follows'];
     const [favorites, recents, progress, meta, reminders, watchlater, follows] = await Promise.all(keys.map(k => db.get(k, id).catch(() => null)));
@@ -461,6 +488,9 @@ async function switchProfile(id, { quiet = false, reason = '', remember } = {}) 
     widgetSnapshot(); widgetFixtures();
     if (/^#\/(fav|recent)/.test(location.hash)) route(); else if (!state.playing) rerender();
     updateAvatar();
+    // Switch time: tap to the new profile's screen drawn (logged; fresh data follows from the server).
+    const ms = Math.round(performance.now() - t0);
+    requestAnimationFrame(() => { const shown = Math.round(performance.now() - t0); window.__profileSwitchMs = shown; console.info(`[profile] switched to ${id}: swapped ${ms} ms, drawn ${shown} ms`); });
     if (!quiet) toast(`Hi ${currentProfile().name}`);
     else if (reason === 'gone') toast('That profile was removed on another device');
     syncNow();
@@ -515,6 +545,7 @@ function bindProfilesSection(el) {
     const p = profiles().find(x => x.id === e.target.closest('[data-pid]')?.dataset.pid);
     if (!p) return;
     menu(p.name, [
+      { label: p.avatar ? 'Change picture' : 'Choose a picture', fn: () => pictureSheet(p) },
       p.id !== deviceProfile().id && { label: `Switch to ${p.name}`, fn: () => switchProfile(p.id) },
       { label: 'Rename', fn: () => renameProfileSheet(p) },
       p.id !== MAIN && { label: 'Remove profile', danger: true, fn: () => removeProfile(p) },
@@ -541,11 +572,142 @@ async function renameProfileSheet(p) {
     { name: 'name', label: 'Name', required: true, value: p.id === MAIN && !p.named ? '' : p.name, placeholder: 'e.g. Will' },
     { name: 'color', label: 'Colour', type: 'select', value: String(p.color), options: ['Blue', 'Amber', 'Teal', 'Violet', 'Rose', 'Green', 'Red', 'Slate'].map((label, i) => ({ value: String(i), label })) },
   ], submit: 'Save' });
-  if (v?.name) { state.profiles = { ...(state.profiles || {}), [p.id]: { name: v.name.slice(0, 24), color: +v.color || 0, at: Date.now() } }; saveProfiles(); }
+  if (v?.name) { state.profiles = { ...(state.profiles || {}), [p.id]: editProfile(state.profiles?.[p.id], { name: v.name.slice(0, 24), color: +v.color || 0 }) }; saveProfiles(); }
   settingsSheet();
+}
+// ---------- profile pictures (server/avatar.js) ----------
+// "Change picture" (like Disney+'s): a photo at the top, then the owner's ready-made pictures in themed rows that scroll
+// sideways (server/avatar.js: [{ theme, items }]), then the initial on a colour. Or a photo (chosen or taken, cropped to a circle here, sent as a
+// 512px JPEG with no metadata), or the initial on a colour. Every device gets it through the profile list.
+let presetCache = null;
+try { presetCache = JSON.parse(localStorage.getItem('avatarRows') || 'null'); } catch {}
+async function avatarPresets() {
+  if (!canSync()) return presetCache || [];
+  try {
+    const r = await fetch(`${serverRoot()}avatars?${keyParam()}`, { cache: 'no-store' });
+    if (r.ok) { presetCache = await r.json(); try { localStorage.setItem('avatarRows', JSON.stringify(presetCache)); } catch {} }
+  } catch {}
+  return presetCache || [];
+}
+function setProfilePicture(p, patch) {
+  state.profiles = { ...(state.profiles || {}), [p.id]: editProfile(state.profiles?.[p.id] || { name: p.id === MAIN && !p.named ? '' : p.name, color: p.color }, patch) };
+  saveProfiles();
+}
+function pictureSheet(p0) {
+  const p = () => profiles().find(x => x.id === p0.id) || p0;
+  const touch = isNative || isIOS || matchMedia('(pointer: coarse)').matches;
+  const draw = presets => {
+    const cur = p();
+    return `<div class="pic-sheet" style="--pc-now:${colorOf(cur)}"><div class="sheet-title">${esc(cur.id === MAIN && !cur.named ? 'Your picture' : `Picture for ${cur.name}`)}</div>
+      <div class="pic-now">${avatarHtml(cur, 'big')}</div>
+      <div class="pic-btns"><button type="button" class="btn" data-pick>Choose photo</button>${touch ? '<button type="button" class="btn" data-cam>Take photo</button>' : ''}</div>
+      ${presets.map(row => `<div class="pic-label">${esc(row.theme)}</div><div class="pic-row">${row.items.map(x => `<button type="button" class="pic-opt${cur.avatar === x.url ? ' on' : ''}" data-preset="${esc(x.url)}" aria-label="${esc(row.theme)} picture"><span class="pav pic"><img src="${esc(avatarUrl(x.url, 200))}" alt="" loading="lazy" decoding="async"></span></button>`).join('')}</div>`).join('')}
+      <div class="pic-label">Initial and colour</div>
+      <div class="pic-row">${PROFILE_COLORS.map((c, i) => `<button type="button" class="pic-opt${!cur.avatar && cur.color === i ? ' on' : ''}" data-color="${i}" aria-label="Colour ${i + 1}"><span class="pav" style="--pc:${c}"><b>${esc(initialOf(cur.name))}</b></span></button>`).join('')}</div>
+      ${cur.avatar ? '<div class="menu"><button type="button" class="menu-item danger" data-remove>Remove picture</button></div>' : ''}
+      <input type="file" accept="image/*" hidden data-file><input type="file" accept="image/*" capture="user" hidden data-camfile></div>`;
+  };
+  let presets = Array.isArray(presetCache) ? presetCache.filter(r => Array.isArray(r?.items)) : [];
+  const mount = el => {
+    el.onclick = e => {
+      const t = e.target.closest('button');
+      if (!t) return;
+      if (t.dataset.pick !== undefined) return el.querySelector('[data-file]').click();
+      if (t.dataset.cam !== undefined) return el.querySelector('[data-camfile]').click();
+      if (t.dataset.preset) { setProfilePicture(p(), { avatar: t.dataset.preset }); return redraw(); }
+      if (t.dataset.color !== undefined) { setProfilePicture(p(), { avatar: '', color: +t.dataset.color }); return redraw(); }
+      if (t.dataset.remove !== undefined) { removePicture(p()); return redraw(); }
+    };
+    for (const inp of el.querySelectorAll('input[type=file]')) inp.onchange = () => { const f = inp.files?.[0]; inp.value = ''; if (f) cropPhoto(f, p()); };
+  };
+  const redraw = (keepScroll = true) => sheet(draw(presets), { onMount: mount, keepScroll, onClose: () => {} });
+  redraw(false);
+  avatarPresets().then(l => { l = (l || []).filter(r => Array.isArray(r?.items)); if (JSON.stringify(l) !== JSON.stringify(presets) && $('#sheet .pic-now')) { presets = l; redraw(); } });
+}
+function removePicture(p) {
+  const was = p.avatar;
+  setProfilePicture(p, { avatar: '' });
+  if (was?.startsWith(`/avatar/${p.id}?`) && canSync()) fetch(`${serverRoot()}avatar/${encodeURIComponent(p.id)}?remove=1&${keyParam()}`, { method: 'POST' }).catch(() => {});
+}
+// The cropper: drag to move, pinch (or the slider / mouse wheel) to zoom, inside a circle. "Use photo" sends it.
+async function cropPhoto(file, p) {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.decoding = 'async';
+  try { img.src = url; await img.decode(); } catch { URL.revokeObjectURL(url); return toast('That photo couldn’t be opened'); }
+  const el = document.createElement('div');
+  el.className = 'crop';
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-label', 'Move and scale');
+  el.innerHTML = `<div class="crop-in"><p class="crop-hint">Move and scale</p>
+    <div class="crop-stage"><img alt="" draggable="false"><span class="crop-ring"></span></div>
+    <input type="range" class="crop-zoom" min="1" max="4" step="0.01" value="1" aria-label="Zoom">
+    <div class="crop-btns"><button type="button" class="btn" data-x>Cancel</button><button type="button" class="btn primary" data-ok>Use photo</button></div></div>`;
+  const im = el.querySelector('img');
+  im.src = url;
+  document.body.append(el);
+  document.documentElement.classList.add('who-open');
+  const stage = el.querySelector('.crop-stage'), zoom = el.querySelector('.crop-zoom');
+  const S = stage.getBoundingClientRect().width, iw = img.naturalWidth, ih = img.naturalHeight;
+  const base = S / Math.min(iw, ih);   // zoom 1: the short side fills the circle
+  let z = 1, x = 0, y = 0;             // x, y: the picture's centre offset from the circle's centre (px on screen)
+  const apply = () => {
+    const w = iw * base * z, h = ih * base * z;
+    x = Math.max(-(w - S) / 2, Math.min((w - S) / 2, x)); y = Math.max(-(h - S) / 2, Math.min((h - S) / 2, y));
+    im.style.width = `${w}px`; im.style.height = `${h}px`;
+    im.style.transform = `translate(${(S - w) / 2 + x}px, ${(S - h) / 2 + y}px)`;
+    zoom.value = String(z);
+  };
+  apply();
+  const pts = new Map();
+  let last = null;
+  const snap = () => { const a = [...pts.values()]; return a.length > 1 ? { d: Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y), cx: (a[0].x + a[1].x) / 2, cy: (a[0].y + a[1].y) / 2 } : { d: 0, cx: a[0].x, cy: a[0].y }; };
+  stage.onpointerdown = e => { stage.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); last = snap(); };
+  stage.onpointermove = e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const now = snap();
+    if (last && now.d && last.d) { const k = Math.max(1, Math.min(4, z * now.d / last.d)) / z; z *= k; x *= k; y *= k; }
+    if (last) { x += now.cx - last.cx; y += now.cy - last.cy; }
+    last = now; apply();
+  };
+  stage.onpointerup = stage.onpointercancel = e => { pts.delete(e.pointerId); last = pts.size ? snap() : null; };
+  stage.onwheel = e => { e.preventDefault(); const k = Math.max(1, Math.min(4, z * Math.exp(-e.deltaY / 400))) / z; z *= k; x *= k; y *= k; apply(); };
+  zoom.oninput = () => { const k = +zoom.value / z; z *= k; x *= k; y *= k; apply(); };
+  const close = () => { el.remove(); URL.revokeObjectURL(url); document.documentElement.classList.remove('who-open'); };
+  el.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+  el.querySelector('[data-x]').onclick = close;
+  el.querySelector('[data-ok]').onclick = async () => {
+    const OUT = 512, scale = base * z, side = S / scale;   // the square of the original that's inside the circle
+    const sx = (iw - side) / 2 - x / scale, sy = (ih - side) / 2 - y / scale;
+    const c = document.createElement('canvas');
+    c.width = c.height = OUT;
+    const g = c.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(img, sx, sy, side, side, 0, 0, OUT, OUT);
+    let blob = null;
+    for (const q of [0.86, 0.75, 0.6]) { blob = await new Promise(r => c.toBlob(r, 'image/jpeg', q)); if (blob && blob.size < 900_000) break; }
+    close();
+    if (!blob) return toast('That photo couldn’t be used');
+    await uploadPicture(p, blob);
+  };
+}
+async function uploadPicture(p, blob) {
+  if (!canSync()) return toast('Connect your server first');
+  toast('Saving picture…', { busy: true });
+  try {
+    const r = await fetch(`${serverRoot()}avatar/${encodeURIComponent(p.id)}?${keyParam()}`, { method: 'POST', body: blob, headers: { 'content-type': 'image/jpeg' } });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.avatar) throw new Error(d.error || `The server replied ${r.status}`);
+    setProfilePicture(p, { avatar: d.avatar });
+    // Shown at once: the picture just made, until the server's copy is in the cache.
+    toast('Picture saved');
+    if ($('#sheet .pic-now')) pictureSheet(p);
+  } catch (e) { toast(e.message || 'The picture couldn’t be saved'); }
 }
 async function removeProfile(p) {
   if (!await confirmDialog(`Remove ${p.name}? Their Continue watching, favourites and lists go too, on every device. Playlists stay.`, 'Remove', true)) return settingsSheet();
+  if (p.avatar && canSync()) fetch(`${serverRoot()}avatar/${encodeURIComponent(p.id)}?remove=1&${keyParam()}`, { method: 'POST' }).catch(() => {});   // the photo goes from the server too
   state.profiles = { ...(state.profiles || {}), [p.id]: { deleted: true, at: Date.now() } };
   if (deviceProfile().id === p.id) await switchProfile(MAIN, { quiet: true, reason: 'removed' });
   saveProfiles();
@@ -1613,11 +1775,13 @@ function patchView(root, html) {
   next.forEach((el, i) => { if (root.children[i] !== el) root.insertBefore(el, root.children[i] || null); });
   while (root.children.length > next.length) root.lastElementChild.remove();
 }
+// Home's title: a greeting for whoever's watching ("Good evening, Will"); the profile's name once it has one.
+const homeTitle = () => { const p = currentProfile(); return greeting(p.named === false ? '' : p.name); };
 function showHome() {
   state.current = null;
   const downloads = Object.keys(state.downloads || {}).length;
   setTopbar({
-    title: 'M3U Player',
+    title: homeTitle(),
     actions: [
       downloads && { icon: 'download', label: `Downloads (${downloads})`, fn: () => { location.hash = '#/downloads'; } },
       { icon: 'sliders', label: 'Settings', fn: settingsSheet },
@@ -1651,6 +1815,7 @@ function showHome() {
     ${serverProxy.needsKey ? `<div class="banner">
       ${icon('lock')}<span><b>Connect to your server:</b> enter the server key from the install, so http:// providers and TV guides work.</span>
       <button class="btn small primary" id="server-key">Enter key</button></div>` : ''}
+    ${pl.length ? `<p class="greet">${esc(homeTitle())}</p>` : ''}
     ${hub.hero.length ? heroHtml(hub.hero) : ''}
     ${cw.length ? `<section class="hub-sec hrow"><div class="row-head"><h3>Continue watching</h3></div><div class="cont-row">${cw.map(cwCard).join('')}</div></section>` : ''}
     ${watchLaterShelf(null, true)}

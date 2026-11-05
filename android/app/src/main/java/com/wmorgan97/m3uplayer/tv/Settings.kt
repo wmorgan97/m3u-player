@@ -204,6 +204,7 @@ private fun sectionRows(
                 for (p in list) add(SettingRow.Action(if (p.id == cur) Icons.Default.AccountCircle else Icons.Default.Person, p.name,
                     if (p.id == cur) "Watching on this TV" else "Their own Continue watching, favourites and lists", if (p.id == cur) "This TV" else "", opens = true) {
                     menu(p.name, listOfNotNull(
+                        (if (p.avatar.isEmpty()) "Choose a picture" else "Change picture") to { act.pictureFor = p },
                         if (p.id != cur) "Switch to ${p.name}" to { act.pickProfile(p, Repo.rememberProfile) } else null,
                         "Rename" to { ask(FormAsk("Rename ${p.name}", null, listOf(FormField("Name", if (p.named) p.name else "", "e.g. Will")), "Save") { (n) ->
                             if (n.isBlank()) "Enter a name" else { Repo.saveProfile(p.id, n, p.color); say("Saved"); null } }) },

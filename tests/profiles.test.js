@@ -167,3 +167,17 @@ test('prefs: "Hide scores" syncs per profile, newest edit wins, unknown names an
   assert.equal(viewFor(s, 'kid').prefs.hideScores.v, true);
   assert.deepEqual(viewFor(s, 'other').prefs, {});
 });
+
+import { editProfile, greeting } from '../js/profiles.js';
+test('client: profile pictures survive renames; greeting by time of day', () => {
+  const cur = { name: 'Mazie', color: 3, at: 10, avatar: '/avatar/mz1?v=abcdef123456' };
+  const e = editProfile(cur, { name: 'Maz' }, 5);
+  assert.equal(e.avatar, cur.avatar); assert.equal(e.name, 'Maz'); assert.ok(e.at > 10, 'always newer than the edit it replaces');
+  assert.equal(editProfile(cur, { avatar: '' }).avatar, undefined, 'removing the picture');
+  assert.equal(profileList({ mz1: cur, main: { name: 'Will', at: 1 } })[1].avatar, cur.avatar);
+  assert.equal(profileList({ mz1: { ...cur, avatar: 'javascript:alert(1)' } })[1].avatar, '');
+  assert.equal(greeting('Will', 8), 'Good morning, Will');
+  assert.equal(greeting('Will', 14), 'Good afternoon, Will');
+  assert.equal(greeting('', 21), 'Good evening');
+  assert.equal(greeting('Will', 2), 'Good evening, Will');
+});

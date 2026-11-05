@@ -1,6 +1,8 @@
 // Viewer profiles ("Who's watching?"): each person sharing the server gets their own Continue watching, progress,
 // favourites, Watch later, recents, follows and reminders; playlists and settings stay shared (server/sync.js).
-// The profile list is synced ({ <id>: { name, color, at } }); which profile this device uses is kept on the device.
+// The profile list is synced ({ <id>: { name, color, at, avatar? } }); which profile this device uses is kept on the device.
+// avatar: the picture's path on your server ("/avatar/<id>?v=<hash>" for an uploaded photo, "/avatar/preset/<hash>" for
+// one of the owner's ready-made pictures; server/avatar.js). None: the initial on the profile's colour.
 export const MAIN = 'main', MAX_PROFILES = 5;
 // Calm, distinct tile colours (initial on colour), readable with white text.
 export const PROFILE_COLORS = ['#3d7be0', '#d4813a', '#2a9d8f', '#8a6fd1', '#c95b8a', '#5b8c3a', '#c0504d', '#4f6d8f'];
@@ -12,9 +14,9 @@ export const newProfileId = (now = Date.now()) => `p${now.toString(36)}${Math.ra
 /** The profiles to show, main first, then in the order they were added. Main always exists (named "Main" until set). */
 export function profileList(map) {
   const m = map && typeof map === 'object' ? map : {};
-  const main = { id: MAIN, name: m[MAIN]?.name || 'Main', color: m[MAIN]?.color | 0, named: !!m[MAIN]?.name };
+  const main = { id: MAIN, name: m[MAIN]?.name || 'Main', color: m[MAIN]?.color | 0, named: !!m[MAIN]?.name, avatar: avatarOf(m[MAIN]) };
   const rest = Object.entries(m).filter(([id, v]) => id !== MAIN && v && !v.deleted && v.name)
-    .map(([id, v]) => ({ id, name: v.name, color: v.color | 0 })).sort((a, b) => (a.id < b.id ? -1 : 1));
+    .map(([id, v]) => ({ id, name: v.name, color: v.color | 0, avatar: avatarOf(v) })).sort((a, b) => (a.id < b.id ? -1 : 1));
   return [main, ...rest];
 }
 /** A colour not used yet (by index), for a new profile. */
@@ -34,3 +36,15 @@ export function adoptProfiles(mine, remote) {
 }
 /** Whether to ask "Who's watching?" when the app opens: more than one profile and none remembered here. */
 export const shouldAsk = (map, device) => profileList(map).length > 1 && !(device?.remember && profileList(map).some(p => p.id === device.id));
+const avatarOf = v => (typeof v?.avatar === 'string' && /^\/avatar\/[\w?=/-]+$/.test(v.avatar) ? v.avatar : '');
+/** A profile edit that keeps what it doesn't change (a rename keeps the picture), dated now. */
+export const editProfile = (cur, patch, now = Date.now()) => {
+  const e = { name: cur?.name || '', color: cur?.color | 0, ...(cur?.avatar ? { avatar: cur.avatar } : {}), ...patch, at: Math.max(now, (cur?.at || 0) + 1) };
+  if (!e.avatar) delete e.avatar;
+  return e;
+};
+/** "Good morning" / "Good afternoon" / "Good evening" (and ", Will" once the profile has a name). */
+export function greeting(name, hour = new Date().getHours()) {
+  const part = hour >= 5 && hour < 12 ? 'Good morning' : hour >= 12 && hour < 18 ? 'Good afternoon' : 'Good evening';
+  return name ? `${part}, ${name}` : part;
+}

@@ -19,8 +19,9 @@
 // (PERSONAL below) are per profile. The default profile ("main") is the top level of the file, exactly as before
 // profiles existed, so an app that doesn't know about profiles keeps reading and writing it. Other profiles live in
 //   p           { <profile id>: { favorites, favAt, recents, … } }, merged with the same rules as the top level
-//   profiles    { <id>: { name, color, at } }, newest edit per id wins; a removed one stays { deleted } for good
-//               (its data is kept 30 days, then dropped). "main" can be renamed, never removed.
+//   profiles    { <id>: { name, color, at, avatar? } }, newest edit per id wins; a removed one stays { deleted } for good
+//               (its data is kept 30 days, then dropped). "main" can be renamed, never removed. avatar is the
+//               profile picture's versioned path ("/avatar/<id>?v=<hash>", server/avatar.js); none = initial on colour.
 // A request picks its profile with &profile=<id> (none = main); the reply shows that profile's lists at the top level
 // and never includes `p`. The first load backs the file up once to data/sync.pre-profiles.json.
 //
@@ -148,12 +149,38 @@ export function mergeProfiles(a0, b) {
     if (profileId(k) !== k || !v || typeof v !== 'object' || out[k]?.deleted) continue;   // removed ids never come back
     const at = +v.at || 0;
     const e = v.deleted && k !== MAIN ? { deleted: true, at } : { name: String(v.name || '').trim().slice(0, 24), color: Math.max(0, Math.min(9, Math.trunc(+v.color) || 0)), at };
-    if (!e.deleted && !e.name) continue;
+    if (!e.deleted && avatarPathOk(k, v.avatar)) e.avatar = v.avatar;
+    if (!e.deleted && !e.name && !(k === MAIN && e.avatar)) continue;   // the unnamed default profile may still have a picture
     if (out[k] && at <= (out[k].at || 0)) continue;
     if (!out[k] && !e.deleted && k !== MAIN && liveProfiles(out) >= MAX_PROFILES - 1) continue;   // main + 4 more
     out[k] = e;
   }
   return out;
+}
+/** A profile picture's path as the server hands it out: "/avatar/<that id>?v=<content hash>" (an uploaded photo). */
+// Or one of the owner's ready-made pictures: "/avatar/preset/<content hash>" (server/avatar.js).
+export const avatarPathOk = (id, v) => typeof v === 'string' && v.length < 80
+  && ((v.startsWith(`/avatar/${id}?v=`) && /^\/avatar\/[A-Za-z0-9_-]{1,24}\?v=[0-9a-f]{6,40}$/.test(v)) || /^\/avatar\/preset\/[0-9a-f]{6,40}$/.test(v));
+/** The stored profile list (for /avatar). */
+export async function storedProfiles() { return (await load()).profiles || {}; }
+/** Sets (or, with null, clears) profile [id]'s picture as a new edit, for every device. False if there's no such profile. */
+export async function setProfileAvatar(id, avatar, now = Date.now()) {
+  const s = await load(), cur = s.profiles?.[id];
+  if (cur?.deleted || (!cur && id !== MAIN)) return null;
+  const e = { name: cur?.name || '', color: cur?.color | 0, at: Math.max(now, (cur?.at || 0) + 1) };
+  if (avatar) e.avatar = avatar;
+  stored = { ...s, profiles: mergeProfiles(s.profiles, { [id]: e }) };
+  persist();
+  return stored.profiles[id] || e;
+}
+function persist() {
+  const snapshot = JSON.stringify(stored);
+  writing = writing.then(async () => {
+    await fs.mkdir(DIR, { recursive: true });
+    await fs.writeFile(FILE + '.tmp', snapshot);
+    await fs.rename(FILE + '.tmp', FILE);            // atomic: a crash mid-write never corrupts the file
+  }).catch(e => console.error('[sync] write failed', e.message));
+  return writing;
 }
 /** Merges one device's POST into the stored state, for [profile] (default: main, the top level). */
 export function mergeState(a0, b0, profile, now = Date.now()) {
@@ -249,11 +276,6 @@ export async function handleSync(req, res, url, send) {
   // The server's own clock dates a new handoff, so phone/TV clocks that disagree can't make it look stale or fresh.
   if (incoming?.handoff && typeof incoming.handoff === 'object' && !incoming.handoff.taken) incoming.handoff.sent = Date.now();
   stored = mergeState(await load(), incoming || {}, profile);
-  const snapshot = JSON.stringify(stored);
-  writing = writing.then(async () => {
-    await fs.mkdir(DIR, { recursive: true });
-    await fs.writeFile(FILE + '.tmp', snapshot);
-    await fs.rename(FILE + '.tmp', FILE);            // atomic: a crash mid-write never corrupts the file
-  }).catch(e => console.error('[sync] write failed', e.message));
+  persist();
   send(res, 200, JSON.stringify(viewFor(stored, profile)), { 'content-type': 'application/json', 'cache-control': 'no-store' });
 }

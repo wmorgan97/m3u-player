@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const PROXY_KEY = process.env.PROXY_KEY || '';
 const FFMPEG = process.env.FFMPEG || 'C:\\ffmpeg\\ffmpeg.exe';
-const DIR = fileURLToPath(new URL('../data/img/', import.meta.url));
+const DIR = process.env.IMG_CACHE_DIR || fileURLToPath(new URL('../data/img/', import.meta.url));
 const WIDTHS = [120, 200, 300, 400, 500, 800, 1280];
 const MAX_JOBS = 6;
 
@@ -32,7 +32,8 @@ function shrink(src, w, out, png = false) {
   return new Promise(resolve => {
     const tmp = `${out}.${process.pid}.tmp`;
     const enc = png ? ['-pix_fmt', 'rgba', '-c:v', 'png'] : ['-q:v', '4', '-c:v', 'mjpeg'];
-    const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-user_agent', 'Mozilla/5.0', '-rw_timeout', '15000000',
+    const remote = /^https?:/i.test(src);
+    const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-nostdin', ...(remote ? ['-user_agent', 'Mozilla/5.0', '-rw_timeout', '15000000'] : []),
       '-i', src, '-frames:v', '1', '-vf', `scale='min(${w},iw)':-2:flags=lanczos`, ...enc, '-f', 'image2', '-y', tmp],
       { windowsHide: true });
     const timer = setTimeout(() => { try { p.kill(); } catch {} }, 20_000);
@@ -46,9 +47,10 @@ function shrink(src, w, out, png = false) {
 }
 
 // Make (or find) the thumbnail for src at width w. Shared by requests and the background warm-up.
-export async function ensure(src, w, png = false) {
+// [version]: for a local file that can change in place (a profile picture), part of the cache name.
+export async function ensure(src, w, png = false, version = '') {
   w = WIDTHS.find(x => x >= w) || 1280;
-  const file = join(DIR, `${createHash('sha1').update(`${src}|${w}`).digest('hex')}.${png ? 'png' : 'jpg'}`);
+  const file = join(DIR, `${createHash('sha1').update(`${src}|${w}${version ? `|${version}` : ''}`).digest('hex')}.${png ? 'png' : 'jpg'}`);
   if (await fs.stat(file).then(() => true, () => false)) return file;
   if (!inflight.has(file)) {
     inflight.set(file, (async () => {

@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens offline. Streams, logos and
 // playlist downloads (other origins) always go straight to the network.
 
-const CACHE = 'm3u-player-v242';
+const CACHE = 'm3u-player-v243';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/polish.css', 'css/desktop.css',
   'js/app.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/epg-worker.js', 'js/vod.js', 'js/native.js', 'js/sports.js', 'js/fixtures.js', 'js/follow.js', 'js/watchlater.js', 'js/profiles.js', 'vendor/hls.min.js',
@@ -23,8 +23,9 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const req = e.request;
   const url = new URL(req.url);
-  // Poster thumbnails and channel logos: cache first (they rarely change), in their own cache, trimmed now and then.
-  if (req.method === 'GET' && url.origin === location.origin && (url.pathname === '/img' || url.pathname === '/logo')) {
+  // Poster thumbnails, channel logos and profile pictures: cache first (they rarely change; a new profile picture is a
+  // new URL), in their own cache, trimmed now and then.
+  if (req.method === 'GET' && url.origin === location.origin && (url.pathname === '/img' || url.pathname === '/logo' || url.pathname.startsWith('/avatar/'))) {
     e.respondWith(caches.open('m3u-img').then(async cache => {
       const hit = await cache.match(req);
       if (hit) return hit;
@@ -40,7 +41,7 @@ self.addEventListener('fetch', e => {
   // Only the app's own files; never the proxy, transcode, sync or guide endpoints.
   if (req.method !== 'GET' || url.origin !== location.origin
       || url.pathname.endsWith('/proxy') || url.pathname === '/hls' || url.pathname.startsWith('/hls/')
-      || url.pathname === '/sync' || url.pathname.startsWith('/tmdb/') || url.pathname === '/guide' || url.pathname === '/vod' || url.pathname === '/download') return;
+      || url.pathname === '/sync' || url.pathname === '/avatars' || url.pathname.startsWith('/tmdb/') || url.pathname === '/guide' || url.pathname === '/vod' || url.pathname === '/download') return;
   e.respondWith(caches.open(CACHE).then(async cache => {
     const fresh = fetch(req, { cache: 'no-store' }).then(res => {
       if (res.ok) cache.put(req, res.clone());
