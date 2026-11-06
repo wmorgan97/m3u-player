@@ -38,6 +38,7 @@ object Tv {
     val scrimSoft = Color(0x66000000)       // badges over pictures, light dimming
     val scrim = Color(0x9E000000)           // 62%: panels over video / content
     val scrimStrong = Color(0xCC000000)     // 80%: side panels, menu over the page
+    val clockReserve = 84.dp                // width the corner clock takes (plate + gap): top-right page controls keep clear of it
     val line = Color(0x1FFFFFFF)            // hairline borders, dividers
     val lineStrong = Color(0x33FFFFFF)      // outlines on secondary buttons / chips
     val text = Color.White                  // primary text
@@ -223,8 +224,9 @@ fun Tag(text: String, color: Color = Tv.text2, bg: Color = Color(0x26FFFFFF), si
 @Composable
 fun Clock(modifier: Modifier = Modifier) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(10_000); now = System.currentTimeMillis() } }
-    Text(hhmm(now), modifier, fontSize = Tv.body, fontWeight = FontWeight.Medium, color = Tv.text2)
+    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(5_000); now = System.currentTimeMillis() } }
+    Text(hhmm(now), modifier, fontSize = 26.sp, lineHeight = 30.sp, fontWeight = FontWeight.Light, color = Color.White.copy(alpha = .92f), letterSpacing = 1.sp,
+        style = androidx.compose.ui.text.TextStyle(shadow = androidx.compose.ui.graphics.Shadow(Color.Black.copy(alpha = .55f), androidx.compose.ui.geometry.Offset(0f, 2f), 10f)))
 }
 
 /** Progress bar under a picture (see [TvProgress]). */

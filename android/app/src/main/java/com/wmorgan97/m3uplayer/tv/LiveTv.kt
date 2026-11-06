@@ -164,7 +164,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
             val fc = focusedChan ?: pc
             // Where the highlight is in the open group ("UK · General  ·  12 of 60"): a sense of place in long lists.
             val place = prettyGroup(group) + "  ·  " + (if (fc != null && fc == focusedChan && focusedIdx in list.indices) "${focusedIdx + 1} of ${list.size}" else "${list.size} channels")
-            LiveNowNext(fc, guideTick, place, Modifier.weight(1f).padding(start = 24.dp, end = Tv.margin + 80.dp, top = Tv.topMargin - 6.dp))
+            LiveNowNext(fc, guideTick, place, Modifier.weight(1f).padding(start = 24.dp, end = Tv.margin + Tv.clockReserve, top = Tv.topMargin - 6.dp))
         } else Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, top = Tv.topMargin, bottom = 14.dp), verticalAlignment = Alignment.Bottom) {
             Text("Live TV", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)
             Spacer(Modifier.width(14.dp))

@@ -25,6 +25,9 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.border
 import androidx.lifecycle.lifecycleScope
 import androidx.tv.material3.*
 import com.wmorgan97.m3uplayer.MainActivity
@@ -342,9 +345,10 @@ class TvActivity : ComponentActivity() {
                         Screen.Settings -> SettingsScreen(this@TvActivity)
                     }
                 } }
-                // The clock sits on a small dark pill so it stays readable over posters scrolled up beneath it.
-                if (screen !is Screen.Details) Row(Modifier.align(Alignment.TopEnd).graphicsLayer { alpha = if (Preview.zooming || Preview.unzooming) 0f else 1f }.padding(top = 4.dp, end = Tv.margin).background(Tv.bg.copy(alpha = .85f), RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (!Repo.online) { Text("Offline · showing saved data", fontSize = Tv.label, color = Tv.muted); Spacer(Modifier.width(14.dp)) }
+                // The clock: just the time, light and quiet in the top-right corner, with a soft shadow so it reads over any
+                // picture (no box, no border: like Apple TV). Inside the safe area; hidden while the preview zooms.
+                if (screen !is Screen.Details) Row(Modifier.align(Alignment.TopEnd).graphicsLayer { alpha = if (Preview.zooming || Preview.unzooming) 0f else 1f }.padding(top = 26.dp, end = Tv.margin), verticalAlignment = Alignment.CenterVertically) {
+                    if (!Repo.online) { Text("Offline · showing saved data", fontSize = Tv.label, color = Tv.muted); Spacer(Modifier.width(16.dp)) }
                     Clock()
                 }
                 pinGate?.let { go -> PinDialog("Enter PIN to watch this channel", verify = Repo::checkPin) { pin -> pinGate = null; if (pin != null) go() } }

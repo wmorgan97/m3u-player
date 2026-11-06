@@ -814,7 +814,7 @@ fun SportsScreen(act: TvActivity) {
                         else if (loading && (p == null || p.rows.isEmpty())) "Looking through the TV guide…" else "Live and upcoming on your ${if (Repo.sportsAll) "" else "UK "}channels · next 3 days")
                 }
                 // Which countries' channels: UK by default (the user is in the UK); one press away from Up on the first row.
-                Row(Modifier.padding(end = Tv.margin, top = Tv.topMargin - 8.dp).onFocusChanged { chipsFocused = it.hasFocus }, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.padding(end = Tv.margin + Tv.clockReserve, top = Tv.topMargin - 8.dp).onFocusChanged { chipsFocused = it.hasFocus }, horizontalArrangement = Arrangement.spacedBy(8.dp)) {   // clear of the clock
                     SportsChip("UK channels", !Repo.sportsAll) { SportsHub.showAll(ctx.applicationContext, false) }
                     SportsChip("All countries", Repo.sportsAll) { SportsHub.showAll(ctx.applicationContext, true) }
                 }

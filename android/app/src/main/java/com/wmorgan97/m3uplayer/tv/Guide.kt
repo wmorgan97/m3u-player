@@ -38,16 +38,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 // The TV guide, TiviMate-style: what's picked is described at the top, channels run down the left and a two-hour
-// window of programmes across. The grid is ONE focus target that moves a highlight itself (no focusable cells), and
+// window of programmes across, starting at NOW (rounded down to 5 minutes): nothing already over is drawn, as in TiviMate. The grid is ONE focus target that moves a highlight itself (no focusable cells), and
 // only the programmes inside the window are drawn, so a move redraws two rows instead of hundreds of cells.
 // OK: on now = watch; finished with catch-up = play it from the archive; anything else = details (remind me, etc.).
 
 private val ROW_H = 40.dp   // TiviMate-dense: ~13 channels on screen
 private val CHAN_W = 200.dp   // (room for most channel names next to the logo)
 private const val SPAN_MIN = 120
-private const val HALF_HOUR = 30 * 60_000L
-
-private fun floor30(t: Long): Long { val c = java.util.Calendar.getInstance().apply { timeInMillis = t; set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0) }; c.set(java.util.Calendar.MINUTE, c.get(java.util.Calendar.MINUTE) / 30 * 30); return c.timeInMillis }
+private const val HALF_HOUR = GUIDE_HALF_HOUR
 private fun at(l: List<Programme>, t: Long): Programme? { val i = l.indexOfLast { it.start <= t }; return if (i >= 0 && l[i].end > t) l[i] else null }
 
 @Composable
@@ -82,10 +80,13 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     // Where the highlight is: a row, and a moment in time (the programme under it is the one picked).
     var row by remember(group) { mutableIntStateOf(0) }
     var cursor by remember(group) { mutableLongStateOf(System.currentTimeMillis()) }
-    var viewStart by remember(group) { mutableLongStateOf(floor30(System.currentTimeMillis())) }
+    var viewStartRaw by remember(group) { mutableLongStateOf(guideStart(System.currentTimeMillis())) }
+    LaunchedEffect(now) { if (cursor < now) cursor = now }   // (never rest on a programme that has finished: it is no longer drawn)
     LaunchedEffect(group, locked, row / 100) { if (!locked) Repo.requestGuide(chans.drop(maxOf(0, row - 50)).take(300)) }   // (rows further down get theirs as you reach them)
     val anyArchive = remember(chans) { chans.any { it.hasCatchup } }
-    val earliest = floor30(now)   // TiviMate: the guide starts at what's on now and only looks ahead (catch-up lives in the programme menu)
+    val earliest = guideStart(now)   // TiviMate: the guide starts at what's on now and only looks ahead (catch-up lives in the programme menu)
+    val viewStart = maxOf(viewStartRaw, earliest)   // (at the start, the window follows the clock in 5-minute steps)
+    fun setViewStart(t: Long) { viewStartRaw = t }
     val latest = now + 24 * 3600_000L
     val span = SPAN_MIN * 60_000L
     val listState = rememberLazyListState(prefetchStrategy = remember { AheadPrefetch(rows = 4, nested = 0) })   // rows built before they scroll in
@@ -108,14 +109,14 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     fun progs(i: Int) = chans.getOrNull(i)?.let { Repo.guideFor(it) } ?: emptyList()
     /** Moves the highlight onto a programme, shifting the window (by whole half hours) only when it's out of sight. */
     fun pick(p: Programme) {
-        if (p.start >= viewStart + span) viewStart = floor30(p.start)
-        else if (p.end <= viewStart) viewStart = maxOf(earliest, floor30(maxOf(p.start, p.end - span)))
-        cursor = maxOf(p.start, viewStart)
+        if (p.start >= viewStart + span) setViewStart(floorHalfHour(p.start))
+        else if (p.end <= viewStart) setViewStart(maxOf(earliest, floorHalfHour(maxOf(p.start, p.end - span))))
+        cursor = maxOf(p.start, viewStartRaw, earliest)   // (viewStart is this composition's value: read the new one)
     }
-    /** Back to the present: the window starts at this half hour and the highlight is on what's on now. */
-    fun jumpToNow() { val t = System.currentTimeMillis(); now = t; viewStart = floor30(t); cursor = t }
+    /** Back to the start: the window begins at now and the highlight is on what's on now. */
+    fun jumpToNow() { val t = System.currentTimeMillis(); now = t; setViewStart(guideStart(t)); cursor = t }
     /** A whole window (two hours) later or earlier; the highlight lands on the programme at the window's start. */
-    fun page(pages: Int) { viewStart = guidePage(viewStart, pages, span, earliest, latest); cursor = viewStart }
+    fun page(pages: Int) { val t = guidePage(viewStart, pages, span, earliest, latest); setViewStart(t); cursor = if (t <= earliest) maxOf(now, t) else t }
     fun keepRowVisible() = scope.launch {
         val vis = listState.layoutInfo.visibleItemsInfo
         val first = vis.firstOrNull()?.index ?: 0; val last = (vis.lastOrNull()?.index ?: 0) - 1
@@ -141,20 +142,19 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
             Key.DirectionRight -> {
                 val next = if (cur != null) l0.firstOrNull { it.start >= cur.end } else l0.firstOrNull { it.start > cursor }
                 if (next != null && next.start < latest && next.start <= (cur?.end ?: cursor) + HALF_HOUR) pick(next)
-                else if (viewStart + span < latest) { viewStart += HALF_HOUR; cursor = maxOf(cursor, viewStart) }
+                else if (viewStart + span < latest) { val t = nextHalfHour(viewStart); setViewStart(t); cursor = maxOf(cursor, t) }
             }
             Key.DirectionLeft -> {
-                // On what's on now, a channel with no catch-up has nothing behind it worth stepping into: Left opens the
-                // menu at once, as on every other page, instead of paging back through hours of past listings first.
-                if (viewStart <= earliest && (cur == null || cur.start <= now)) return false   // on what's on now: Left opens the menu
-                if (cur != null && cur.start < viewStart) { if (viewStart <= earliest) return false; viewStart -= HALF_HOUR; cursor = maxOf(cur.start, viewStart) }
-                else {
-                    val prev = if (cur != null) l0.lastOrNull { it.end <= cur.start } else l0.lastOrNull { it.end <= cursor }
-                    // (a programme right next to this one; across a gap in the listings it steps half an hour instead)
-                    if (prev != null && prev.end > earliest && prev.end >= (cur?.start ?: cursor) - HALF_HOUR) pick(prev)
-                    else if (viewStart > earliest) { viewStart -= HALF_HOUR; cursor = viewStart }
-                    else return false   // the start of the guide: the menu opens
+                // The first cell of a row is the programme on now (nothing earlier is drawn): Left from it opens the menu.
+                val prev = if (cur != null) l0.lastOrNull { it.end <= cur.start } else null
+                if (cur != null && cur.start < viewStart) {   // clipped on the left: the window slides back to where it starts
+                    if (viewStart <= earliest) return false
+                    val t = maxOf(earliest, floorHalfHour(cur.start)); setViewStart(t); cursor = maxOf(cur.start, t)
                 }
+                // (a programme right next to this one; across a gap in the listings it steps back to the edge instead)
+                else if (prev != null && prev.end > now && prev.end >= cur!!.start - HALF_HOUR) pick(prev)
+                else if (viewStart <= earliest) { if ((cur?.start ?: cursor) <= now) return false else cursor = viewStart }
+                else { val t = prevHalfHour(viewStart, earliest); setViewStart(t); cursor = t }
             }
             Key.DirectionUp -> { if (row == 0) return false; row--; keepRowVisible() }
             Key.DirectionDown -> { if (row >= chans.size - 1) return true; row++; keepRowVisible() }
@@ -175,9 +175,9 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
         val selP = remember(row, cursor, tick, chans) { at(progs(row), cursor) }
         LaunchedEffect(l) { Preview.current() }
         val pc = Preview.channel
-        Row(Modifier.fillMaxWidth().height(150.dp).zIndex(1f)) {
-        if (!locked && Repo.preview) PreviewBox(pc, act.resumeTick, Modifier.zIndex(1f).padding(start = Tv.margin, top = Tv.topMargin - 8.dp, bottom = 10.dp).fillMaxHeight().aspectRatio(16 / 9f))
-        Column(Modifier.weight(1f).fillMaxHeight().padding(start = if (Repo.preview) 24.dp else Tv.margin, end = Tv.margin + 80.dp, top = Tv.topMargin).clearAndSetSemantics { }) {
+        Row(Modifier.fillMaxWidth().height(152.dp).zIndex(1f)) {
+        if (!locked && Repo.preview) PreviewBox(pc, act.resumeTick, Modifier.zIndex(1f).padding(start = Tv.margin, top = Tv.topMargin - Tv.s2, bottom = Tv.s3).fillMaxHeight().aspectRatio(16 / 9f))
+        Column(Modifier.weight(1f).fillMaxHeight().padding(start = if (Repo.preview) 24.dp else Tv.margin, end = Tv.margin, top = Tv.topMargin).clearAndSetSemantics { }) {
             if (locked || selC == null) {
                 Text("TV Guide", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)
                 Text(java.text.SimpleDateFormat("EEEE d MMMM", java.util.Locale.UK).format(java.util.Date(now)), fontSize = Tv.bodySmall, color = Tv.muted)
@@ -195,7 +195,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
             }
         }
         }
-        LazyRow(state = chipState, contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        LazyRow(state = chipState, contentPadding = PaddingValues(horizontal = Tv.margin), horizontalArrangement = Arrangement.spacedBy(Tv.s2), verticalAlignment = Alignment.CenterVertically) {
             // "Now": back to the present from anywhere in the guide (also the guide button, or Back once you've moved away).
             item(key = "\u0000now") {
                 TvChip("Now", selected = false, onClick = { jumpToNow(); scope.launch { delay(60); runCatching { gridFocus.requestFocus() } } }, icon = Icons.Default.Schedule)
@@ -209,7 +209,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                     modifier = if (g == group) Modifier.focusRequester(chipFocus) else Modifier, onFocus = { if (it) focusedChip = g else if (focusedChip == g) focusedChip = null })
             }
         }
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(Tv.s2))
         if (locked) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -220,12 +220,12 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
             }
         } else if (chans.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(bottom = 80.dp)) { EmptyState(Icons.Default.CalendarViewWeek, "No channels in this group", "Pick another group above") }
-        } else BoxWithConstraints(Modifier.fillMaxSize().padding(start = Tv.margin, end = Tv.margin - 16.dp)) {
+        } else BoxWithConstraints(Modifier.fillMaxSize().padding(start = Tv.margin, end = Tv.margin)) {
             val gridW = maxWidth - CHAN_W
             val perMin = gridW / SPAN_MIN.toFloat()
             Column(Modifier.fillMaxSize()) {
-                // Time ruler: a label and a short tick at each half hour, the day when it isn't today, and a red dot where now is.
-                GuideRuler(viewStart, now, perMin)
+                // Time ruler: "Now" at the left edge (the window starts there) and a label with a short tick at each half hour after it.
+                GuideRuler(viewStart, now, perMin, atNow = viewStart <= earliest)
                 Box(Modifier.fillMaxSize()) {
                     LazyColumn(Modifier.fillMaxSize().clearAndSetSemantics { }.focusRequester(gridFocus).onFocusChanged { gridFocused = it.isFocused }
                         .onPreviewKeyEvent { e ->
@@ -239,8 +239,6 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
                             GuideRow(c, i == row && gridFocused, if (i == row) cursor else -1L, viewStart, span, now, tick, perMin, c.url in favUrls, c.url == Preview.channel?.url)
                         }
                     }
-                    if (now in viewStart until viewStart + span)   // the now-line: a thin red line, never a bar
-                        Box(Modifier.padding(start = CHAN_W).offset(x = perMin * ((now - viewStart) / 60_000f) - 0.75.dp).width(1.5.dp).fillMaxHeight().background(Tv.live.copy(alpha = .85f)))
                 }
             }
         }
@@ -250,8 +248,8 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
     // previewed channel does that.)
     // At now, Back first goes up to the group chips (TiviMate-like: switching group is one press away from anywhere in a
     // long group); Back on the chips opens the menu.
-    androidx.activity.compose.BackHandler(enabled = gridFocused && viewStart != floor30(now) && info == null && pinFor == null) { jumpToNow() }
-    androidx.activity.compose.BackHandler(enabled = gridFocused && viewStart == floor30(now) && info == null && pinFor == null) { toChips() }
+    androidx.activity.compose.BackHandler(enabled = gridFocused && viewStart > earliest && info == null && pinFor == null) { jumpToNow() }
+    androidx.activity.compose.BackHandler(enabled = gridFocused && viewStart <= earliest && info == null && pinFor == null) { toChips() }
     // The grid takes the highlight when the page (or a group) opens, except while you're moving along the group chips:
     // a group picked there keeps the highlight on the chips, so you can carry on; OK / Down goes into the grid.
     LaunchedEffect(locked, chans) { if (!locked && chans.isNotEmpty()) { delay(120); if (focusedChip == null) runCatching { gridFocus.requestFocus() } } }
@@ -267,58 +265,64 @@ internal fun dayLabel(t: Long, now: Long): String {
     return when (d) { 0 -> ""; 1 -> "Tomorrow "; -1 -> "Yesterday "; else -> java.text.SimpleDateFormat("EEE ", java.util.Locale.UK).format(java.util.Date(t)) }
 }
 
-/** The time ruler over the grid: half-hour labels with a hairline tick under each, and a red dot over the now-line. */
+/** The time ruler over the grid: "Now" at the left edge while the window starts at now, then a label with a hairline tick at each half hour. */
 @Composable
-private fun GuideRuler(viewStart: Long, now: Long, perMin: Dp) {
+private fun GuideRuler(viewStart: Long, now: Long, perMin: Dp, atNow: Boolean) {
+    val ticks = remember(viewStart) { guideTicks(viewStart, SPAN_MIN * 60_000L) }
     Box(Modifier.fillMaxWidth().height(28.dp).padding(start = CHAN_W).clipToBounds()) {
-        for (k in 0 until SPAN_MIN / 30) {
-            val t = viewStart + k * HALF_HOUR
-            val x = perMin * (k * 30f)
+        var prev = viewStart
+        if (atNow) Text("Now", Modifier.padding(start = Tv.s2, bottom = 6.dp).align(Alignment.BottomStart), fontSize = Tv.label, lineHeight = Tv.labelLine, color = Tv.text, fontWeight = FontWeight.SemiBold)
+        for (t in ticks) {
+            val x = perMin * ((t - viewStart) / 60_000f)
+            val crowded = atNow && t - viewStart < 9 * 60_000L   // (a tick right next to "Now": its label would collide)
+            if (x + 52.dp > perMin * SPAN_MIN.toFloat()) break   // (a label would be clipped at the right edge)
             Box(Modifier.offset(x = x).align(Alignment.BottomStart).padding(bottom = 2.dp).width(1.dp).height(8.dp).background(Tv.lineStrong))
-            Text((if (k == 0) dayLabel(t, now) else "") + hhmm(t), Modifier.offset(x = x).padding(start = 8.dp, bottom = 6.dp).align(Alignment.BottomStart),
-                fontSize = Tv.label, lineHeight = Tv.labelLine, color = if (t + HALF_HOUR <= now) Tv.muted else Tv.text2, fontWeight = FontWeight.Medium)
+            if (!crowded) {
+                val day = if (dayLabel(t, now) != dayLabel(prev, now) || (t == ticks.first() && !atNow)) dayLabel(t, now) else ""
+                Text(day + hhmm(t), Modifier.offset(x = x).padding(start = Tv.s2, bottom = 6.dp).align(Alignment.BottomStart), fontSize = Tv.label, lineHeight = Tv.labelLine, color = Tv.text2, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false)
+            }
+            prev = t
         }
-        if (now >= viewStart && now < viewStart + SPAN_MIN * 60_000L)
-            Box(Modifier.offset(x = perMin * ((now - viewStart) / 60_000f) - Tv.liveDot / 2).align(Alignment.BottomStart).size(Tv.liveDot).background(Tv.live, CircleShape))
     }
 }
 
-/** One channel's row: the channel on the left, then only the programmes inside the window, drawn as plain boxes. */
+/** One channel's row: the channel on the left, then only what's still to finish inside the window, drawn as plain boxes. */
 @Composable
 private fun GuideRow(c: Channel, selected: Boolean, cursor: Long, viewStart: Long, span: Long, now: Long, tick: Int, perMin: Dp, fav: Boolean, inPreview: Boolean) {
     val all = remember(tick, c) { Repo.guideFor(c) }
     val end = viewStart + span
-    val shown = remember(all, viewStart) { all.filter { it.end > viewStart && it.start < end } }
+    val slots = remember(all, viewStart, now / 60_000L) { guideSlots(all, viewStart, end, now) }
     val sel = if (cursor >= 0) at(all, cursor) else null
-    Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = 2.dp).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = 6.dp).background(if (cursor >= 0) Tv.surface3 else if (inPreview) Tv.accent.copy(alpha = .12f) else Tv.surface, RoundedCornerShape(4.dp)).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (inPreview) "▶" else if (Repo.showNumbers) "${c.num}" else "", fontSize = Tv.micro, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(if (Repo.showNumbers) 30.dp else 16.dp), maxLines = 1)
+    val placed = remember(slots, perMin) { guideLayout(slots, viewStart, perMin.value, perMin.value * SPAN_MIN) }   // (min width for the first cell, nothing too narrow to read)
+    Row(Modifier.fillMaxWidth().height(ROW_H).padding(bottom = Tv.s1).clearAndSetSemantics { }, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.width(CHAN_W).fillMaxHeight().padding(end = Tv.s1).background(if (cursor >= 0) Tv.surface3 else if (inPreview) Tv.accent.copy(alpha = .12f) else Tv.surface, Tv.shapeS).padding(horizontal = Tv.s2), verticalAlignment = Alignment.CenterVertically) {
+            Text(if (inPreview) "▶" else if (Repo.showNumbers) "${c.num}" else "", fontSize = Tv.micro, color = if (inPreview) Tv.accent else Tv.muted, modifier = Modifier.width(if (Repo.showNumbers) 28.dp else 16.dp), maxLines = 1)
             LogoTile(c, Modifier.size(width = 40.dp, height = 24.dp))
-            Spacer(Modifier.width(8.dp))
-            Text(c.name + if (fav) " ★" else "", fontSize = Tv.caption, lineHeight = 16.sp, color = if (inPreview) Tv.accent else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            Spacer(Modifier.width(Tv.s2))
+            Text(c.name, fontSize = Tv.caption, lineHeight = Tv.captionLine, color = if (inPreview) Tv.accent else Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            if (fav) Text("★", fontSize = Tv.micro, lineHeight = Tv.microLine, color = Tv.star, modifier = Modifier.padding(start = Tv.s1), maxLines = 1)   // (its own slot: a long name never cuts it off)
         }
         Box(Modifier.fillMaxSize().clipToBounds()) {
-            if (shown.isEmpty()) Cell("No programme information", null, 0.dp, perMin * SPAN_MIN.toFloat(), on = selected && cursor >= 0, past = false, onAir = false, progress = null, catchup = false)
-            for (p in shown) {
-                val s = maxOf(p.start, viewStart); val e = minOf(p.end, end)
-                val onAir = p.start <= now && p.end > now
-                Cell(if (p.start < viewStart) "‹ " + p.title else p.title, "${hhmm(p.start)}–${hhmm(p.end)}", perMin * ((s - viewStart) / 60_000f), perMin * ((e - s) / 60_000f),
-                    on = selected && sel == p, past = p.end <= now, onAir = onAir, progress = if (onAir) (now - p.start).toFloat() / (p.end - p.start) else null,
-                    catchup = p.end <= now && c.hasCatchup && p.start > now - c.catchupDays * 86_400_000L)
+            for (pl in placed) {
+                val g = pl.slot; val p = g.p; val x = pl.x.dp; val w = pl.w.dp
+                if (p == null) { Cell("No information", null, x, w, on = selected && sel == null, onAir = false, progress = null, quiet = true); continue }
+                val onAir = p.start <= now
+                Cell(p.title, if (onAir) liveLeftLabel(p, now) else "${hhmm(p.start)}–${hhmm(p.end)}", x, w,
+                    on = selected && sel == p, onAir = onAir, progress = if (onAir) liveFraction(p, now) else null, quiet = false)
             }
         }
     }
 }
 
 @Composable
-private fun Cell(title: String, sub: String?, x: Dp, w: Dp, on: Boolean, past: Boolean, onAir: Boolean, progress: Float?, catchup: Boolean) {
-    val shape = RoundedCornerShape(4.dp)
-    val bg = when { on -> Tv.focusSurface; onAir -> Tv.accentDeep.copy(alpha = .5f); past -> Tv.surface.copy(alpha = .55f); else -> Tv.surface2 }
-    val fg = when { on -> Tv.onFocus; past -> Tv.muted; else -> Tv.text }
-    Box(Modifier.offset(x = x).width(w).fillMaxHeight().padding(end = 2.dp).background(bg, shape)) {   // (white fill = the highlight; no extra border pass)
-        Column(Modifier.fillMaxHeight().padding(start = 8.dp, end = 4.dp), verticalArrangement = Arrangement.Center) {
-            Text((if (catchup) "↺ " else "") + title, fontSize = Tv.caption, lineHeight = 16.sp, fontWeight = if (on || onAir) FontWeight.SemiBold else FontWeight.Normal, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (sub != null && w > 70.dp) Text(sub, fontSize = Tv.micro, lineHeight = 14.sp, color = if (on) Tv.onFocus.copy(alpha = .7f) else Tv.muted, maxLines = 1)
+private fun Cell(title: String, sub: String?, x: Dp, w: Dp, on: Boolean, onAir: Boolean, progress: Float?, quiet: Boolean) {
+    val bg = when { on -> Tv.focusSurface; quiet -> Tv.surface.copy(alpha = .6f); onAir -> Tv.accentDeep.copy(alpha = .5f); else -> Tv.surface2 }
+    val fg = when { on -> Tv.onFocus; quiet -> Tv.muted; else -> Tv.text }
+    // 4 dp between cells; text only where it fits (a cell under ~72 dp is just a block, never a "…" fragment).
+    Box(Modifier.offset(x = x).width(w).fillMaxHeight().padding(end = Tv.s1).background(bg, Tv.shapeS)) {   // (white fill = the highlight; no extra border pass)
+        if (w >= GUIDE_TEXT_MIN_DP.dp) Column(Modifier.fillMaxHeight().padding(horizontal = Tv.s2), verticalArrangement = Arrangement.Center) {
+            Text(title, fontSize = Tv.caption, lineHeight = Tv.captionLine, fontWeight = if (on || onAir) FontWeight.SemiBold else FontWeight.Normal, color = fg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (sub != null && w >= GUIDE_SUB_MIN_DP.dp) Text(sub, fontSize = Tv.micro, lineHeight = Tv.microLine, color = if (on) Tv.onFocus.copy(alpha = .7f) else Tv.muted, maxLines = 1)
         }
         if (progress != null && !on) ProgressLine(progress, Modifier.align(Alignment.BottomStart).fillMaxWidth(), 2.dp)
     }
