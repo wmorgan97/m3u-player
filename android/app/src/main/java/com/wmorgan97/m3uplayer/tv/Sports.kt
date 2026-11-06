@@ -689,10 +689,12 @@ private fun dayWord(t: Long, now: Long): String {
 // fit on the screen and there's no empty band in the middle.
 /** Where the focused row's cards settle (the first row's own place under the page title, so the page doesn't jump). */
 private val SPORTS_ROW_TOP = 124.dp
-private val LIVE_W = 300.dp
-private val LIVE_H = 132.dp
-private val NEXT_W = 236.dp
-private val NEXT_H = 116.dp
+// One set of card sizes for the fixtures and the guide fallback, so the skeleton, either data source and every row line up.
+private val LIVE_W = 320.dp
+private val LIVE_H = 156.dp
+private val NEXT_W = 300.dp
+private val NEXT_H = 136.dp
+private val TEAM_H = 108.dp
 
 // ---------- the page ----------
 
@@ -988,9 +990,9 @@ private fun TeamCard(team: String, s: SportItem?, now: Long, reminded: Boolean, 
     val live = s?.onAir(now) == true
     val title = s?.let { tidyTitle(it.p.title, it.comp) }
     val label = when { s == null -> "$team, no match in the next 3 days"; live -> "$team: $title, live on ${s.c.name}"; else -> "$team: $title, ${dayWord(s.p.start, now)} ${hhmm(s.p.start)} on ${s.c.name}" }
-    FocusCard(modifier.width(width).height(NEXT_H), scale = Tv.scaleWide, restoreKey = "sp:team:" + team.lowercase(), label = label, onLongClick = onLong, onClick = onClick) {
+    FocusCard(modifier.width(width).height(TEAM_H), scale = Tv.scaleWide, restoreKey = "sp:team:" + team.lowercase(), label = label, onLongClick = onLong, onClick = onClick) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface)))) {
-            Column(Modifier.fillMaxSize().padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 12.dp)) {
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(team, Modifier.weight(1f), fontSize = Tv.label, color = Tv.accent, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (live) LivePill() else if (reminded) Icon(Icons.Default.NotificationsActive, "Reminder set", tint = Tv.star, modifier = Modifier.size(18.dp))
@@ -999,7 +1001,7 @@ private fun TeamCard(team: String, s: SportItem?, now: Long, reminded: Boolean, 
                 if (s == null) {
                     Text(if (SportsHub.searched(team)) "No match in the next 3 days" else "Searching the TV guide…", fontSize = Tv.bodySmall, color = Tv.muted, maxLines = 2)
                 } else {
-                    Text(title!!, fontSize = Tv.body, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(title!!, fontSize = Tv.body, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         SmallLogo(s.c, 40.dp, 24.dp)
@@ -1034,13 +1036,7 @@ private fun TeamDialog(team: String, onDismiss: () -> Unit) {
 
 /** The row heading; the first one sits closer to the page title. */
 @Composable
-private fun SportsRowTitle(text: String, count: Int? = null, first: Boolean = false) {
-    if (first) Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, bottom = 12.dp), verticalAlignment = Alignment.Bottom) {
-        Text(text, fontSize = Tv.rowTitle, fontWeight = FontWeight.SemiBold, color = Tv.text)
-        Spacer(Modifier.weight(1f))
-        if (count != null) Text("$count", fontSize = Tv.label, color = Tv.muted, modifier = Modifier.padding(bottom = 2.dp))
-    } else RowTitle(text, count = count)
-}
+private fun SportsRowTitle(text: String, count: Int? = null, first: Boolean = false) = RowTitle(text, count = count, top = if (first) 0.dp else Tv.rowGap)
 
 /** The channel's logo, small, on its own dark tile (initials when it has none). */
 @Composable
@@ -1062,7 +1058,7 @@ private fun LiveSportCard(s: SportItem, now: Long, modifier: Modifier, reminded:
     val sub = listOfNotNull(s.comp, if (left < 60) "$left min left" else "until ${hhmm(s.p.end)}").joinToString("  ·  ")
     FocusCard(modifier.width(LIVE_W).height(LIVE_H), scale = Tv.scaleWide, restoreKey = "sp:live:" + s.key, label = "$title, live on ${s.c.name}, $sub", onLongClick = onLong, onClick = onClick) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface)))) {
-            Column(Modifier.fillMaxSize().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 14.dp)) {
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SmallLogo(s.c, 48.dp, 28.dp)
                     Spacer(Modifier.width(10.dp))
@@ -1091,7 +1087,7 @@ private fun NextSportCard(s: SportItem, now: Long, reminded: Boolean, showComp: 
     val soon = mins in 0..59
     FocusCard(modifier.width(NEXT_W).height(NEXT_H), scale = Tv.scaleWide, restoreKey = "sp:$row:" + s.key, label = "$title, $day ${hhmm(s.p.start)} on ${s.c.name}", onLongClick = onClick, onClick = onClick) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface2, Tv.surface)))) {
-            Column(Modifier.fillMaxSize().padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 12.dp)) {
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.Bottom) {
                     if (!soon) Text("$day ", fontSize = Tv.label, color = Tv.text2, fontWeight = FontWeight.Medium, maxLines = 1)
                     Text(hhmm(s.p.start), fontSize = Tv.body, color = Tv.text, fontWeight = FontWeight.Bold, maxLines = 1)
@@ -1162,10 +1158,10 @@ private fun importance(it: SportItem) = importance(it.p.title, it.comp)
 
 // ---------- real fixtures: cards ----------
 
-private val FX_LIVE_W = 320.dp
-private val FX_LIVE_H = 140.dp
-private val FX_NEXT_W = 300.dp
-private val FX_NEXT_H = 124.dp
+private val FX_LIVE_W = LIVE_W
+private val FX_LIVE_H = LIVE_H
+private val FX_NEXT_W = NEXT_W
+private val FX_NEXT_H = NEXT_H
 /** Crests: one size per card kind, in a fixed box (a missing crest keeps the names lined up). */
 private val CREST_LIVE = 28.dp
 private val CREST_NEXT = 24.dp
@@ -1186,7 +1182,7 @@ private fun Crest(t: FxTeam?, size: Dp) {
 @Composable
 private fun CompTile(f: Fixture, size: Dp) {
     Box(Modifier.size(size).clip(Tv.shapeS).background(Tv.surface3), contentAlignment = Alignment.Center) {
-        Text(when (f.sport) { "f1" -> "F1"; "ufc" -> "UFC"; "tennis" -> f.comp.take(3); else -> f.comp.take(2) }, fontSize = if (f.sport == "tennis") 10.sp else Tv.micro, fontWeight = FontWeight.Bold, color = Tv.text2, maxLines = 1)
+        Text(when (f.sport) { "f1" -> "F1"; "ufc" -> "UFC"; "tennis" -> f.comp.take(3); else -> f.comp.take(2) }, fontSize = Tv.micro, fontWeight = FontWeight.Bold, color = Tv.text2, maxLines = 1)
     }
 }
 
@@ -1290,20 +1286,22 @@ private fun FxLiveCard(it: SportsHub.FxItem, now: Long, known: Boolean, modifier
     val clock = when { f == null -> "until ${hhmm(it.p?.end ?: now)}"; f.status == "live" -> if (hide) "Live" else f.minute ?: "Live"; else -> "Starting" }
     val where = whereText(it, known)
     val off = it.c == null && known
+    // F1 / tennis on now fill the card with their running order, so the channel moves up beside the clock.
+    val dense = f != null && f.home == null && !hide && ((f.sport == "f1" && f.order.isNotEmpty()) || (f.sport == "tennis" && f.matches.any { m -> m.status == "live" }))
     val score = if (hide) "" else f?.home?.score?.let { h -> f.away?.score?.let { a -> " $h–$a" } }.orEmpty()
     FocusCard(modifier.width(FX_LIVE_W).height(FX_LIVE_H), scale = Tv.scaleWide, restoreKey = "sp:fxl:" + it.key,
         label = "${it.title}$score, $clock, ${it.comp.orEmpty()}, ${where.orEmpty()}", onLongClick = onLong, onClick = onClick) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface)))) {
-            Column(Modifier.fillMaxSize().alpha(if (off) .55f else 1f).padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 14.dp)) {
+            Column(Modifier.fillMaxSize().alpha(if (off) .55f else 1f).padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     LiveDot(); Spacer(Modifier.width(8.dp))
                     Text(clock, fontSize = Tv.label, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 1)
-                    Text("  ·  " + (it.comp ?: ""), Modifier.weight(1f), fontSize = Tv.label, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("  ·  " + ((if (dense) where?.removePrefix("On ") else null) ?: it.comp ?: ""), Modifier.weight(1f), fontSize = Tv.label, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(if (dense) 8.dp else 10.dp))
                 FixtureLines(it, live = true, crest = CREST_LIVE, big = true)
                 Spacer(Modifier.weight(1f))
-                if (where != null) Text(where, fontSize = Tv.label, color = if (it.c != null) Tv.text2 else Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (where != null && !dense) Text(where, fontSize = Tv.label, color = if (it.c != null) Tv.text2 else Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             val p = it.p
             val prog = if (f != null) (now - f.start).toFloat() / (f.end - f.start) else if (p != null) (now - p.start).toFloat() / (p.end - p.start) else null
@@ -1319,11 +1317,11 @@ private fun FxNextCard(it: SportsHub.FxItem, now: Long, known: Boolean, reminded
     val soon = mins in 0..59
     val where = whereText(it, known)
     val off = it.c == null && known
-    val meta = listOfNotNull(listOfNotNull(it.comp, it.f?.round?.takeIf { r -> r.isNotBlank() }).joinToString(" · ").ifBlank { null }, where).joinToString("  ·  ")
+    val meta = listOfNotNull(listOfNotNull(it.comp, it.f?.round?.takeIf { r -> r.isNotBlank() }).joinToString(" · ").ifBlank { null }, where?.removePrefix("On ")).joinToString("  ·  ")
     FocusCard(modifier.width(FX_NEXT_W).height(FX_NEXT_H), scale = Tv.scaleWide, restoreKey = "sp:fx:$row:" + it.key,
         label = "${it.title}, ${dayWord(it.start, now)} ${hhmm(it.start)}, $meta", onLongClick = onClick, onClick = onClick) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface2, Tv.surface)))) {
-            Column(Modifier.fillMaxSize().alpha(if (off) .55f else 1f).padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 12.dp)) {
+            Column(Modifier.fillMaxSize().alpha(if (off) .55f else 1f).padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(hhmm(it.start), fontSize = Tv.body, color = Tv.text, fontWeight = FontWeight.Bold, maxLines = 1)
                     if (soon) Text("  in ${mins.coerceAtLeast(1)} min", fontSize = Tv.label, color = Tv.star, fontWeight = FontWeight.Medium, maxLines = 1)
@@ -1352,11 +1350,11 @@ private fun FxTeamCard(team: String, it: SportsHub.FxItem, now: Long, known: Boo
     val boutOn = if (bout != null && f.sport == "tennis") bout.status == "live" else on
     val whenText = if (boutOn) (if (f.status == "live" && f.home != null && !Repo.hideScores) "${f.minute ?: "Live"} · ${f.home.score ?: 0}–${f.away?.score ?: 0}" else "Live now") else "${dayWord(at, now)} ${hhmm(at)}"
     val where = whereText(it, known)
-    FocusCard(modifier.width(FX_NEXT_W).height(NEXT_H), scale = Tv.scaleWide, restoreKey = "sp:team:" + team.lowercase(),
+    FocusCard(modifier.width(FX_NEXT_W).height(TEAM_H), scale = Tv.scaleWide, restoreKey = "sp:team:" + team.lowercase(),
         label = "$team: ${it.title}, $whenText${where?.let { w -> ", $w" } ?: ""}", onLongClick = onLong, onClick = onClick) {
         Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Tv.surface3, Tv.surface)))) {
             // The crest beside the team and its match (both lines centred on it), then when / where along the bottom.
-            Column(Modifier.fillMaxSize().padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp)) {
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (mine != null) Crest(mine, 40.dp) else if (f.home == null) CompTile(f, 40.dp) else Box(Modifier.size(40.dp))
                     Spacer(Modifier.width(12.dp))

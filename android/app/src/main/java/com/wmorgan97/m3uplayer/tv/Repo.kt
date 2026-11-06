@@ -422,8 +422,19 @@ object Repo {
     fun cachedAvatarRows(): List<Pair<String, List<String>>> = parseAvatarRows(prefs.getString("avatarRows", null))
     suspend fun avatarRows(): List<Pair<String, List<String>>> = withContext(Dispatchers.IO) {
         val raw = http(api("avatars"))
-        parseAvatarRows(raw).also { prefs.edit().putString("avatarRows", raw).apply() }
+        parseAvatarRows(raw).also { prefs.edit().putString("avatarRows", raw).apply(); warmAvatars(it.flatMap { r -> r.second }) }
     }
+    /** Every picture the picker and "Who's watching?" can show, fetched into the picture cache ahead of time (~35
+     *  small pictures), so opening the picker shows them at once instead of loading each one then. */
+    private val warmed = java.util.Collections.synchronizedSet(HashSet<String>())
+    fun warmAvatars(urls: List<String>) {
+        val l = coil.Coil.imageLoader(app)
+        for (u in urls + profiles().map { it.avatar }.filter { it.isNotEmpty() }) for (w in intArrayOf(400, 120)) {
+            val full = avatarUrl(u, w)
+            if (warmed.add(full)) l.enqueue(coil.request.ImageRequest.Builder(app).data(full).build())
+        }
+    }
+    @Volatile private var avatarsWarmed = false
     private fun parseAvatarRows(raw: String?): List<Pair<String, List<String>>> = runCatching {
         val a = org.json.JSONArray(raw ?: return emptyList())
         (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let { r ->
@@ -481,6 +492,7 @@ object Repo {
         adoptWatchLater(d)
         adoptPrefs(d)
         version++
+        if (!avatarsWarmed) { avatarsWarmed = true; runCatching { avatarRows() } }   // once per start: the picker then opens at once
         syncFile().writeText(d.toString())
         d
     }

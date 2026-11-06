@@ -67,6 +67,17 @@ import org.json.JSONObject
 
 // ---------- Details ----------
 
+/** Focus keeps the page where it is while the focused item is already comfortably in the top half (the header and its
+ *  buttons sit still, nothing slides under the top edge); items further down settle just above the middle, as before. */
+private val DetailsScroll: androidx.compose.foundation.gestures.BringIntoViewSpec = object : androidx.compose.foundation.gestures.BringIntoViewSpec {
+    @Suppress("OVERRIDE_DEPRECATION") override val scrollAnimationSpec: androidx.compose.animation.core.AnimationSpec<Float> = Tv.rowScrollSpring
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = when {
+        size >= containerSize -> offset
+        offset + size <= containerSize * 0.6f -> if (offset < 0f) offset else 0f   // already in the top part: stay put (only scroll to bring something up from above)
+        else -> offset + size / 2 - containerSize * 0.45f
+    }
+}
+
 @Composable
 fun DetailsScreen(act: TvActivity, v: Vod) {
     var infoDone by remember { mutableStateOf(false) }
@@ -91,8 +102,9 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
     val playFocus = remember { FocusRequester() }
     val seasonFocus = remember { FocusRequester() }    // always on the chip of the season shown
     val firstEpFocus = remember { FocusRequester() }   // the first episode of the season shown
-    LaunchedEffect(eps) { delay(120); runCatching { playFocus.requestFocus() } }
     val listState = rememberLazyListState()
+    // Focus the Play button, then make sure the page sits at its true top (focusing can nudge it up by the top padding).
+    LaunchedEffect(eps) { delay(120); runCatching { playFocus.requestFocus() }; delay(30); listState.scrollToItem(0) }
     val scope = rememberCoroutineScope()
     // Arriving: the header rises 8 dp and fades in over durMed (once; coming back from the player it's simply there).
     var entered by rememberSaveable(v.id) { mutableStateOf(false) }
@@ -116,12 +128,12 @@ fun DetailsScreen(act: TvActivity, v: Vod) {
         // The spotlight's backdrop (right-aligned, fading into the page): the art you opened it from carries over,
         // already in memory, and TMDB's arrives with a short cross-fade when the row didn't know it.
         CinematicBackdrop(backdrop, 500, Modifier.align(Alignment.TopEnd).fillMaxWidth(.74f).aspectRatio(16f / 9f))
-        CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides CenteredBringIntoView) {
+        CompositionLocalProvider(androidx.compose.foundation.gestures.LocalBringIntoViewSpec provides DetailsScroll) {
         // Overscan-safe on all sides: 48dp left/right, 36dp top, 40dp bottom (5% of 960x540dp is 48 x 27).
         LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(start = Tv.margin, end = Tv.margin, top = 36.dp, bottom = 40.dp)) {
             item(key = "head") {
                 // Back on the buttons: the page returns to the top (the episodes slide the header away, Apple TV style).
-                Row(Modifier.graphicsLayer { alpha = enter.value; translationY = (1f - enter.value) * 8.dp.toPx() }.onFocusChanged { if (it.hasFocus && listState.firstVisibleItemIndex > 0) scope.launch { listState.animateScrollToItem(0) } }) {
+                Row(Modifier.graphicsLayer { alpha = enter.value; translationY = (1f - enter.value) * 8.dp.toPx() }.onFocusChanged { if (it.hasFocus && (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0)) scope.launch { listState.animateScrollToItem(0) } }) {
                     Picture(Repo.img(v.poster, 300), Modifier.width(150.dp).aspectRatio(2f / 3f).clip(Tv.shape)) {
                         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Tv.surface3, Tv.surface))), contentAlignment = Alignment.Center) {
                             Text(v.title, Modifier.padding(10.dp), color = Tv.text2, fontSize = Tv.caption, fontWeight = FontWeight.SemiBold, maxLines = 4, overflow = TextOverflow.Ellipsis)

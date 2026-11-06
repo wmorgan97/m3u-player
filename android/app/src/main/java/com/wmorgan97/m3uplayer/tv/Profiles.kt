@@ -165,7 +165,7 @@ fun PicturePicker(p0: Profile, onDone: () -> Unit) {
                     Spacer(Modifier.width(Tv.s5))
                     Column {
                         Text(if (p.named) "Picture for ${p.name}" else "Your picture", fontSize = 28.sp, fontWeight = FontWeight.SemiBold, color = Tv.text)
-                        Text("To use a photo, choose it on your iPhone: Settings, Profiles.", fontSize = Tv.body, color = Tv.muted)
+                        Text("Pick one below. Your own photos can be added from the app on your phone.", fontSize = Tv.body, color = Tv.muted)
                     }
                 }
             }

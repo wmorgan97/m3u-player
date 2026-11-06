@@ -191,14 +191,13 @@ fun Modifier.freshOkOnly(): Modifier {
     }
 }
 
-/** Section heading above a row: a title, an optional quiet caption, and a count on the right. */
+/** Section heading above a row: a title, its count as a small muted figure right after it, then an optional quiet caption. */
 @Composable
-fun RowTitle(text: String, extra: String? = null, count: Int? = null) = traced("RowTitle") {
-    Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, top = Tv.rowGap, bottom = 12.dp), verticalAlignment = Alignment.Bottom) {
+fun RowTitle(text: String, extra: String? = null, count: Int? = null, top: Dp = Tv.rowGap) = traced("RowTitle") {
+    Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, top = top, bottom = 12.dp), verticalAlignment = Alignment.Bottom) {
         Text(text, fontSize = Tv.rowTitle, fontWeight = Tv.wTitle, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-        if (extra != null) { Spacer(Modifier.width(10.dp)); Text(extra, fontSize = Tv.label, color = Tv.muted, maxLines = 1, modifier = Modifier.padding(bottom = 2.dp)) }
-        Spacer(Modifier.weight(1f))
-        if (count != null) Text("$count", fontSize = Tv.label, color = Tv.muted, modifier = Modifier.padding(bottom = 2.dp))
+        if (count != null) Text("$count", fontSize = Tv.label, color = Tv.muted, maxLines = 1, modifier = Modifier.padding(start = 10.dp, bottom = 2.dp))
+        if (extra != null) Text(extra, fontSize = Tv.label, color = Tv.muted, maxLines = 1, modifier = Modifier.padding(start = 10.dp, bottom = 2.dp))
     }
 }
 
@@ -257,8 +256,8 @@ fun SpotRow(title: String, modifier: Modifier = Modifier, extra: String? = null,
     Column(modifier) {
         Row(Modifier.fillMaxWidth().height(SPOT_ROW_HEAD).padding(start = Tv.margin, end = Tv.margin), verticalAlignment = Alignment.Top) {
             Text(title, fontSize = Tv.rowTitle, lineHeight = Tv.rowTitleLine, fontWeight = Tv.wTitle, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            if (count != null) Text("$count", fontSize = Tv.label, color = Tv.muted, maxLines = 1, modifier = Modifier.padding(start = 10.dp, top = 4.dp))
             if (extra != null) Text(extra, fontSize = Tv.label, color = Tv.muted, maxLines = 1, modifier = Modifier.padding(start = 10.dp, top = 4.dp))
-            if (count != null) { Spacer(Modifier.weight(1f)); Text("$count", fontSize = Tv.label, color = Tv.muted, maxLines = 1, modifier = Modifier.padding(top = 4.dp)) }
         }
         content()
     }
