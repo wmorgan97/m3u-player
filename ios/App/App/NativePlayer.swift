@@ -3,7 +3,7 @@ import AVKit
 import Capacitor
 import UserNotifications
 import WebKit
-import VLCKitSPM
+import VLCKit
 import MediaPlayer
 
 /// Hosts the web app and registers the app's own native plugin.
@@ -328,8 +328,12 @@ public class NativePlayerPlugin: CAPPlugin, CAPBridgedPlugin {
             if let open = self.vlcController, open.parent != nil {
                 // The player's own next-episode countdown ran out while it was the mini player: keep it small.
                 let stayMini = open.isMini && open.selfStepPending
-                open.load(item)
-                if !stayMini { open.expand() }   // picked something while it was the mini player: back to full screen
+                // Picked while the picture floats in PiP: bring it back into the player first, then swap the stream
+                // (swapped while still in PiP, the sound played but the picture stayed in the closing PiP window).
+                open.leavePictureInPicture {
+                    open.load(item)
+                    if !stayMini { open.expand() }   // picked something while it was the mini player: back to full screen
+                }
                 call.resolve()
                 return
             }
@@ -449,8 +453,18 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         var listNowEnd: [Double] = []
     }
 
-    private let player = VLCMediaPlayer()
-    private let videoView = UIView()
+    /// VLCKit 4 calls its delegate on its own event thread by default; the "legacy" setting posts events to the main
+    /// queue as VLCKit 3 did, which the whole player relies on. Set once, before the first player exists.
+    private static let vlcEventsOnMain: Void = {
+        VLCLibrary.sharedEventsConfiguration = VLCEventsLegacyConfiguration()
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-testVLCLog") {   // test hook: libVLC's own log in the console
+            let l = VLCConsoleLogger(); l.level = .debug; VLCLibrary.shared().loggers = [l]
+        }
+        #endif
+    }()
+    private let player: VLCMediaPlayer = { _ = VLCPlayerController.vlcEventsOnMain; return VLCMediaPlayer() }()
+    private let videoView = PiPVideoView()   // VLC draws here; with VLCKit 4 it is also what Picture in Picture shows
     private let overlay = UIView()
     private let gradient = CAGradientLayer()
     private let titleLabel = UILabel()
@@ -564,6 +578,16 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     private let liveButton = UIButton(type: .custom)        // "● LIVE": red dot at live; tap to go back when behind
     private let startOverButton = UIButton(type: .custom)   // "Start over": the current programme from its start
     private var guide: GuidePanel?
+    // Picture in Picture (VLCKit 4): VLC hands over its PiP window once a picture is up.
+    private let pipButton = UIButton(type: .system)
+    private var pip: VLCPictureInPictureWindowControlling?
+    private var pipPossibleObs: NSKeyValueObservation?
+    private let pipDelegate = PiPDelegateProxy()
+    private var pipActive = false
+    private var pipHidden = false          // the full-screen player is out of the way while PiP plays (button start)
+    private var pipRestoring = false       // coming back to the full player (restore button / app reopened), not closed
+    private var pipFromBackground = false  // started by itself as the app left: reopening the app ends it
+    private var pipLandscape = false
     /// Runs a line of the web app's JavaScript and hands back its value (fresh guide rows, catch-up links).
     var askJS: ((String, @escaping (Any?) -> Void) -> Void)?
     private var uptime: TimeInterval { ProcessInfo.processInfo.systemUptime }
@@ -594,8 +618,8 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     }
     private var root: PlayerRootView? { view as? PlayerRootView }
 
-    override var prefersStatusBarHidden: Bool { !isMini }
-    override var prefersHomeIndicatorAutoHidden: Bool { !isMini }
+    override var prefersStatusBarHidden: Bool { !isMini && !pipHidden }
+    override var prefersHomeIndicatorAutoHidden: Bool { !isMini && !pipHidden }
     // Rotate button: forces landscape even with the phone's rotation lock on (like VLC), and back to portrait.
     private var forcedLandscape = false
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask { forcedLandscape ? .landscape : .allButUpsideDown }
@@ -625,6 +649,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         videoView.backgroundColor = .black
         view.addSubview(videoView)
+        setUpPictureInPicture()   // before the drawable is handed over: VLC asks it for the PiP media controls
         player.drawable = videoView
         player.delegate = self
         tuningCard.frame = view.bounds
@@ -933,7 +958,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
 
     /// Opens a stream in VLC (a fresh start: the session clock, pause and first-picture state reset).
     private func openMedia(_ url: URL, caching: Int, start: Double = 0) {
-        let media = VLCMedia(url: url)
+        guard let media = VLCMedia(url: url) else { return }
         var c = caching
         #if DEBUG
         let a = ProcessInfo.processInfo.arguments
@@ -945,6 +970,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         if let referrer = item.headers["Referer"] { media.addOption(":http-referrer=\(referrer)") }
         if start > 1 { media.addOption(":start-time=\(Int(start))") }
         if item.headers["X-Test-Mute"] != nil { media.addOption(":no-audio") }   // test hook only: silent
+        // VLCKit 4 ignores play() on a new media while the old one is held paused (a channel change): stop it first.
+        if player.media != nil && player.state != .stopped { player.stop() }
+        sawPlaying = false   // VLCKit 4 has no "ended" state: a stop after this media has played is its end
         loadStartedAt = uptime; firstPicture = false; pausedAt = nil; pausedTotal = 0; userPaused = false; lastTimeChange = uptime
         busy(true)
         player.media = media
@@ -1093,11 +1121,17 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         updateLiveBar()
     }
 
-    func mediaPlayerStateChanged(_ aNotification: Notification) {
-        switch player.state {
-        case .opening, .buffering:
+    /// This media got as far as playing (VLCKit 4 reports the end of a stream as "stopped", like a stop of ours).
+    private var sawPlaying = false
+    func mediaPlayerStateChanged(_ newState: VLCMediaPlayerState) {
+        #if DEBUG
+        NSLog("M3UDBG state %@", VLCMediaPlayerStateToString(newState))
+        #endif
+        switch newState {
+        case .opening:
             if !player.isPlaying { busy(true) }
         case .playing:
+            sawPlaying = true
             ended = false   // played again after the end
             applyAspect()
             if isMini { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.layoutInParent() } }   // next episode on the mini card: fit its picture
@@ -1107,9 +1141,12 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             spinner.stopAnimating()
             statusLabel.text = ""
             updateNowPlaying()
+            pipPlaybackChanged()
         case .paused:
             updateNowPlaying()
+            pipPlaybackChanged()
         case .error:
+            sawPlaying = false
             // The local recording couldn't be played: once, straight from the provider instead.
             if item.live && feed == .buffered && !firstPicture && !triedDirect {
                 buffer?.stop(); buffer = nil
@@ -1120,7 +1157,9 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             statusLabel.text = "This stream couldn't be played"
             showOverlay(keep: true)
             onEvent(["type": "error", "message": "This stream couldn't be played"])
-        case .ended:
+        case .stopped:
+            guard sawPlaying, !finished else { return }
+            sawPlaying = false
             if item.live {   // the archive ran up to now (or a feed dropped): back to live
                 if feed == .catchup || feed == .buffered { goLive() }
                 return
@@ -1173,6 +1212,10 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             b.layer.borderColor = UIColor(white: 1, alpha: 0.14).cgColor
         }
         style(closeButton, "xmark")
+        style(pipButton, "pip.enter")
+        pipButton.accessibilityLabel = "Picture in Picture"
+        pipButton.isHidden = true   // until iOS says PiP is possible for this picture
+        pipButton.addTarget(self, action: #selector(pipTapped), for: .touchUpInside)
         style(rotateButton, UIImage(systemName: "rectangle.landscape.rotate") != nil ? "rectangle.landscape.rotate" : "rotate.right")
         rotateButton.accessibilityLabel = "Rotate"
         rotateButton.addTarget(self, action: #selector(rotateTapped), for: .touchUpInside)
@@ -1252,7 +1295,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         let gap = UIView()   // the title gets the room first; the gap only takes what's left
         gap.setContentHuggingPriority(.init(1), for: .horizontal)
         gap.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        let top = UIStackView(arrangedSubviews: [titles, gap, infoButton, audioButton, subsButton, rotateButton, closeButton])
+        let top = UIStackView(arrangedSubviews: [titles, gap, infoButton, audioButton, subsButton, pipButton, rotateButton, closeButton])
         top.alignment = .center
         top.spacing = 4
         middle.addArrangedSubview(prevButton); middle.addArrangedSubview(backButton); middle.addArrangedSubview(playButton)
@@ -1813,7 +1856,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             player.play()
         }
         updateLiveBar()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.updateNowPlaying() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.updateNowPlaying(); self?.pipPlaybackChanged() }
     }
 
     // MARK: mini guide
@@ -2104,10 +2147,8 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
     }
     /// What's actually playing, like VLC's media info: codec, size, frame rate, bit depth, audio format, bitrate.
     private func streamInfo() -> String {
-        let tracks = (player.media?.tracksInformation as? [[String: Any]]) ?? []
-        func codec(_ t: [String: Any], _ type: String) -> String {
-            guard let n = t[VLCMediaTracksInformationCodec] as? NSNumber else { return "?" }
-            let long = VLCMedia.codecName(forFourCC: n.uint32Value, trackType: type), u = long.uppercased()
+        func codec(_ t: VLCMedia.Track) -> String {
+            let long = t.codecName(), u = long.uppercased()
             // VLC's names are long ("H264 - MPEG-4 AVC (part 10)"): the everyday name instead.
             let names: [(String, String)] = [("HEVC", "HEVC (H.265)"), ("H265", "HEVC (H.265)"), ("H264", "H.264"), ("AV1", "AV1"), ("VP9", "VP9"),
                 ("MPEG-2", "MPEG-2"), ("MPEG-1/2 VIDEO", "MPEG-2"), ("E-AC-3", "Dolby Digital Plus"), ("EAC3", "Dolby Digital Plus"), ("A52", "Dolby Digital"),
@@ -2115,27 +2156,27 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
                 ("MPEG AUDIO", "MP2 / MP3"), ("MP3", "MP3")]
             return names.first { u.contains($0.0) }?.1 ?? long
         }
-        func num(_ t: [String: Any], _ k: String) -> Double { (t[k] as? NSNumber)?.doubleValue ?? 0 }
         var lines: [String] = []
-        if let v = tracks.first(where: { ($0[VLCMediaTracksInformationType] as? String) == VLCMediaTracksInformationTypeVideo }) {
-            let name = codec(v, VLCMediaTracksInformationTypeVideo)
+        let videos = player.videoTracks
+        if let v = videos.first(where: { $0.isSelected }) ?? videos.first {
+            let name = codec(v)
             var bits = [name]
-            let w = Int(num(v, VLCMediaTracksInformationVideoWidth)), h = Int(num(v, VLCMediaTracksInformationVideoHeight))
+            let w = Int(v.video?.width ?? 0), h = Int(v.video?.height ?? 0)
             let size = player.videoSize
             if w > 0 && h > 0 { bits.append("\(w)×\(h)") } else if size.width > 0 { bits.append("\(Int(size.width))×\(Int(size.height))") }
-            let fr = num(v, VLCMediaTracksInformationFrameRate), den = num(v, VLCMediaTracksInformationFrameRateDenominator)
+            let fr = Double(v.video?.frameRate ?? 0), den = Double(v.video?.frameRateDenominator ?? 0)
             if fr > 0 && den > 0 { bits.append(String(format: "%g fps", (fr / den * 100).rounded() / 100)) }
-            if num(v, VLCMediaTracksInformationCodecProfile) == 2 && (name.contains("HEVC") || name.contains("265")) { bits.append("10-bit") }
+            if v.profile == 2 && (name.contains("HEVC") || name.contains("265")) { bits.append("10-bit") }
             lines.append("Video: " + bits.joined(separator: " · "))
         }
-        let audio = tracks.filter { ($0[VLCMediaTracksInformationType] as? String) == VLCMediaTracksInformationTypeAudio }
-        if let a = audio.first(where: { Int32(num($0, VLCMediaTracksInformationId)) == player.currentAudioTrackIndex }) ?? audio.first {
-            var bits = [codec(a, VLCMediaTracksInformationTypeAudio)]
-            let ch = Int(num(a, VLCMediaTracksInformationAudioChannelsNumber))
+        let audio = player.audioTracks
+        if let a = audio.first(where: { $0.isSelected }) ?? audio.first {
+            var bits = [codec(a)]
+            let ch = Int(a.audio?.channelsNumber ?? 0)
             if ch > 0 { bits.append(ch == 1 ? "Mono" : ch == 2 ? "Stereo" : ch == 6 ? "5.1" : ch == 8 ? "7.1" : "\(ch) ch") }
-            let rate = num(a, VLCMediaTracksInformationAudioRate)
+            let rate = Double(a.audio?.rate ?? 0)
             if rate > 0 { bits.append(String(format: "%g kHz", rate / 1000)) }
-            if let lang = a[VLCMediaTracksInformationLanguage] as? String, !lang.isEmpty { bits.append(lang.uppercased()) }
+            if let lang = a.language, !lang.isEmpty { bits.append(lang.uppercased()) }
             lines.append("Audio: " + bits.joined(separator: " · "))
         }
         if let first = samples.first, let last = samples.last, last.t - first.t >= 2, last.bytes > first.bytes {
@@ -2356,14 +2397,12 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
             default: return (nil, nil)
             }
         }()
-        setVLCString(ratio) { self.player.videoAspectRatio = $0 }
-        setVLCString(crop) { self.player.videoCropGeometry = $0 }
-    }
-    /// VLC copies these strings when they're set, so a temporary C copy is freed straight after.
-    private func setVLCString(_ value: String?, _ assign: (UnsafeMutablePointer<CChar>?) -> Void) {
-        guard let value = value, let c = strdup(value) else { return assign(nil) }
-        assign(c)
-        free(c)
+        player.videoAspectRatio = ratio
+        let cut = crop.flatMap { c -> (UInt32, UInt32)? in
+            let p = c.split(separator: ":").compactMap { UInt32($0) }
+            return p.count == 2 && p[0] > 0 && p[1] > 0 ? (p[0], p[1]) : nil
+        }
+        player.setCropRatioWithNumerator(cut?.0 ?? 0, denominator: cut?.1 ?? 0)   // 0:0 = no crop
     }
 
     // Screen lock: hides every control and ignores taps and swipes (pocket, bed, kids); a touch shows one
@@ -2430,7 +2469,7 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         }
         // Seek by time (exact), not by VLC's 0-1 position, which jumps back to the start on some streamed files.
         let d = Double(player.media?.length.intValue ?? 0)
-        if d > 0 { player.time = VLCTime(int: Int32(Double(slider.value) * d)) } else { player.position = slider.value }
+        if d > 0 { player.time = VLCTime(int: Int32(Double(slider.value) * d)) } else { player.position = Double(slider.value) }
         scrubbing = false
         showOverlay()
     }
@@ -2447,17 +2486,19 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         if d > 0 { elapsedLabel.text = clock(Double(slider.value) * d) }
     }
 
-    @objc private func pickAudio() { pickTrack(title: "Audio", names: player.audioTrackNames, ids: player.audioTrackIndexes, current: player.currentAudioTrackIndex, source: audioButton, extra: ("Audio sync…", { [weak self] in self?.showSync(0) })) { [weak self] id in self?.player.currentAudioTrackIndex = id } }
+    @objc private func pickAudio() { pickTrack(title: "Audio", tracks: player.audioTracks, off: nil, source: audioButton, extra: ("Audio sync…", { [weak self] in self?.showSync(0) })) }
 
-    @objc private func pickSubtitles() { pickTrack(title: "Subtitles", names: player.videoSubTitlesNames, ids: player.videoSubTitlesIndexes, current: player.currentVideoSubTitleIndex, source: subsButton, extra: ("Subtitle sync…", { [weak self] in self?.showSync(1) })) { [weak self] id in self?.player.currentVideoSubTitleIndex = id } }
+    @objc private func pickSubtitles() { pickTrack(title: "Subtitles", tracks: player.textTracks, off: { [weak self] in self?.player.deselectAllTextTracks() }, source: subsButton, extra: ("Subtitle sync…", { [weak self] in self?.showSync(1) })) }
 
-    private func pickTrack(title: String, names: [Any]?, ids: [Any]?, current: Int32, source: UIView, extra: (String, () -> Void)? = nil, choose: @escaping (Int32) -> Void) {
-        let labels = (names ?? []).map { "\($0)" }
-        let numbers = (ids ?? []).compactMap { ($0 as? NSNumber)?.int32Value }
-        let sheet = UIAlertController(title: title, message: labels.isEmpty ? "None in this stream" : nil, preferredStyle: .actionSheet)
-        for (i, label) in labels.enumerated() where i < numbers.count {
-            let id = numbers[i]
-            sheet.addAction(UIAlertAction(title: (id == current ? "✓ " : "") + label, style: .default) { _ in choose(id) })
+    /// A track sheet (VLCKit 4 tracks: each knows its name and whether it's on). `off` adds "Off" (subtitles).
+    private func pickTrack(title: String, tracks: [VLCMediaPlayer.Track], off: (() -> Void)?, source: UIView, extra: (String, () -> Void)? = nil) {
+        let sheet = UIAlertController(title: title, message: tracks.isEmpty ? "None in this stream" : nil, preferredStyle: .actionSheet)
+        if let off = off, !tracks.isEmpty {
+            let none = !tracks.contains { $0.isSelected }
+            sheet.addAction(UIAlertAction(title: (none ? "✓ " : "") + "Off", style: .default) { _ in off() })
+        }
+        for t in tracks {
+            sheet.addAction(UIAlertAction(title: (t.isSelected ? "✓ " : "") + t.trackName, style: .default) { _ in t.isSelectedExclusively = true })
         }
         if let (label, action) = extra { sheet.addAction(UIAlertAction(title: label, style: .default) { _ in action() }) }
         sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
@@ -2465,6 +2506,113 @@ final class VLCPlayerController: UIViewController, VLCMediaPlayerDelegate {
         sheet.popoverPresentationController?.sourceRect = source.bounds
         present(sheet, animated: true)
         showOverlay(keep: true)
+    }
+
+    // MARK: Picture in Picture
+    private func setUpPictureInPicture() {
+        videoView.media = PiPMedia(owner: self)
+        videoView.onReady = { [weak self] c in self?.pipReady(c) }
+        pipDelegate.onRestore = { [weak self] in self?.pipRestoring = true }
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(appBecameActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+    /// VLC's PiP window for this picture (again for each new picture). Its AVPictureInPictureController is VLC's own:
+    /// it's asked to start by itself when the app goes to the background while playing, and its delegate is wrapped
+    /// so a restore (back to the app) can be told apart from closing PiP.
+    private func pipReady(_ c: VLCPictureInPictureWindowControlling) {
+        guard !finished else { return }
+        pip = c
+        c.stateChangeEventHandler = { [weak self] started in DispatchQueue.main.async { self?.pipChanged(started) } }
+        let o = c as AnyObject
+        if o.responds(to: NSSelectorFromString("avPipController")), let av = o.value(forKey: "avPipController") as? AVPictureInPictureController {
+            av.canStartPictureInPictureAutomaticallyFromInline = true
+            if av.delegate !== pipDelegate { pipDelegate.inner = av.delegate; av.delegate = pipDelegate }
+            pipPossibleObs = av.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] av, _ in
+                let possible = av.isPictureInPicturePossible
+                DispatchQueue.main.async { self?.pipButton.isHidden = !possible }
+            }
+        } else {
+            pipButton.isHidden = !AVPictureInPictureController.isPictureInPictureSupported()
+        }
+        NSLog("M3UPIP ready (auto=%d)", (o.value(forKey: "avPipController") as? AVPictureInPictureController)?.canStartPictureInPictureAutomaticallyFromInline == true ? 1 : 0)
+    }
+    @objc private func pipTapped() {
+        guard let pip = pip else { return }
+        hideOverlay()
+        pip.startPictureInPicture()
+    }
+    /// The play / pause state changed (our controls, the lock screen): PiP's own button follows.
+    func pipPlaybackChanged() { pip?.invalidatePlaybackState() }
+    private func pipChanged(_ started: Bool) {
+        NSLog("M3UPIP %@ app=%d restoring=%d", started ? "started" : "stopped", UIApplication.shared.applicationState.rawValue, pipRestoring ? 1 : 0)
+        if started {
+            guard !pipActive else { return }
+            pipActive = true; pipRestoring = false
+            pipFromBackground = UIApplication.shared.applicationState != .active
+            if !pipFromBackground && !isMini {
+                // Started from the button: the app behind is free to use while the picture floats.
+                pipHidden = true
+                pipLandscape = forcedLandscape
+                if forcedLandscape { setForcedLandscape(false) }
+                UIView.animate(withDuration: 0.2) { self.view.alpha = 0 } completion: { _ in if self.pipHidden { self.view.isHidden = true } }
+                hostAppearanceChanged()
+            }
+            return
+        }
+        guard pipActive else { return }
+        pipActive = false
+        let restore = pipRestoring
+        pipRestoring = false
+        if !restore && !finished {
+            // PiP's own close button: stop, as the player's close does.
+            NSLog("M3UPIP closed: stopping")
+            pipHidden = false
+            return finish()
+        }
+        if pipHidden {
+            pipHidden = false
+            view.isHidden = false
+            if isMini { expand() }
+            if pipLandscape { pipLandscape = false; setForcedLandscape(true) }
+            UIView.animate(withDuration: 0.2) { self.view.alpha = 1 }
+            hostAppearanceChanged()
+        } else if isMini { expand() }
+        showOverlay()
+        if let f = afterPiP { afterPiP = nil; DispatchQueue.main.async(execute: f) }
+    }
+    /// Ends PiP (if on) by restoring the picture into the player, then runs [then] once it's back on screen.
+    private var afterPiP: (() -> Void)?
+    func leavePictureInPicture(then: @escaping () -> Void) {
+        guard pipActive else { return then() }
+        afterPiP = then
+        pipRestoring = true
+        pip?.stopPictureInPicture()
+        // Fallback: if PiP doesn't report stopping, carry on anyway.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self = self, let f = self.afterPiP else { return }
+            self.afterPiP = nil; self.pipActive = false; self.pipHidden = false
+            self.view.isHidden = false; self.view.alpha = 1; f()
+        }
+    }
+    /// Back in the app after PiP started by itself as it left: the picture comes back into the player.
+    @objc private func appBecameActive() {
+        guard pipActive, pipFromBackground, !finished else { return }
+        pipRestoring = true
+        pip?.stopPictureInPicture()
+    }
+    // What PiP's own controls read and do (see PiPMedia). Live: no timeline (iOS shows it as live).
+    fileprivate var pipLength: Int64 { item.live ? 0 : Int64(player.media?.length.intValue ?? 0) }
+    fileprivate var pipTime: Int64 { item.live ? 0 : Int64(player.time.intValue) }
+    fileprivate var pipSeekable: Bool { !item.live && player.isSeekable }
+    fileprivate var pipPlaying: Bool { isPlayingNow }
+    fileprivate func pipSetPlaying(_ on: Bool) { if on != isPlayingNow { setPaused(!on); setPlayIcon() } }
+    fileprivate func pipSeek(by ms: Int64, done: @escaping () -> Void) {
+        guard !item.live else { return done() }
+        let d = Int64(player.media?.length.intValue ?? 0)
+        var t = Int64(player.time.intValue) + ms
+        t = max(0, d > 0 ? min(t, d - 1000) : t)
+        player.time = VLCTime(int: Int32(t))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: done)
     }
 }
 
@@ -2726,5 +2874,61 @@ final class FillButton: UIButton {
         super.layoutSubviews()
         fill.frame = CGRect(x: 0, y: 0, width: bounds.width * min(1, max(0, progress)), height: bounds.height)
         sendSubviewToBack(fill)
+    }
+}
+
+// MARK: - Picture in Picture helpers
+
+/// VLC's drawing view. Conforming to VLCPictureInPictureDrawable is what makes VLCKit 4 draw through an
+/// AVSampleBufferDisplayLayer and hand back a PiP window once a picture is up.
+final class PiPVideoView: UIView, VLCPictureInPictureDrawable {
+    var media: PiPMedia?
+    var onReady: ((VLCPictureInPictureWindowControlling) -> Void)?
+    func mediaController() -> VLCPictureInPictureMediaControlling { media ?? PiPMedia(owner: nil) }
+    func pictureInPictureReady() -> ((VLCPictureInPictureWindowControlling?) -> Void)? {
+        return { [weak self] c in guard let c = c else { return }; DispatchQueue.main.async { self?.onReady?(c) } }
+    }
+}
+
+/// PiP's play / pause / skip and its timeline, answered by the player. VLC may ask from its own threads: reads go to
+/// the main thread (briefly), actions are posted there.
+final class PiPMedia: NSObject, VLCPictureInPictureMediaControlling {
+    private weak var owner: VLCPlayerController?
+    init(owner: VLCPlayerController?) { self.owner = owner }
+    private func read<T>(_ fallback: T, _ f: @escaping (VLCPlayerController) -> T) -> T {
+        if Thread.isMainThread { return owner.map(f) ?? fallback }
+        var v = fallback
+        DispatchQueue.main.sync { v = owner.map(f) ?? fallback }
+        return v
+    }
+    func play() { DispatchQueue.main.async { self.owner?.pipSetPlaying(true) } }
+    func pause() { DispatchQueue.main.async { self.owner?.pipSetPlaying(false) } }
+    func seek(by offset: Int64, completion: @escaping () -> Void) {
+        DispatchQueue.main.async { if let o = self.owner { o.pipSeek(by: offset, done: completion) } else { completion() } }
+    }
+    func mediaLength() -> Int64 { read(0) { $0.pipLength } }
+    func mediaTime() -> Int64 { read(0) { $0.pipTime } }
+    func isMediaSeekable() -> Bool { read(false) { $0.pipSeekable } }
+    func isMediaPlaying() -> Bool { read(false) { $0.pipPlaying } }
+}
+
+/// Sits in front of VLC's own AVPictureInPictureController delegate, passing everything on, to learn when PiP
+/// stops because you asked to go back to the app (restore) rather than closed it.
+final class PiPDelegateProxy: NSObject, AVPictureInPictureControllerDelegate {
+    weak var inner: AVPictureInPictureControllerDelegate?
+    var onRestore: (() -> Void)?
+    func pictureInPictureControllerWillStartPictureInPicture(_ c: AVPictureInPictureController) { inner?.pictureInPictureControllerWillStartPictureInPicture?(c) }
+    func pictureInPictureControllerDidStartPictureInPicture(_ c: AVPictureInPictureController) { inner?.pictureInPictureControllerDidStartPictureInPicture?(c) }
+    func pictureInPictureController(_ c: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
+        NSLog("M3UPIP failed to start: %@", "\(error)")
+        inner?.pictureInPictureController?(c, failedToStartPictureInPictureWithError: error)
+    }
+    func pictureInPictureControllerWillStopPictureInPicture(_ c: AVPictureInPictureController) { inner?.pictureInPictureControllerWillStopPictureInPicture?(c) }
+    func pictureInPictureControllerDidStopPictureInPicture(_ c: AVPictureInPictureController) { inner?.pictureInPictureControllerDidStopPictureInPicture?(c) }
+    func pictureInPictureController(_ c: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler done: @escaping (Bool) -> Void) {
+        onRestore?()
+        if let inner = inner, inner.responds(to: #selector(AVPictureInPictureControllerDelegate.pictureInPictureController(_:restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:))) {
+            inner.pictureInPictureController?(c, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler: done)
+        } else { done(true) }
     }
 }
