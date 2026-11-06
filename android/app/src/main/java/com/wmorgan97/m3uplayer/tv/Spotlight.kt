@@ -48,9 +48,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 // Cost on the Shield: moving the highlight writes one snapshot value that only a debounced collector reads, so card
 // focus never recomposes the page; the spotlight itself recomposes once per settled title.
 
-val SPOT_H = 226.dp            // spotlight height: kicker, title, tags, plot, buttons; leaves one full row of standard posters below
+val SPOT_H = 240.dp            // spotlight height: kicker, title, tags, plot, buttons; leaves one full row of standard posters below
 val SPOT_ROW_HEAD = 34.dp      // row title block
 val SPOT_ROW_TOP = 8.dp        // room for the picked card to grow
+private val HERO_TITLE = 36.sp
+private val HERO_TITLE_LINE = 42.sp
 private const val PREVIEW_DELAY = 320L // ms the highlight must rest on a card before the spotlight follows it
 
 /** What the spotlight shows. */
@@ -197,7 +199,7 @@ fun SpotlightHeader(act: TvActivity, state: SpotlightState, slides: List<Vod>, r
             val index = state.index.coerceIn(0, slides.size - 1)
             val v = slides[index]
             val alpha by animateFloatAsState(if (heroMode) 1f else 0f, tween(Tv.durShort + 50, easing = Tv.easeMove), label = "buttons")
-            HeroButtons(act, v, refresh, playFocus, Modifier.align(Alignment.BottomStart).padding(start = Tv.margin, bottom = 10.dp).graphicsLayer { this.alpha = alpha }
+            HeroButtons(act, v, refresh, playFocus, Modifier.align(Alignment.BottomStart).padding(start = Tv.margin, bottom = 12.dp).graphicsLayer { this.alpha = alpha }
                 .onFocusChanged { onHeroFocus(it.hasFocus); if (it.hasFocus) state.target.value = SpotTarget.Hero },
                 onStep = { d -> state.index = (index + d + slides.size) % slides.size; state.touchedAt = System.currentTimeMillis() },
                 canStepBack = index > 0)
@@ -251,13 +253,13 @@ private fun SpotText(s: Spot, heroMode: Boolean, extras: SpotExtras?) {
         val fade = remember { Animatable(0f) }
         LaunchedEffect(Unit) { fade.animateTo(1f, tween(Tv.durMed, easing = Tv.easeMove)) }
         var titleLines by remember { mutableIntStateOf(1) }
-        Column(Modifier.graphicsLayer { alpha = fade.value }.padding(start = Tv.margin, top = 22.dp).fillMaxWidth(.64f)) {
+        Column(Modifier.graphicsLayer { alpha = fade.value }.padding(start = Tv.margin, top = 18.dp).fillMaxWidth(.64f)) {
             Text(sp.kicker, fontSize = Tv.label, color = if (sp.accent) Tv.accent else Tv.muted, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, maxLines = 1)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
             // The title logo when there is one (it counts as a two-line title for the plot below).
             val logo = extras?.logo
-            if (logo != null) TitleLogo(logo, sp.title, 330.dp, 60.dp) { Text(sp.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine) }
-            else Text(sp.title, fontSize = Tv.display, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = if (heroMode) 1 else 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.displayLine,
+            if (logo != null) TitleLogo(logo, sp.title, 380.dp, 64.dp) { Text(sp.title, fontSize = HERO_TITLE, lineHeight = HERO_TITLE_LINE, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            else Text(sp.title, fontSize = HERO_TITLE, fontWeight = Tv.wDisplay, color = Tv.text, maxLines = if (heroMode) 1 else 2, overflow = TextOverflow.Ellipsis, lineHeight = HERO_TITLE_LINE,
                 onTextLayout = { titleLines = it.lineCount })
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -270,8 +272,8 @@ private fun SpotText(s: Spot, heroMode: Boolean, extras: SpotExtras?) {
             if (sp.plot.isNotBlank()) {
                 Spacer(Modifier.height(10.dp))
                 // Two lines above the buttons; three once the buttons make way; one fewer under a two-line title.
-                Text(sp.plot.trim(), fontSize = Tv.body, color = Tv.text2, lineHeight = Tv.bodyLine, overflow = TextOverflow.Ellipsis,
-                    maxLines = ((if (heroMode) 2 else 3) - ((if (logo != null) 2 else titleLines) - 1)).coerceAtLeast(1))
+                Text(sp.plot.trim(), fontSize = 16.sp, color = Tv.text2, lineHeight = 23.sp, overflow = TextOverflow.Ellipsis,
+                    maxLines = ((if (heroMode) 2 else 3) - ((if (logo != null) 1 else titleLines) - 1)).coerceAtLeast(2))
             }
         }
     }

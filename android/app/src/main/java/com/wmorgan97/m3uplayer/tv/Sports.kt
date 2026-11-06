@@ -690,11 +690,11 @@ private fun dayWord(t: Long, now: Long): String {
 /** Where the focused row's cards settle (the first row's own place under the page title, so the page doesn't jump). */
 private val SPORTS_ROW_TOP = 124.dp
 // One set of card sizes for the fixtures and the guide fallback, so the skeleton, either data source and every row line up.
-private val LIVE_W = 320.dp
-private val LIVE_H = 156.dp
+private val LIVE_W = 300.dp
+private val LIVE_H = 136.dp
 private val NEXT_W = 300.dp
 private val NEXT_H = 136.dp
-private val TEAM_H = 108.dp
+private val TEAM_H = 136.dp
 
 // ---------- the page ----------
 
