@@ -7,7 +7,7 @@ import androidx.compose.ui.unit.dp
 object LiveTvTokens {
     /** Height of the top block (preview + now/next). The Guide's top block is the same height, and the preview window
      *  takes the same place and size in both, so switching between them never makes it jump. */
-    val headerH = 152.dp
+    val headerH = 180.dp   // (was 152: the preview window fills this height, so it is ~25% larger)
     /** The group column's content width (its start inset is [Tv.margin] - 12 so names line up with the page margin). */
     val groupW = 220.dp
     /** One row height for groups and channels. */

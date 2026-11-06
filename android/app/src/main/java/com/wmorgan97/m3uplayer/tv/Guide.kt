@@ -175,7 +175,7 @@ fun GuideScreen(act: TvActivity, startGroup: String?) {
         val selP = remember(row, cursor, tick, chans) { at(progs(row), cursor) }
         LaunchedEffect(l) { Preview.current() }
         val pc = Preview.channel
-        Row(Modifier.fillMaxWidth().height(152.dp).zIndex(1f)) {
+        Row(Modifier.fillMaxWidth().height(LiveTvTokens.headerH).zIndex(1f)) {
         if (!locked && Repo.preview) PreviewBox(pc, act.resumeTick, Modifier.zIndex(1f).padding(start = Tv.margin, top = Tv.topMargin - Tv.s2, bottom = Tv.s3).fillMaxHeight().aspectRatio(16 / 9f))
         Column(Modifier.weight(1f).fillMaxHeight().padding(start = if (Repo.preview) 24.dp else Tv.margin, end = Tv.margin, top = Tv.topMargin).clearAndSetSemantics { }) {
             if (locked || selC == null) {

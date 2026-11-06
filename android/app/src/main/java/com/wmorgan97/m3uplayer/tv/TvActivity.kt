@@ -68,6 +68,9 @@ class TvActivity : ComponentActivity() {
     private var pinGate by mutableStateOf<(() -> Unit)?>(null)   // a locked channel waiting for its PIN
     // "Who's watching?" (Profiles.kt): on start when there's more than one profile and this TV doesn't remember one.
     var who by mutableStateOf(false)
+    /** False while another screen (the player) covers this one: the clock must not show through its window as it opens. */
+    var inFront by mutableStateOf(true)
+    override fun onPause() { inFront = false; super.onPause() }
     var pictureFor by mutableStateOf<Profile?>(null)   // "Change picture" (Profiles.kt)
     private var whoAsked = false
     private fun askWhoIfNeeded() { if (!whoAsked && Repo.shouldAskProfile()) { whoAsked = true; who = true } }
@@ -163,6 +166,7 @@ class TvActivity : ComponentActivity() {
     }
 
     override fun onResume() {
+        inFront = true
         super.onResume()
         if (Repo.hasKey()) lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
         // Back from full screen on a live channel: the preview takes back the player, playing whichever channel you ended
@@ -357,7 +361,7 @@ class TvActivity : ComponentActivity() {
                 } }
                 // The clock: just the time, light and quiet in the top-right corner, with a soft shadow so it reads over any
                 // picture (no box, no border: like Apple TV). Inside the safe area; hidden while the preview zooms.
-                if (screen !is Screen.Details) Row(Modifier.align(Alignment.TopEnd).graphicsLayer { alpha = if (Preview.zooming || Preview.unzooming) 0f else 1f }.padding(top = 26.dp, end = Tv.margin), verticalAlignment = Alignment.CenterVertically) {
+                if (screen !is Screen.Details) Row(Modifier.align(Alignment.TopEnd).graphicsLayer { alpha = if (Preview.zooming || Preview.unzooming || !inFront) 0f else 1f }.padding(top = 26.dp, end = Tv.margin), verticalAlignment = Alignment.CenterVertically) {
                     if (!Repo.online) { Text("Offline · showing saved data", fontSize = Tv.label, color = Tv.muted); Spacer(Modifier.width(16.dp)) }
                     Clock()
                 }
