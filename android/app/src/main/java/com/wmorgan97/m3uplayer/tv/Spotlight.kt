@@ -251,7 +251,7 @@ private fun SpotText(s: Spot, heroMode: Boolean, extras: SpotExtras?) {
         val fade = remember { Animatable(0f) }
         LaunchedEffect(Unit) { fade.animateTo(1f, tween(Tv.durMed, easing = Tv.easeMove)) }
         var titleLines by remember { mutableIntStateOf(1) }
-        Column(Modifier.graphicsLayer { alpha = fade.value }.padding(start = Tv.margin, top = 22.dp).fillMaxWidth(.56f)) {
+        Column(Modifier.graphicsLayer { alpha = fade.value }.padding(start = Tv.margin, top = 22.dp).fillMaxWidth(.64f)) {
             Text(sp.kicker, fontSize = Tv.label, color = if (sp.accent) Tv.accent else Tv.muted, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, maxLines = 1)
             Spacer(Modifier.height(6.dp))
             // The title logo when there is one (it counts as a two-line title for the plot below).
@@ -270,7 +270,7 @@ private fun SpotText(s: Spot, heroMode: Boolean, extras: SpotExtras?) {
             if (sp.plot.isNotBlank()) {
                 Spacer(Modifier.height(10.dp))
                 // Two lines above the buttons; three once the buttons make way; one fewer under a two-line title.
-                Text(sp.plot.trim(), fontSize = Tv.bodySmall, color = Tv.text2, lineHeight = Tv.bodySmallLine, overflow = TextOverflow.Ellipsis,
+                Text(sp.plot.trim(), fontSize = Tv.body, color = Tv.text2, lineHeight = Tv.bodyLine, overflow = TextOverflow.Ellipsis,
                     maxLines = ((if (heroMode) 2 else 3) - ((if (logo != null) 2 else titleLines) - 1)).coerceAtLeast(1))
             }
         }

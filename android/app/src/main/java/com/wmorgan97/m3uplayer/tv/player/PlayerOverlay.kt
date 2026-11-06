@@ -54,6 +54,7 @@ import com.wmorgan97.m3uplayer.tv.Repo
 import com.wmorgan97.m3uplayer.tv.BadgeTone
 import com.wmorgan97.m3uplayer.tv.FocusStyle
 import com.wmorgan97.m3uplayer.tv.Tv
+import com.wmorgan97.m3uplayer.tv.LiveTvTokens
 import com.wmorgan97.m3uplayer.tv.TvBadge
 import com.wmorgan97.m3uplayer.tv.TvButton
 import com.wmorgan97.m3uplayer.tv.TvButtonStyle
@@ -151,31 +152,49 @@ private fun progress(s: Long, e: Long): Float = if (s > 0 && e > s) ((System.cur
 
 @Composable
 private fun Banner(ui: PlayerUi, b: PlayerUi.Banner) {
-    TvPanel(Modifier.padding(start = Tv.margin, end = Tv.margin, bottom = Tv.playerSafeBottom).fillMaxWidth()) {
+    // Apple-TV-like: no panel, one soft gradient up from the bottom edge (under a third of the screen), the content on it.
+    //   [logo]  101  Channel                                  [4K] [HDR] [Dolby]   21:04
+    //           Programme title
+    //           20:00 – 21:00  ·  34 min left  ━━━━━━━━━        Next 21:00  Following programme
+    Box(Modifier.fillMaxWidth().background(Brush.verticalGradient(0f to Color(LiveTvTokens.bannerGradientTop), .45f to Color(LiveTvTokens.bannerGradientMid), 1f to Color(LiveTvTokens.bannerGradientEnd)))
+        .padding(top = 36.dp, start = Tv.margin, end = Tv.margin, bottom = Tv.playerSafeBottom)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (b.num.isNotEmpty()) { Text(b.num, color = Tv.text, fontSize = Tv.display, fontWeight = FontWeight.SemiBold, modifier = Modifier.widthIn(min = 56.dp)); Spacer(Modifier.width(16.dp)) }
-            Logo(b.logo, 112, 63, gap = 20)
+            Logo(b.logo, 96, 54, gap = 20)
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(b.name, color = Tv.text, fontSize = Tv.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    if (b.num.isNotEmpty()) { Text(b.num, color = Tv.muted, fontSize = Tv.rowTitle, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(end = 10.dp)) }
+                    Text(b.name, color = Tv.text2, fontSize = Tv.rowTitle, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     Spacer(Modifier.weight(1f))
-                    if (ui.tuning) Spinner() else Badges(ui.badges)
+                    if (ui.tuning) { Spinner(); Spacer(Modifier.width(12.dp)) } else QuietBadges(ui.badges)
+                    Text(ui.clock, color = Tv.text2, fontSize = Tv.rowTitle, modifier = Modifier.padding(start = 16.dp))
                 }
-                Spacer(Modifier.height(4.dp))
                 val now = b.nowTitle.ifEmpty { b.fallback }
+                Text(now, color = Tv.text, fontSize = 26.sp, lineHeight = 32.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
                 val timed = b.nowTitle.isNotEmpty() && b.start > 0 && b.end > b.start
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(now, color = Tv.text2, fontSize = Tv.body, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                    if (timed) Text("${hm(b.start)} – ${hm(b.end)}", color = Tv.muted, fontSize = Tv.bodySmall, modifier = Modifier.padding(start = 16.dp))
-                }
-                if (timed) { Spacer(Modifier.height(8.dp)); TvProgress(progress(b.start, b.end), Modifier.fillMaxWidth()) }
-                if (b.next.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    Text((if (b.end > 0) "Next  ${hm(b.end)}   " else "Next   ") + b.next, color = Tv.muted, fontSize = Tv.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (timed || b.next.isNotEmpty()) Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (timed) {
+                        val left = ((b.end - System.currentTimeMillis()) / 60_000L).toInt()
+                        Text(hm(b.start) + " – " + hm(b.end) + (if (left >= 1) "  ·  " + (if (left >= 60) "${left / 60}h ${"%02d".format(left % 60)}m" else "$left min") + " left" else ""),
+                            color = Tv.text2, fontSize = Tv.bodySmall, maxLines = 1)
+                        TvProgress(progress(b.start, b.end), Modifier.padding(start = 14.dp).width(140.dp).clip(Tv.pill).height(3.dp))
+                    }
+                    if (b.next.isNotEmpty()) Text((if (b.end > 0) "Next  ${hm(b.end)}  " else "Next  ") + b.next, color = Tv.muted, fontSize = Tv.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(start = if (timed) 24.dp else 0.dp))
                 }
             }
-            Spacer(Modifier.width(24.dp))
-            Text(ui.clock, color = Tv.text2, fontSize = Tv.title, modifier = Modifier.align(Alignment.Top))
+        }
+    }
+}
+
+private fun premium(q: String) = q == "4K" || q.startsWith("HDR") || q == "HLG" || q.startsWith("Dolby")
+
+/** Quality badges: small quiet pills (a faint fill, no outline); the premium ones (4K, HDR, Dolby) a little brighter. */
+@Composable
+private fun QuietBadges(list: List<String>) {
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        list.forEach { q ->
+            Text(q, color = if (premium(q)) Tv.text else Tv.text2, fontSize = Tv.micro, lineHeight = Tv.microLine, fontWeight = FontWeight.Medium, maxLines = 1,
+                modifier = Modifier.background(Color(if (premium(q)) 0x33FFFFFF else 0x1FFFFFFF), Tv.pill).padding(horizontal = 9.dp, vertical = 2.dp))
         }
     }
 }

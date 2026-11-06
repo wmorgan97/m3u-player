@@ -79,6 +79,10 @@ object Tv {
 
     // ---------- Spacing (4dp grid) ----------
     val s1 = 4.dp; val s2 = 8.dp; val s3 = 12.dp; val s4 = 16.dp; val s5 = 20.dp; val s6 = 24.dp; val s8 = 32.dp; val s10 = 40.dp; val s12 = 48.dp
+    val railItem = 44.dp        // closed side menu: item width (rail = item + 2 x s2 = 60dp)
+    val menuItemOpen = 184.dp   // open side menu: item width (just past the longest label)
+    val menuRow = 44.dp; val menuText = 16.sp
+    val railGap = 24.dp         // page content starts this far right of the rail (the page box tucks under the rail by margin - railGap)
     val margin = 48.dp          // left/right content margin (overscan-safe: 5% of 960dp)
     val topMargin = 28.dp       // page top (5% of 540dp is 27)
     val bottomMargin = 28.dp
@@ -107,7 +111,7 @@ object Tv {
     val landscape = 300.dp      // 16:9 large landscape cards (featured)
     val episodeStill = 176.dp   // episode row picture
     val listRow = 40.dp         // dense list row (channels)
-    val settingRow = 48.dp      // settings row
+    val settingRow = 52.dp      // settings row
     val chipHeight = 32.dp
     val buttonHeight = 40.dp
     val switchWidth = 36.dp     // the on/off switch at the end of a settings row ([TvSwitch])

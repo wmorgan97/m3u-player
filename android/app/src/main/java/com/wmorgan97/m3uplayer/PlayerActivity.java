@@ -492,15 +492,17 @@ public class PlayerActivity extends AppCompatActivity {
         infoNum.setText(num);
         infoNum.setVisibility(num.isEmpty() ? View.GONE : View.VISIBLE);
         infoName.setText(name);
-        Logos.show(infoLogo, art, dp(120), dp(68));
+        Logos.show(infoLogo, art, dp(96), dp(54));
         infoNow.setText(nowTitle.isEmpty() ? fallback : nowTitle);
         boolean timed = !nowTitle.isEmpty() && s > 0 && e > s;
-        infoTime.setText(timed ? clockHm(s) + " – " + clockHm(e) : "");
+        int leftMin = (int) ((e - now) / 60000L);
+        infoTime.setText(timed ? clockHm(s) + " – " + clockHm(e) + (leftMin >= 1 ? "  ·  " + (leftMin >= 60 ? (leftMin / 60) + "h " + String.format(Locale.ROOT, "%02d", leftMin % 60) + "m" : leftMin + " min") + " left" : "") : "");
         infoTime.setVisibility(timed ? View.VISIBLE : View.GONE);
         if (timed) { infoProgress.setVisibility(View.VISIBLE); infoProgress.setProgress((int) (1000 * Math.max(0, Math.min(1, (now - s) / (double) (e - s))))); }
         else infoProgress.setVisibility(View.GONE);
         // The next programme starts when this one ends, so its time is nowEnd.
-        infoNext.setText(next.isEmpty() ? "" : "Next" + (e > 0 ? "  " + clockHm(e) : "") + "   " + next);
+        infoNext.setText(next.isEmpty() ? "" : "Next" + (e > 0 ? "  " + clockHm(e) : "") + "  " + next);
+        infoNext.setPadding(timed ? dp(24) : 0, 0, 0, 0);
         infoNext.setVisibility(next.isEmpty() ? View.GONE : View.VISIBLE);
         revealBanner();
     }
@@ -517,13 +519,15 @@ public class PlayerActivity extends AppCompatActivity {
         infoBadges.setTag(key.toString());
         infoBadges.removeAllViews();
         for (String b : l) {
-            TextView t = text(12, 0xFFD5DAE3, true);
+            boolean premium = b.equals("4K") || b.startsWith("HDR") || b.equals("HLG") || b.startsWith("Dolby");
+            TextView t = text(12, premium ? Color.WHITE : 0xFFD5DAE3, false);
+            t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             t.setText(b);
             t.setIncludeFontPadding(false);
-            GradientDrawable o = new GradientDrawable(); o.setStroke(dp(1), 0x80FFFFFF); o.setCornerRadius(dp(4));
+            GradientDrawable o = new GradientDrawable(); o.setColor(premium ? 0x33FFFFFF : 0x1FFFFFFF); o.setCornerRadius(dp(12));
             t.setBackground(o);
-            t.setPadding(dp(7), dp(3), dp(7), dp(3));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2); lp.setMargins(dp(8), 0, 0, 0);
+            t.setPadding(dp(9), dp(4), dp(9), dp(4));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2); lp.setMargins(dp(6), 0, 0, 0);
             infoBadges.addView(t, lp);
         }
     }
@@ -705,15 +709,15 @@ public class PlayerActivity extends AppCompatActivity {
         ui.removeCallbacks(zapCommit); ui.postDelayed(zapCommit, ZAP_RUN_SETTLE_MS);
     }
 
-    /** Puts the banner (as bound) on screen for 4.5 s; it takes the bottom from the pause bar, and a wait already
+    /** Puts the banner (as bound) on screen for 4 s; it takes the bottom from the pause bar, and a wait already
      *  showing moves into it (the small ring by the name) instead of the middle of the picture. */
     private void revealBanner() {
         infoClock.setText(clockHm(System.currentTimeMillis()));
         shiftBar.setVisibility(View.GONE); behindPill.setVisibility(View.GONE);
-        if (cui != null) cui.setClock(clockHm(System.currentTimeMillis())); else infoBar.setVisibility(View.VISIBLE);
+        if (cui != null) cui.setClock(clockHm(System.currentTimeMillis())); else setBannerShown(true);
 
         if (spinner.getVisibility() == View.VISIBLE) spinOn.run();   // (a wait still to come picks the banner by itself)
-        ui.removeCallbacks(infoOff); ui.postDelayed(infoOff, 4500);
+        ui.removeCallbacks(infoOff); ui.postDelayed(infoOff, 4000);
     }
 
     /** The run of zaps has settled: tune the channel it stopped on (straight away: the settle was the wait). */
@@ -776,8 +780,21 @@ public class PlayerActivity extends AppCompatActivity {
 
     private boolean controlsShown() { return cui != null ? cui.getControls() : overlay.getVisibility() == View.VISIBLE; }
     private void controlsGone() { overlay.setVisibility(View.GONE); if (cui != null) cui.setControls(false); }
-    private boolean bannerShown() { return cui != null ? cui.getBanner() != null : infoBar.getVisibility() == View.VISIBLE; }
-    private void hideBannerNow() { infoBar.setVisibility(View.GONE); if (cui != null) cui.hideBanner(); }
+    private boolean infoBarOn;
+    private boolean bannerShown() { return cui != null ? cui.getBanner() != null : infoBarOn; }
+    private void hideBannerNow() { setBannerShown(false); if (cui != null) cui.hideBanner(); }
+    /** The classic banner fades and slides in over 250 ms (decelerating), and out over 150 ms: no pops. */
+    private void setBannerShown(boolean on) {
+        if (on == infoBarOn) return;
+        infoBarOn = on;
+        infoBar.animate().cancel();
+        if (on) {
+            if (infoBar.getVisibility() != View.VISIBLE) { infoBar.setAlpha(0f); infoBar.setTranslationY(dp(8)); infoBar.setVisibility(View.VISIBLE); }
+            infoBar.animate().alpha(1f).translationY(0).setDuration(250).setInterpolator(new android.view.animation.DecelerateInterpolator(2f)).start();
+        } else if (infoBar.getVisibility() == View.VISIBLE) {
+            infoBar.animate().alpha(0f).setDuration(150).withEndAction(() -> { if (!infoBarOn) infoBar.setVisibility(View.GONE); }).start();
+        }
+    }
     private boolean panelShown() { return cui != null ? cui.modal() : channelList.getVisibility() == View.VISIBLE; }
     private boolean errorShown() { return cui != null ? cui.getError() != null : errorPanel.getVisibility() == View.VISIBLE; }
     private void hideError() { errorPanel.setVisibility(View.GONE); if (cui != null) cui.setError(null); }
@@ -2124,37 +2141,35 @@ public class PlayerActivity extends AppCompatActivity {
         });
         root.addView(channelList, new FrameLayout.LayoutParams(dp(420), -1, Gravity.START));
 
-        // Channel banner (live TV): a translucent panel across the bottom, inside the 48dp page margins.
-        //   [ 101 ] [ logo ]  Channel name                                         21:04
-        //                     Programme title                  20:00 – 21:00
-        //                     ───────────progress──────────────────────────
-        //                     Next  21:00   Following programme
+        // Channel banner (live TV), Apple-TV-like: no panel, one soft gradient rising from the bottom edge (about a third of
+        // the screen at most), the content on it, inside the 48dp page margins.
+        //   [logo]  101  Channel                                   [4K] [HDR] [Dolby]   21:04
+        //           Programme title
+        //           20:00 – 21:00 ──progress──                  Next  21:00   Following programme
         LinearLayout ib = new LinearLayout(this);
         infoBar = ib;
-        // Top-aligned with baselines: the clock sits on the channel name's baseline; number and logo are centred (below).
-        ib.setGravity(Gravity.TOP);
-        GradientDrawable ibBg = new GradientDrawable(); ibBg.setColor(PANEL); ibBg.setCornerRadius(dp(12)); ibBg.setStroke(dp(1), 0x1FFFFFFF);
+        ib.setGravity(Gravity.CENTER_VERTICAL);
+        GradientDrawable ibBg = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{ 0x00000000, 0x99000000, 0xE6000000 });
         ib.setBackground(ibBg);
-        ib.setPadding(dp(24), dp(16), dp(24), dp(16));
-        infoNum = text(34, Color.WHITE, true);
-        infoNum.setMinWidth(dp(64));
-        infoNum.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams nump = new LinearLayout.LayoutParams(-2, -2); nump.setMargins(0, 0, dp(16), 0); nump.gravity = Gravity.CENTER_VERTICAL;
-        ib.addView(infoNum, nump);
+        ib.setPadding(dp(48), dp(36), dp(48), dp(32));
         infoLogo = new android.widget.ImageView(this);
         infoLogo.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
         GradientDrawable logoBg = new GradientDrawable(); logoBg.setColor(0xFF232733); logoBg.setCornerRadius(dp(10));
         infoLogo.setBackground(logoBg);
         infoLogo.setClipToOutline(true);
         infoLogo.setPadding(dp(8), dp(4), dp(8), dp(4));
-        LinearLayout.LayoutParams lgp = new LinearLayout.LayoutParams(dp(120), dp(68)); lgp.setMargins(0, 0, dp(24), 0); lgp.gravity = Gravity.CENTER_VERTICAL;
+        LinearLayout.LayoutParams lgp = new LinearLayout.LayoutParams(dp(96), dp(54)); lgp.setMargins(0, 0, dp(20), 0); lgp.gravity = Gravity.CENTER_VERTICAL;
         ib.addView(infoLogo, lgp);
 
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        // Name line: the name, then (right-aligned, above the programme times) the tuning ring or the quality badges.
+        // Top line: number and name, then (right-aligned) the tuning ring or the quality pills, then the clock.
         LinearLayout l1 = new LinearLayout(this); l1.setGravity(Gravity.CENTER_VERTICAL);
-        infoName = text(24, Color.WHITE, true);
+        infoNum = text(18, 0xFF9AA3B5, true);
+        infoNum.setPadding(0, 0, dp(10), 0);
+        l1.addView(infoNum);
+        infoName = text(18, 0xFFD5DAE3, false);
+        infoName.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         l1.addView(infoName, new LinearLayout.LayoutParams(0, -2, 1));
         infoSpin = new ProgressBar(this);
         infoSpin.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(0xCCFFFFFF));
@@ -2163,32 +2178,29 @@ public class PlayerActivity extends AppCompatActivity {
         l1.addView(infoSpin, isp);
         infoBadges = new LinearLayout(this); infoBadges.setGravity(Gravity.CENTER_VERTICAL);
         l1.addView(infoBadges);
+        infoClock = text(18, 0xFFD5DAE3, false);
+        infoClock.setPadding(dp(16), 0, 0, 0);
+        l1.addView(infoClock);
         col.addView(l1);
-        l1.setBaselineAlignedChildIndex(0);    // the row's baseline is the name's ...
-        col.setBaselineAlignedChildIndex(0);   // ... and so is the column's (for the clock)
+        infoNow = text(26, Color.WHITE, true);
+        infoNow.setPadding(0, dp(2), 0, 0);
+        col.addView(infoNow);
         LinearLayout l2 = new LinearLayout(this); l2.setGravity(Gravity.CENTER_VERTICAL); l2.setPadding(0, dp(4), 0, 0);
-        infoNow = text(18, 0xFFD5DAE3, false);
-        infoTime = text(15, 0xFF9AA3B5, false); infoTime.setPadding(dp(16), 0, 0, 0);
-        l2.addView(infoNow, new LinearLayout.LayoutParams(0, -2, 1)); l2.addView(infoTime);
-        col.addView(l2);
+        infoTime = text(14, 0xFFD5DAE3, false);
+        l2.addView(infoTime);
         infoProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         infoProgress.setMax(1000);
         GradientDrawable track = new GradientDrawable(); track.setColor(0x33FFFFFF); track.setCornerRadius(dp(2));
         GradientDrawable fill = new GradientDrawable(); fill.setColor(0xFF5B93FF); fill.setCornerRadius(dp(2));
         infoProgress.setProgressDrawable(new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{ track, new android.graphics.drawable.ClipDrawable(fill, Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL) }));
-        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-1, dp(3)); pp.setMargins(0, dp(8), 0, 0);
-        col.addView(infoProgress, pp);
-        infoNext = text(14, 0xFF9AA3B5, false); infoNext.setPadding(0, dp(8), 0, 0);
-        col.addView(infoNext);
+        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(dp(140), dp(3)); pp.setMargins(dp(14), 0, 0, 0);
+        l2.addView(infoProgress, pp);
+        infoNext = text(14, 0xFF9AA3B5, false); infoNext.setPadding(dp(24), 0, 0, 0);
+        l2.addView(infoNext, new LinearLayout.LayoutParams(0, -2, 1));
+        col.addView(l2);
         ib.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
-
-        infoClock = text(22, 0xFFD5DAE3, false);
-        infoClock.setPadding(dp(24), 0, 0, 0);
-        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2); clp.gravity = Gravity.TOP;
-        ib.addView(infoClock, clp);
         ib.setVisibility(View.GONE);
         FrameLayout.LayoutParams ibl = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
-        ibl.setMargins(dp(48), 0, dp(48), dp(32));
         root.addView(ib, ibl);
 
         // Pause / rewind bar: the banner's place and look (see ShiftBar).

@@ -159,7 +159,7 @@ fun SearchScreen(act: TvActivity) {
     HeldPace()
     LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(top = Tv.topMargin, bottom = 56.dp)) {
         item {
-            Row(Modifier.padding(horizontal = Tv.margin).fillMaxWidth(.66f), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.padding(horizontal = Tv.margin).fillMaxWidth(.82f), verticalAlignment = Alignment.CenterVertically) {
                 // A text field keeps its text readable when focused: it lifts and gets the white focus outline (no fill).
                 Row(Modifier.weight(1f).background(if (fieldFocused) Tv.surface2 else Tv.surface, Tv.pill)
                     .border(2.dp, if (fieldFocused) Tv.focusRing else Tv.line, Tv.pill).padding(horizontal = 22.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {

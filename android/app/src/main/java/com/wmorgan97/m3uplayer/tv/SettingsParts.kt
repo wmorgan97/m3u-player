@@ -125,12 +125,12 @@ fun headerReach(first: Boolean) = Tv.labelLine.value.dp + Tv.s1 + (if (first) Tv
 
 /** Sizes used only by the settings screen (kept together rather than inline). */
 internal object SettingsDims {
-    val sectionColumn = 260.dp
+    val sectionColumn = 224.dp
     val sectionRow = 44.dp
-    val paneMax = 780.dp
+    val paneMax = 960.dp
     val iconGap = 14.dp
     val titleLine = Tv.bodySmallLine
-    val valueMax = 260.dp
+    val valueMax = 400.dp
     val infoValueMax = 420.dp
     val dot = 6.dp
     val toTop = 400.dp     // "reveal everything above": the pane's first row scrolls the list back to its top

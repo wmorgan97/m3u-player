@@ -25,6 +25,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.border
@@ -289,23 +290,32 @@ class TvActivity : ComponentActivity() {
         val saveable = androidx.compose.runtime.saveable.rememberSaveableStateHolder()
         ModalNavigationDrawer(scrimBrush = androidx.compose.ui.graphics.SolidColor(androidx.compose.ui.graphics.Color(0x99000000)),   // over the page (TiviMate), so opening it never re-lays the page out
             drawerState = drawer,
-            drawerContent = {
-                // Hidden during the preview's grow/shrink. Read in the layer (drawing only): reading it here in composition
-                // re-composed the whole screen on the first frame of the zoom (~55 ms).
+            drawerContent = { drawerValue ->
+                // Slim rail (Tv.railItem icons) that opens to just wider than its longest label; own rows (not NavigationDrawerItem,
+                // whose open width is a fixed 280dp). Hidden during the preview's grow/shrink; read in the layer so the zoom's first frame doesn't recompose.
+                val itemW by androidx.compose.animation.core.animateDpAsState(if (drawerValue == DrawerValue.Open) Tv.menuItemOpen else Tv.railItem, tween(Tv.durMed, easing = Tv.easeMove), label = "menuW")
+                val open = drawerValue == DrawerValue.Open
                 Column(Modifier.fillMaxHeight().graphicsLayer { alpha = if (Preview.zooming || Preview.unzooming) 0f else 1f }.background(Tv.rail).onSizeChanged { if (drawer.currentValue == DrawerValue.Closed && it.width > 0) railPx = it.width }
-                    .padding(horizontal = 12.dp, vertical = 24.dp).focusProperties { enter = { current } }.focusGroup(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    .padding(horizontal = Tv.s2, vertical = Tv.s6).focusProperties { enter = { current } }.focusGroup(),
+                    verticalArrangement = Arrangement.spacedBy(Tv.s1)) {
+                    val row: @Composable (String, Boolean, Modifier, () -> Unit, @Composable () -> Unit) -> Unit = { label, selected, mod, onClick, icon ->
+                        TvListRow(onClick = onClick, modifier = mod.width(itemW).height(Tv.menuRow), selected = selected, label = label,
+                            contentPadding = PaddingValues(horizontal = Tv.s3)) { focused ->
+                            icon()
+                            if (open) { Spacer(Modifier.width(Tv.s3)); Text(label, fontSize = Tv.menuText, fontWeight = FontWeight.Medium, maxLines = 1, softWrap = false, color = if (focused) Tv.onFocus else if (selected) Tv.text else Tv.text2) }
+                        }
+                    }
                     val item: @Composable (String, ImageVector, Boolean, () -> Unit) -> Unit = { label, icon, selected, onClick ->
-                        NavigationDrawerItem(selected = selected, onClick = { drawer.setValue(DrawerValue.Closed); onClick(); if (selected) focusTick++ }, leadingContent = { Icon(icon, null) },
-                            modifier = if (selected) Modifier.focusRequester(current) else Modifier) { Text(label, fontSize = Tv.body, fontWeight = FontWeight.Medium) }
+                        row(label, selected, if (selected) Modifier.focusRequester(current) else Modifier, { drawer.setValue(DrawerValue.Closed); onClick(); if (selected) focusTick++ }) {
+                            Icon(icon, null, Modifier.size(Tv.icon), tint = LocalContentColor.current.copy(alpha = if (selected) 1f else .72f))
+                        }
                     }
                     // Who's watching (with more than one profile): their initial and name; OK switches.
                     val profiles = remember(Repo.version) { Repo.profiles() }
                     if (profiles.size > 1) {
                         val me = profiles.firstOrNull { it.id == Repo.profileId } ?: profiles.first()
-                        NavigationDrawerItem(selected = false, onClick = { drawer.setValue(DrawerValue.Closed); who = true },
-                            leadingContent = { ProfileAvatar(me, 26.dp) }) { Text(me.name, fontSize = Tv.body, fontWeight = FontWeight.Medium, maxLines = 1) }
-                        Spacer(Modifier.height(6.dp))
+                        row(me.name, false, Modifier, { drawer.setValue(DrawerValue.Closed); who = true }) { ProfileAvatar(me, Tv.icon) }
+                        Spacer(Modifier.height(Tv.s2))
                     }
                     item("Search", Icons.Default.Search, screen is Screen.Search) { root(Screen.Search) }
                     item("Home", Icons.Default.Home, section is Screen.Home && screen !is Screen.Search) { root(Screen.Home) }
@@ -319,7 +329,7 @@ class TvActivity : ComponentActivity() {
                 }
             },
         ) {
-            Box(Modifier.fillMaxSize().background(Tv.bg).padding(start = with(androidx.compose.ui.platform.LocalDensity.current) { railPx.toDp() }).focusRequester(contentFocus).onFocusChanged { contentHasFocus = it.hasFocus }) {
+            Box(Modifier.fillMaxSize().background(Tv.bg).padding(start = with(androidx.compose.ui.platform.LocalDensity.current) { (railPx.toDp() - (Tv.margin - Tv.railGap)).coerceAtLeast(0.dp) }).focusRequester(contentFocus).onFocusChanged { contentHasFocus = it.hasFocus }) {
                 // Each page starts with the remote on its content (not the menu): retried while its rows load in.
                 val fromBack = focusTick > 0
                 LaunchedEffect(screen, focusTick) {

@@ -138,8 +138,12 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     LaunchedEffect(list) { Repo.prefetchLogos(ctxImg, list.take(150)) }
     // Guide data stays current while the screen is open: asked again every 30 min (each channel re-downloads at most every 3 h).
     LaunchedEffect(list) { while (true) { delay(30 * 60_000L); if (list.isNotEmpty()) Repo.requestGuide(list.take(300)) } }
+    // A new group's list eases in (a short fade) instead of popping.
+    val listFade = remember { androidx.compose.animation.core.Animatable(1f) }
+    var fadeKey by remember { mutableIntStateOf(0) }
+    LaunchedEffect(fadeKey) { if (fadeKey > 1) { listFade.snapTo(.25f); listFade.animateTo(1f, androidx.compose.animation.core.tween(Tv.durMed, easing = Tv.easeEnter)) } }
     var shownGroup by remember { mutableStateOf<String?>(null) }   // back to the top only when the list is a new group's
-    LaunchedEffect(list) { if (list.isEmpty()) return@LaunchedEffect; if (shownGroup != group) { shownGroup = group; listState.scrollToItem(0) }; Repo.requestGuide(list.take(300)) }
+    LaunchedEffect(list) { if (list.isEmpty()) return@LaunchedEffect; if (shownGroup != group) { shownGroup = group; listState.scrollToItem(0); fadeKey++ }; Repo.requestGuide(list.take(300)) }
     LaunchedEffect(Unit) { while (true) { delay(60_000); minute++ } }
     val firstVisible by remember { derivedStateOf { listState.firstVisibleItemIndex } }
     LaunchedEffect(firstVisible / 100) { if (firstVisible > 200) Repo.requestGuide(list.drop(firstVisible).take(300)) }
@@ -158,14 +162,13 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
     Column(Modifier.fillMaxSize()) {
         LaunchedEffect(l) { Preview.current() }   // (falls back to the last channel watched; not during drawing)
         val pc = Preview.channel
-        if (Repo.preview && !locked) Row(Modifier.fillMaxWidth().height(186.dp).padding(bottom = 12.dp).zIndex(1f)) {   // (above the lists, for the grow-to-full-screen)
-            // TiviMate-style top: the preview (last channel, or the one picked with OK) and what's on the highlighted channel.
-            PreviewBox(pc, act.resumeTick, Modifier.zIndex(1f).padding(start = Tv.margin, top = Tv.topMargin - 8.dp).fillMaxHeight().aspectRatio(16 / 9f))
+        if (Repo.preview && !locked) Row(Modifier.fillMaxWidth().height(LiveTvTokens.headerH).zIndex(1f)) {   // (above the lists, for the grow-to-full-screen)
+            // TiviMate-style top, laid out exactly as the Guide's: the preview (last channel, or the one picked with OK)
+            // and what's on the highlighted channel.
+            PreviewBox(pc, act.resumeTick, Modifier.zIndex(1f).padding(start = Tv.margin, top = Tv.topMargin - Tv.s2, bottom = Tv.s3).fillMaxHeight().aspectRatio(16 / 9f))
             val fc = focusedChan ?: pc
-            // Where the highlight is in the open group ("UK · General  ·  12 of 60"): a sense of place in long lists.
-            val place = prettyGroup(group) + "  ·  " + (if (fc != null && fc == focusedChan && focusedIdx in list.indices) "${focusedIdx + 1} of ${list.size}" else "${list.size} channels")
-            LiveNowNext(fc, guideTick, place, Modifier.weight(1f).padding(start = 24.dp, end = Tv.margin + Tv.clockReserve, top = Tv.topMargin - 6.dp))
-        } else Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin, top = Tv.topMargin, bottom = 14.dp), verticalAlignment = Alignment.Bottom) {
+            LiveNowNext(fc, guideTick, Modifier.weight(1f).fillMaxHeight().padding(start = 24.dp, end = Tv.margin + Tv.clockReserve, top = Tv.topMargin))
+        } else Row(Modifier.fillMaxWidth().padding(start = Tv.margin, end = Tv.margin + Tv.clockReserve, top = Tv.topMargin, bottom = 14.dp), verticalAlignment = Alignment.Bottom) {
             Text("Live TV", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text)
             Spacer(Modifier.width(14.dp))
             Text("${prettyGroup(group)}  ·  ${list.size} channels", fontSize = Tv.bodySmall, color = Tv.muted, modifier = Modifier.padding(bottom = 3.dp))
@@ -173,15 +176,16 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
             Text("Hold OK for options  ·  Type a number to zap", fontSize = Tv.label, color = Tv.muted, modifier = Modifier.padding(bottom = 3.dp))
         }
         Row(Modifier.fillMaxSize()) {
-            LazyColumn(Modifier.width(290.dp).fillMaxHeight().padding(start = Tv.margin - 12.dp).focusProperties { enter = { groupFocus } }.focusGroup(), contentPadding = PaddingValues(bottom = 24.dp)) {
+            LazyColumn(Modifier.width(LiveTvTokens.groupW + Tv.margin - 12.dp).fillMaxHeight().padding(start = Tv.margin - 12.dp).focusProperties { enter = { groupFocus } }.focusGroup(), contentPadding = PaddingValues(bottom = 24.dp)) {
                 items(groups, key = { it }) { g ->
                     val special = g == "All channels" || g == "★ Favourites"
-                    // Slim group row (38dp): the open group keeps a quiet tint, the highlight is white.
+                    // Group row: name and count together (the count right after the name, not at the far edge); the open group keeps a quiet tint, the highlight is white.
                     TvListRow(onClick = { focusedGroup = g; group = g }, onLongClick = { if (!special) groupMenu = g },
-                        modifier = Modifier.fillMaxWidth().height(38.dp).padding(vertical = 1.dp).let { if (g == group) it.focusRequester(groupFocus) else it }.onFocusChanged { if (it.isFocused) focusedGroup = g },
+                        modifier = Modifier.fillMaxWidth().height(LiveTvTokens.rowH).padding(vertical = 1.dp).let { if (g == group) it.focusRequester(groupFocus) else it }.onFocusChanged { if (it.isFocused) focusedGroup = g },
                         selected = g == group, label = prettyGroup(g)) {
-                        Text((if (Repo.pin.isNotEmpty() && g in Repo.lockedGroups) "🔒 " else if (g in Repo.pinnedGroups) "↑ " else "") + prettyGroup(g), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal, modifier = Modifier.weight(1f))
-                        Text("${when (g) { "All channels" -> l.channels.size; "★ Favourites" -> favCount; else -> byGroup[g]?.size ?: 0 }}", fontSize = Tv.label, color = LocalContentColor.current.copy(alpha = .6f))
+                        Text((if (Repo.pin.isNotEmpty() && g in Repo.lockedGroups) "🔒 " else if (g in Repo.pinnedGroups) "↑ " else "") + prettyGroup(g), maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, fontWeight = if (g == group) FontWeight.SemiBold else FontWeight.Normal, modifier = Modifier.weight(1f, fill = false))
+                        Spacer(Modifier.width(8.dp))
+                        Text("${when (g) { "All channels" -> l.channels.size; "★ Favourites" -> favCount; else -> byGroup[g]?.size ?: 0 }}", fontSize = Tv.label, maxLines = 1, color = LocalContentColor.current.copy(alpha = .6f))
                     }
                 }
             }
@@ -194,7 +198,7 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
                     TvButton("Enter PIN", { pinFor = "Enter PIN to open ${prettyGroup(group)}" to { _ -> Repo.unlocked += group; unlockTick++ } }, icon = Icons.Default.Lock, style = TvButtonStyle.Primary)
                 }
             }
-            else LazyColumn(Modifier.weight(1f).fillMaxHeight().padding(start = 12.dp, end = Tv.margin - 16.dp), state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
+            else LazyColumn(Modifier.weight(1f).fillMaxHeight().padding(start = Tv.s2, end = Tv.margin - 16.dp).graphicsLayer { alpha = listFade.value }, state = listState, contentPadding = PaddingValues(bottom = 24.dp)) {
                 // A new group's rows are built a few per frame (all nine at once took ~150-200 ms on the Shield).
                 itemsIndexed(list.subList(0, minOf(list.size, shownRows)), key = { i, c -> "$i|${c.url}" }) { i, c -> ChannelRow(c, guideTick, c.url in favUrls, onLong = { chanMenu = c }, onFocus = { focusedChan = c; focusedIdx = i; if (i == refocusAt) refocusAt = -1 }, inPreview = c.url == Preview.channel?.url,
                     modifier = if (i == refocusAt) Modifier.focusRequester(refocusReq) else Modifier) {
@@ -226,75 +230,84 @@ fun LiveScreen(act: TvActivity, startGroup: String? = null) {
 
 @Composable
 private fun LiveSkeleton() {
-    Column(Modifier.fillMaxSize().padding(top = Tv.topMargin)) {
-        Box(Modifier.padding(start = Tv.margin).width(120.dp).height(26.dp).clip(RoundedCornerShape(6.dp)).shimmer())
-        Spacer(Modifier.height(24.dp))
-        Row {
-            Column(Modifier.width(290.dp).padding(start = Tv.margin - 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { repeat(9) { Box(Modifier.fillMaxWidth(.85f).height(36.dp).clip(RoundedCornerShape(8.dp)).shimmer()) } }
-            Column(Modifier.weight(1f).padding(start = 12.dp, end = Tv.margin), verticalArrangement = Arrangement.spacedBy(12.dp)) { repeat(7) { Box(Modifier.fillMaxWidth().height(54.dp).clip(RoundedCornerShape(8.dp)).shimmer()) } }
+    // The same blocks as the loaded screen (header height, preview window, 48 dp rows), so nothing moves when it fills in.
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().height(LiveTvTokens.headerH)) {
+            if (Repo.preview) Box(Modifier.padding(start = Tv.margin, top = Tv.topMargin - Tv.s2, bottom = Tv.s3).fillMaxHeight().aspectRatio(16 / 9f).clip(Tv.shape).shimmer())
+            Column(Modifier.weight(1f).padding(start = if (Repo.preview) 24.dp else Tv.margin, top = Tv.topMargin + 4.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(Modifier.fillMaxWidth(.55f).height(22.dp).clip(Tv.shapeS).shimmer())
+                Box(Modifier.fillMaxWidth(.4f).height(14.dp).clip(Tv.shapeS).shimmer())
+                Box(Modifier.fillMaxWidth(.7f).height(12.dp).clip(Tv.shapeS).shimmer())
+            }
+        }
+        Row(Modifier.fillMaxSize()) {
+            Column(Modifier.width(LiveTvTokens.groupW + Tv.margin - 12.dp).padding(start = Tv.margin - 12.dp)) { repeat(8) { Box(Modifier.fillMaxWidth().height(LiveTvTokens.rowH).padding(vertical = 1.dp).clip(Tv.rowShape).shimmer()) } }
+            Column(Modifier.weight(1f).padding(start = Tv.s2, end = Tv.margin - 16.dp)) { repeat(8) { Box(Modifier.fillMaxWidth().height(LiveTvTokens.rowH).padding(vertical = 1.dp).clip(Tv.rowShape).shimmer()) } }
         }
     }
 }
 
 @Composable
 fun ChannelRow(c: Channel, tick: Int, fav: Boolean, onLong: () -> Unit, onFocus: () -> Unit = {}, inPreview: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    // Slim, TiviMate-dense row (40dp): number, logo, name with what's on under it; at the end, what's next above a
-    // hairline progress bar (the bars line up in one column, so the list reads as a quiet now/next table).
+    // One 48 dp row: number (or a small play glyph for the channel that's playing), logo, name | what's on now with its
+    // hairline progress under it | what's next. The columns sit close together, so the row reads left to right with no
+    // large gaps. The playing channel is shown softly: accent name and a play glyph, no fill. The highlight stays white.
     val (now, next) = remember(tick, c) { Repo.nowNext(c) }
-    // The channel that's playing: a faint blue tint and its name in blue (subtle, TiviMate-like); the highlight stays white.
-    TvListRow(onClick = onClick, onLongClick = onLong, modifier = modifier.fillMaxWidth().height(Tv.listRow).padding(vertical = 1.dp).let { if (inPreview) it.background(Tv.accent.copy(alpha = .12f), Tv.rowShape) else it }
+    TvListRow(onClick = onClick, onLongClick = onLong, modifier = modifier.fillMaxWidth().height(LiveTvTokens.rowH).padding(vertical = 1.dp)
         .onFocusChanged { if (it.isFocused) onFocus() }, contentPadding = PaddingValues(horizontal = 10.dp), label = c.name) { focused ->
-        run {
-            val dim = LocalContentColor.current.copy(alpha = .6f)
-            Box(Modifier.width(if (Repo.showNumbers) 40.dp else 20.dp)) {
-                if (inPreview) Icon(Icons.Default.PlayArrow, null, Modifier.size(Tv.iconS), tint = if (focused) dim else Tv.accent)
-                else if (Repo.showNumbers) Text("${c.num}", fontSize = Tv.label, color = dim, maxLines = 1)
+        val dim = LocalContentColor.current.copy(alpha = .6f)
+        Box(Modifier.width(if (Repo.showNumbers) 36.dp else 20.dp)) {
+            if (inPreview) Icon(Icons.Default.PlayArrow, null, Modifier.size(Tv.iconS), tint = if (focused) Tv.onFocus.copy(alpha = .7f) else Tv.accent)
+            else if (Repo.showNumbers) Text("${c.num}", fontSize = Tv.label, color = dim, maxLines = 1)
+        }
+        LogoTile(c, Modifier.size(width = 40.dp, height = 24.dp))
+        Spacer(Modifier.width(12.dp))
+        // Name
+        Row(Modifier.weight(.8f), verticalAlignment = Alignment.CenterVertically) {
+            Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, lineHeight = Tv.bodySmallLine, fontWeight = FontWeight.SemiBold, color = if (inPreview && !focused) Tv.accent else Color.Unspecified, modifier = Modifier.weight(1f, fill = false))
+            if (fav) { Spacer(Modifier.width(6.dp)); Text("★", fontSize = Tv.label, color = Tv.star) }
+            // There's a 4K copy and "Prefer 4K" is on: OK plays that copy (the normal one stays as its backup).
+            if (Repo.fourKFirst && remember(c.url) { Repo.uhdFor(c) != null }) {
+                Spacer(Modifier.width(8.dp))
+                Text("4K", fontSize = Tv.micro, fontWeight = FontWeight.Bold, color = LocalContentColor.current.copy(alpha = .75f),
+                    modifier = Modifier.border(1.dp, LocalContentColor.current.copy(alpha = .45f), RoundedCornerShape(3.dp)).padding(horizontal = 4.dp))
             }
-            LogoTile(c, Modifier.size(width = 40.dp, height = 24.dp))
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(c.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.bodySmall, lineHeight = 17.sp, fontWeight = FontWeight.SemiBold, color = if (inPreview && !focused) Tv.accent else Color.Unspecified, modifier = Modifier.weight(1f, fill = false))
-                    if (fav) { Spacer(Modifier.width(6.dp)); Text("★", fontSize = Tv.label, color = Tv.star) }
-                    // There's a 4K copy and "Prefer 4K" is on: OK plays that copy (the normal one stays as its backup).
-                    if (Repo.fourKFirst && remember(c.url) { Repo.uhdFor(c) != null }) {
-                        Spacer(Modifier.width(8.dp))
-                        Text("4K", fontSize = Tv.micro, fontWeight = FontWeight.Bold, color = LocalContentColor.current.copy(alpha = .75f),
-                            modifier = Modifier.border(1.dp, LocalContentColor.current.copy(alpha = .45f), RoundedCornerShape(3.dp)).padding(horizontal = 4.dp))
-                    }
-                }
-                Text(now?.title ?: "No programme information", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.micro, lineHeight = 14.sp, color = LocalContentColor.current.copy(alpha = .7f))
-            }
-            // Next, and how far through now (one column at the row's end).
-            Column(Modifier.padding(start = 16.dp).width(LIVE_NEXT_W), verticalArrangement = Arrangement.Center) {
-                Text(next?.let { "${hhmm(it.start)}  ${it.title}" } ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.micro, lineHeight = 14.sp, color = LocalContentColor.current.copy(alpha = .55f))
-                Spacer(Modifier.height(5.dp))
-                if (now != null) ProgressLine(liveFraction(now, System.currentTimeMillis()), Modifier.fillMaxWidth(), 2.dp)
-                else Spacer(Modifier.height(2.dp))
+        }
+        Spacer(Modifier.width(LiveTvTokens.colGap))
+        // Now, with how far through it is
+        Column(Modifier.weight(1.25f), verticalArrangement = Arrangement.Center) {
+            Text(now?.title ?: "No programme information", maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.label, lineHeight = Tv.labelLine, color = LocalContentColor.current.copy(alpha = if (now != null) .85f else .5f))
+            if (now != null) ProgressLine(liveFraction(now, System.currentTimeMillis()), Modifier.padding(top = 4.dp).fillMaxWidth().clip(Tv.pill), 2.dp)
+        }
+        Spacer(Modifier.width(LiveTvTokens.colGap))
+        // Next
+        Row(Modifier.width(LiveTvTokens.nextW)) {
+            if (next != null) {
+                Text(hhmm(next.start), maxLines = 1, fontSize = Tv.micro, lineHeight = Tv.microLine, color = LocalContentColor.current.copy(alpha = .55f), modifier = Modifier.width(38.dp))
+                Text(next.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = Tv.micro, lineHeight = Tv.microLine, color = LocalContentColor.current.copy(alpha = .55f), modifier = Modifier.weight(1f))
             }
         }
     }
 }
 
-private val LIVE_NEXT_W = 168.dp
-
-/** The top of Live TV, beside the preview: where you are, what's on the highlighted channel (with a progress line and
- *  time left), what's next, and a short description. Calm: one title, quiet lines under it, red only as a dot. */
+/** The top of Live TV, beside the preview, laid out like the Guide's header: the programme's title, one meta line
+ *  (channel · times · length · time left, with a short progress line), and up to two lines of description.
+ *  Calm: red only as a dot. */
 @Composable
-private fun LiveNowNext(fc: Channel?, guideTick: Int, place: String, modifier: Modifier) {
+private fun LiveNowNext(fc: Channel?, guideTick: Int, modifier: Modifier) {
     Column(modifier.clearAndSetSemantics { }) {
-        Text(place, fontSize = Tv.label, lineHeight = Tv.labelLine, color = Tv.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        if (fc == null) { Text("Live TV", fontSize = Tv.title, lineHeight = Tv.titleLine, fontWeight = Tv.wTitle, color = Tv.text, modifier = Modifier.padding(top = 2.dp)); return@Column }
+        if (fc == null) { Text("Live TV", fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text); return@Column }
         val t = System.currentTimeMillis()
         val (n, nx) = remember(fc, guideTick) { Repo.nowNext(fc) }
-        Text(n?.title ?: fc.name, fontSize = Tv.title, lineHeight = Tv.titleLine, fontWeight = Tv.wTitle, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
-        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(n?.title ?: fc.name, fontSize = Tv.title, fontWeight = FontWeight.Bold, color = Tv.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val bits = listOfNotNull(fc.name, n?.let { "${hhmm(it.start)}–${hhmm(it.end)}" }, n?.let { liveLeftLabel(it, t) })
+        Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             if (n != null) { Box(Modifier.size(Tv.liveDot).background(Tv.live, androidx.compose.foundation.shape.CircleShape)); Spacer(Modifier.width(8.dp)) }
-            Text(listOfNotNull(fc.name, n?.let { "${hhmm(it.start)}–${hhmm(it.end)}" }, n?.let { liveLeftLabel(it, t) }).joinToString("  ·  "),
-                fontSize = Tv.bodySmall, lineHeight = Tv.bodySmallLine, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(bits.joinToString("  ·  "), fontSize = Tv.bodySmall, color = Tv.text2, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            if (n != null) ProgressLine(liveFraction(n, t), Modifier.padding(start = 14.dp).width(120.dp).clip(Tv.pill), 3.dp)
         }
-        if (n != null) ProgressLine(liveFraction(n, t), Modifier.padding(top = 8.dp).width(240.dp).clip(Tv.shapeS), 3.dp)
-        if (nx != null) Text("Next  ${hhmm(nx.start)}  ${nx.title}", fontSize = Tv.caption, lineHeight = Tv.captionLine, color = Tv.text2.copy(alpha = .8f), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
-        if (!n?.desc.isNullOrBlank()) Text(n!!.desc, fontSize = Tv.caption, color = Tv.muted, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.captionLine, modifier = Modifier.padding(top = 2.dp))
+        // The description; with none, what's next stands in, so the block never has a hole.
+        val desc = n?.desc?.takeIf { it.isNotBlank() } ?: nx?.let { "Next  ${hhmm(it.start)}  ${it.title}" } ?: if (n == null) "No programme information" else ""
+        Text(desc, fontSize = Tv.caption, color = Tv.muted, maxLines = 2, overflow = TextOverflow.Ellipsis, lineHeight = Tv.captionLine, modifier = Modifier.padding(top = 4.dp))
     }
 }
