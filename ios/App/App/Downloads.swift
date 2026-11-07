@@ -1,6 +1,7 @@
 import Foundation
 import Capacitor
 import WebKit
+import UIKit
 
 /// Films and episodes kept on the phone for watching offline. Xtream film / episode links are plain files, so they are
 /// fetched as they are (no conversion) by a background URLSession into Application Support/Downloads (not backed up),
@@ -20,6 +21,7 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         var total: Int64 = 0
         var error: String?
         var at: Double
+        var fname: String? = nil    // the file's name in Files (the title); older downloads are "<id>.<ext>"
     }
 
     /// Called with each change ({ id, state, bytes, total, path?, error? }), on the main thread.
@@ -43,8 +45,30 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         try? u.setResourceValues(v)
         return base
     }()
+    /// The films themselves live in Documents/Downloads, so they show in the Files app (On My iPhone > this app) and can be
+    /// shared or copied out, and still play with no connection. Bookkeeping (manifest, resume data) stays private above.
+    static let media: URL = {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Downloads", isDirectory: true)
+        try? FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
+        var u = docs
+        var v = URLResourceValues(); v.isExcludedFromBackup = true
+        try? u.setResourceValues(v)
+        return docs
+    }()
     private var manifest: URL { Self.folder.appendingPathComponent("downloads.json") }
-    private func file(_ e: Entry) -> URL { Self.folder.appendingPathComponent("\(e.id).\(e.ext)") }
+    private func file(_ e: Entry) -> URL { Self.media.appendingPathComponent(e.fname ?? "\(e.id).\(e.ext)") }
+    /// "Oppenheimer (2023)" -> "Oppenheimer (2023).mp4" (no path characters; a clash gets the id added).
+    private func friendlyName(id: String, ext: String, meta: String) -> String? {
+        guard let d = meta.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let t = (o["title"] ?? o["name"]) as? String else { return nil }
+        var base = t.components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|\n\r\t")).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        if let y = o["year"], !"\(y)".isEmpty, "\(y)" != "<null>", !base.contains("\(y)") { base += " (\(y))" }
+        if let sx = o["season"], let ex = o["episode"], !"\(sx)".isEmpty { base += " S\(sx)E\(ex)" }
+        guard !base.isEmpty else { return nil }
+        base = String(base.prefix(80))
+        var name = "\(base).\(ext)"
+        if entries.values.contains(where: { $0.id != id && $0.fname == name }) || FileManager.default.fileExists(atPath: Self.media.appendingPathComponent(name).path) { name = "\(base) [\(id.prefix(8))].\(ext)" }
+        return name
+    }
     private func resumeFile(_ id: String) -> URL { Self.folder.appendingPathComponent("\(id).resume") }
 
     private lazy var session: URLSession = {
@@ -61,6 +85,13 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         queue.sync {
             if let d = try? Data(contentsOf: manifest), let list = try? JSONDecoder().decode([Entry].self, from: d) {
                 for e in list { entries[e.id] = e }
+            }
+        }
+        // Downloads made before the move (Application Support) go to the visible folder.
+        queue.sync {
+            for e in entries.values where e.state == "done" {
+                let old = Self.folder.appendingPathComponent("\(e.id).\(e.ext)")
+                if FileManager.default.fileExists(atPath: old.path) { try? FileManager.default.moveItem(at: old, to: file(e)) }
             }
         }
         // Reattach to what iOS kept downloading while the app was closed; anything left "downloading" without a task
@@ -83,13 +114,17 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         queue.async {
             if let old = self.entries[id], old.state == "done" { self.emit(old); return }
             let clean = ext.lowercased().filter { $0.isLetter || $0.isNumber }
-            self.entries[id] = Entry(id: id, url: url.absoluteString, ext: clean.isEmpty ? "mp4" : String(clean.prefix(5)), headers: headers, meta: meta,
-                                     state: "queued", at: Date().timeIntervalSince1970 * 1000)
+            let ex = clean.isEmpty ? "mp4" : String(clean.prefix(5))
+            self.entries[id] = Entry(id: id, url: url.absoluteString, ext: ex, headers: headers, meta: meta,
+                                     state: "queued", at: Date().timeIntervalSince1970 * 1000, fname: self.friendlyName(id: id, ext: ex, meta: meta))
             self.save(force: true)
             self.emit(self.entries[id]!)
             self.pump()
         }
     }
+
+    /// The saved file of a finished download.
+    func fileURL(_ id: String) -> URL? { queue.sync { entries[id].flatMap { $0.state == "done" ? file($0) : nil } } }
 
     func pause(_ id: String) {
         queue.async {
@@ -266,6 +301,7 @@ public class DownloadsPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "resume", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "remove", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "list", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "share", returnType: CAPPluginReturnPromise),
     ]
 
     override public func load() {
@@ -286,4 +322,14 @@ public class DownloadsPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func resume(_ call: CAPPluginCall) { if let id = call.getString("id") { DownloadManager.shared.resume(id) }; call.resolve() }
     @objc func remove(_ call: CAPPluginCall) { if let id = call.getString("id") { DownloadManager.shared.remove(id) }; call.resolve() }
     @objc func list(_ call: CAPPluginCall) { DownloadManager.shared.list { call.resolve($0) } }
+    /// "Save to Files / Share": the system share sheet for a finished download (Save to Files, AirDrop, open in VLC...).
+    @objc func share(_ call: CAPPluginCall) {
+        guard let id = call.getString("id"), let url = DownloadManager.shared.fileURL(id) else { call.reject("Not downloaded yet"); return }
+        DispatchQueue.main.async {
+            let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            if let pop = vc.popoverPresentationController, let v = self.bridge?.viewController?.view { pop.sourceView = v; pop.sourceRect = CGRect(x: v.bounds.midX, y: v.bounds.midY, width: 1, height: 1); pop.permittedArrowDirections = [] }
+            self.bridge?.viewController?.present(vc, animated: true)
+            call.resolve()
+        }
+    }
 }

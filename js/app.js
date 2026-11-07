@@ -2882,6 +2882,7 @@ async function showDownloads({ keep = false } = {}) {
           : m.error ? `<span class="muted">Stopped: ${esc(m.error)} · ${fmtBytes(m.bytes)} saved</span>` : detail(m)}
         ${!m.done && !m.error ? `<span class="bar dl-bar">${m.estimate ? `<i style="width:${Math.min(99, (m.bytes / m.estimate) * 100).toFixed(1)}%"></i>` : '<i class="indeterminate"></i>'}</span>` : ''}</span>
       ${m.done ? `<button class="btn primary small" data-act="play">${icon('play')} Play</button>` : m.error ? '<button class="btn small" data-act="retry">Retry</button>' : '<button class="btn small" data-act="cancel">Cancel</button>'}
+      ${m.done && m.native ? '<button class="btn small" data-act="share">Save to Files</button>' : ''}
       <button class="icon-btn" data-act="delete" aria-label="Delete">${icon('close')}</button>
     </li>`).join('')}</ul>`
     : `<div class="empty">${icon('film', 'big')}<p><b>No downloads yet</b></p><p class="muted">Open a film or episode and choose Download.${isNative ? ' It carries on with the app closed.' : ' Keep the app open while it downloads.'}</p></div>`}`;
@@ -2893,6 +2894,7 @@ async function showDownloads({ keep = false } = {}) {
     if (!m) return;
     if (m.native) {
       if (act === 'play' || (!act && m.done)) return playOfflineNative(m);
+      if (act === 'share') return nativeDl('share', { id: m.id }).catch(() => toast('Couldn’t open sharing'));
       if (act === 'pause') return pauseNativeDl(m);
       if (act === 'resume') return resumeNativeDl(m);
       if (act === 'delete') {

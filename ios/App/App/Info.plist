@@ -46,6 +46,10 @@
 	<string>$(AppIdentifierPrefix)com.wmorgan97.m3uplayer.shared</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
