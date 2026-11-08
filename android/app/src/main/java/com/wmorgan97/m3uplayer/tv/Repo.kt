@@ -71,7 +71,7 @@ object Repo {
     private val prefs get() = app.getSharedPreferences("tv", Context.MODE_PRIVATE)
     val server get() = prefs.getString("server", DEFAULT_SERVER)!!.trimEnd('/')
     val key get() = prefs.getString("key", "") ?: ""
-    fun init(c: Context) { app = c.applicationContext }
+    fun init(c: Context) { app = c.applicationContext; RefreshPrefs.init(prefs) }
     fun hasKey() = key.isNotEmpty()
     fun saveConfig(key: String, server: String?) { prefs.edit().putString("key", key).apply { if (!server.isNullOrBlank()) putString("server", server) }.apply() }
 
@@ -679,10 +679,10 @@ object Repo {
                     val src = v.optString("sourceUrl"); if (src.isEmpty()) continue
                     tried++
                     val file = File(app.filesDir, "live-" + sha(src).take(16) + ".m3u")
-                    val stale = !file.exists() || System.currentTimeMillis() - file.lastModified() > 12 * 3600_000L
+                    val stale = RefreshHook.playlistStale(k, file)
                     if (stale) try {
                         val text = http(src, timeout = 120_000)
-                        if (text.contains("#EXTINF")) file.writeText(text) else throw IllegalStateException("not a playlist")
+                        if (text.contains("#EXTINF")) { file.writeText(text); RefreshHook.playlistFetched(k) } else throw IllegalStateException("not a playlist")
                     } catch (e: Exception) { failed("playlist download failed", e, src, "the playlist provider") }
                     if (file.exists()) try { val (chs, hdr) = parseM3U(file.readText(), all.size); all += chs; epg += hdr; loaded++ }
                         catch (e: Exception) { failed("playlist parse failed", e, src, "the playlist provider") }
@@ -695,9 +695,9 @@ object Repo {
                     val base = "live-x-" + sha(xs.server + "|" + xs.user).take(12)
                     val fc = File(app.filesDir, "$base-cats.json"); val fs = File(app.filesDir, "$base-streams.json")
                     tried++
-                    if (!fs.exists() || System.currentTimeMillis() - fs.lastModified() > 12 * 3600_000L) try {
+                    if (RefreshHook.playlistStale(k, fs)) try {
                         val c = http(playerApi(xs, "get_live_categories")); val l = http(playerApi(xs, "get_live_streams"), timeout = 120_000)
-                        if (l.trimStart().startsWith("[")) { fc.writeText(c); fs.writeText(l) } else throw IllegalStateException("not a channel list")
+                        if (l.trimStart().startsWith("[")) { fc.writeText(c); fs.writeText(l); RefreshHook.playlistFetched(k) } else throw IllegalStateException("not a channel list")
                     } catch (e: Exception) { failed("Xtream download failed", e, xs.server, "the Xtream provider") }
                     if (fs.exists()) try {
                         val cats = JSONArray(fc.readText())
@@ -852,7 +852,7 @@ object Repo {
         val urls = live?.epgUrls ?: return@withContext false
         if (urls.isEmpty()) return@withContext false
         val now = System.currentTimeMillis()
-        val want = channels.filter { val k = chanKey(it); k.isNotEmpty() && (asked[k] ?: 0) < now - 3 * 3600_000L }
+        val want = channels.filter { val k = chanKey(it); k.isNotEmpty() && RefreshHook.guideWanted(programmes.containsKey(k), asked[k] ?: 0, now) }
         if (want.isEmpty()) return@withContext false
         want.forEach { asked[chanKey(it)] = now }
         var got = false
@@ -869,7 +869,7 @@ object Repo {
                     android.util.JsonReader(rd).use { readGuide(it, cutoff, now2, keepExisting = false) }
                 }
                 pruneGuide(cutoff)
-                got = true
+                got = true; RefreshHook.guideFetched()
                 saveGuideSoon()
             } catch (e: Exception) { warn("guide batch failed", e); batch.forEach { asked.remove(chanKey(it)) } }
         }

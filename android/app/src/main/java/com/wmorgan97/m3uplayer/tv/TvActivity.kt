@@ -145,6 +145,7 @@ class TvActivity : ComponentActivity() {
         lifecycleScope.launch { delay(1500); runCatching { Repo.overview("movies") }; runCatching { Repo.overview("series") } }   // rows ready before Movies / Series are opened
         lifecycleScope.launch { delay(2500); com.wmorgan97.m3uplayer.PlayerHolder.warm(this@TvActivity) }   // a player ready before play is pressed
         Repo.loadSavedGuide()
+        RefreshScheduler.start(lifecycleScope)   // refresh playlists / guide at the intervals chosen in Settings
         Handoff.start(this)   // "Play on TV" from the phone: checks for a request every few seconds while open (Handoff.kt)
         lifecycleScope.launch { while (true) { checkReminders(); delay(15_000) } }
         // Every 10 min, pick up what the other devices changed (reminders set on the phone, favourites) while the app stays open.

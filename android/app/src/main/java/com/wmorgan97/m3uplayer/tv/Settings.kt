@@ -193,6 +193,7 @@ private fun sectionRows(
                     menu("Add playlist", listOf("Xtream login (server, username, password)" to { ask(playlistForm(null, JSONObject().put("kind", "xtream"))) },
                         "M3U playlist link" to { ask(playlistForm(null, JSONObject().put("kind", "url"))) }))
                 },
+            ) + refreshPlaylistRows(sources.map { it.first to it.second.optString("name").ifBlank { "Playlist" } }, say, chooser, changed) + listOf(
                 SettingRow.Header("Maintenance"),
                 SettingRow.Action(Icons.Default.Refresh, "Refresh channel lists", "Download every playlist again", count(sources.size, "playlist"), onClick = ::refreshLists),
             )
@@ -237,8 +238,7 @@ private fun sectionRows(
             val upcoming = Repo.reminders.count { it.start > System.currentTimeMillis() }
             listOf(
                 SettingRow.Action(Icons.Default.CalendarViewWeek, "Open the TV Guide", "Hold OK on a programme to set a reminder", if (upcoming == 0) "No reminders" else count(upcoming, "reminder")) { act.root(Screen.Guide()) },
-                SettingRow.Note("The guide refreshes automatically every 3 hours."),
-            )
+            ) + refreshGuideRows(say, chooser, changed)
         }
         Sec.Playback -> {
             val subs = player.getBoolean("textOn", false)
