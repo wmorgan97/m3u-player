@@ -13,13 +13,13 @@ object RefreshPolicy {
     const val MANUAL = 0
     const val DEFAULT_PLAYLIST_H = 12
     const val DEFAULT_GUIDE_H = 6
-    val PLAYLIST_CHOICES = listOf(APP_START, 6, 12, 24, 48, MANUAL)
-    val GUIDE_CHOICES = listOf(6, 12, 24, 48, MANUAL)
+    val PLAYLIST_CHOICES = listOf(APP_START, 1, 2, 3, 4, 6, 8, 12, 24, 48, 72, MANUAL)
+    val GUIDE_CHOICES = listOf(1, 2, 3, 4, 6, 8, 12, 24, 48, 72, MANUAL)
     /** "Update on app start" never refetches data younger than this (opening the app twice in a row downloads once). */
     const val START_GAP_MS = 60 * 60_000L
     private const val HOUR = 3_600_000L
 
-    fun label(i: Int) = when (i) { APP_START -> "App start only"; MANUAL -> "Manual only"; else -> "$i hours" }
+    fun label(i: Int) = when (i) { APP_START -> "App start only"; MANUAL -> "Manual only"; 1 -> "1 hour"; else -> "$i hours" }
     fun short(i: Int) = when (i) { APP_START -> "App start"; MANUAL -> "Manual"; else -> "$i h" }
 
     /**

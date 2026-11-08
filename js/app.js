@@ -3899,8 +3899,8 @@ function parseEpgLocally(urls, opts) {
 // The server keeps the whole provider guide indexed; the app asks for the channels it is showing
 // (the rows on screen, the guide grid) in small batches and merges them into one Guide per playlist.
 // Auto refresh (Settings): hours between updates; playlists -1 = app start only, 0 = manual only (guide: 0 = manual only).
-const refreshPlHours = () => { const v = state.settings.refreshPl; return [-1, 0, 6, 12, 24, 48].includes(v) ? v : 24; };
-const refreshEpgHours = () => { const v = state.settings.refreshEpg; return [0, 6, 12, 24, 48].includes(v) ? v : 6; };
+const refreshPlHours = () => { const v = state.settings.refreshPl; return [-1, 0, 1, 2, 3, 4, 6, 8, 12, 24, 48, 72].includes(v) ? v : 24; };
+const refreshEpgHours = () => { const v = state.settings.refreshEpg; return [0, 1, 2, 3, 4, 6, 8, 12, 24, 48, 72].includes(v) ? v : 6; };
 const guideFresh = () => (refreshEpgHours() || 30 * 24) * HOUR;   // manual: only what is missing is asked
 let plStartDone = false;
 const guideAsked = new Map();   // playlist id -> Map of channel key -> when it was last requested
@@ -5894,10 +5894,10 @@ async function settingsSheet() {
       ${canSync() ? `<label class="switch"><span><b>Film &amp; TV info (TMDB)</b><span class="muted">Trending this week, backdrops, plots, cast and trailers.</span></span><button type="button" class="btn small" id="tmdb-btn">${tmdbOn ? 'Connected' : 'Set up'}</button></label>
         <label class="switch"><span><b>Ratings (OMDb)</b><span class="muted">OMDb key — adds IMDb and Rotten Tomatoes ratings.</span></span><button type="button" class="btn small" id="omdb-btn">${omdbOn ? 'Connected' : 'Set up'}</button></label>` : ''}
       <label>Update playlists<select name="refreshPl">
-        ${[[-1, 'App start only'], [6, 'Every 6 hours'], [12, 'Every 12 hours'], [24, 'Every 24 hours'], [48, 'Every 48 hours'], [0, 'Manual only']].map(([v, l]) => `<option value="${v}" ${refreshPlHours() === v ? 'selected' : ''}>${l}</option>`).join('')}
+        ${[[-1, 'App start only'], [1, 'Every 1 hour'], [2, 'Every 2 hours'], [3, 'Every 3 hours'], [4, 'Every 4 hours'], [6, 'Every 6 hours'], [8, 'Every 8 hours'], [12, 'Every 12 hours'], [24, 'Every 24 hours'], [48, 'Every 48 hours'], [72, 'Every 72 hours'], [0, 'Manual only']].map(([v, l]) => `<option value="${v}" ${refreshPlHours() === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
       <label>Update TV guide<select name="refreshEpg">
-        ${[[6, 'Every 6 hours'], [12, 'Every 12 hours'], [24, 'Every 24 hours'], [48, 'Every 48 hours'], [0, 'Manual only']].map(([v, l]) => `<option value="${v}" ${refreshEpgHours() === v ? 'selected' : ''}>${l}</option>`).join('')}
+        ${[[1, 'Every 1 hour'], [2, 'Every 2 hours'], [3, 'Every 3 hours'], [4, 'Every 4 hours'], [6, 'Every 6 hours'], [8, 'Every 8 hours'], [12, 'Every 12 hours'], [24, 'Every 24 hours'], [48, 'Every 48 hours'], [72, 'Every 72 hours'], [0, 'Manual only']].map(([v, l]) => `<option value="${v}" ${refreshEpgHours() === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
       <label>Movies &amp; series languages<select name="vodLanguage">
         ${[['en', 'English only'], ['all', 'All languages']].map(([v, l]) => `<option value="${v}" ${(s.vodLanguage || 'en') === v ? 'selected' : ''}>${l}</option>`).join('')}
