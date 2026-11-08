@@ -10,6 +10,7 @@ import { matchUpcoming } from './follow.js';
 import { wlKey, wlEntry, watchLaterList, adoptWatchLater } from './watchlater.js';
 import { SPORT_QUERIES, SPORTS, classify, cleanTitle, channelLabel, isNoise, isSportsChannel, isUkChannel, isWomens, wantsWomens, isLiveEvent, otherLanguage, buildSports, groupByDay, bySport, importance } from './sports.js';
 import { fixtureTitle, isOn as fxIsOn, followMatches, teamChannelFor, isTeamChannelGroup, isEventGroup, eventChannelsFor, namesPerson, fixtureForProgramme, dedupeFollows } from './fixtures.js';
+import { foldName, letterOf, orderGroups, bulkHidden, changedCount, moveName, newGroupsToHide } from './groups.js';
 import { $, esc, icon, toast, sheet, closeSheet, menu, confirmDialog, formSheet } from './ui.js';
 import { isNative, isTV, nativePlay, nativeShare, nativeVlc, nativeVlcClose, nativeDl, headersFromOpts } from './native.js';
 import { handoffEntry, hasTv, openTvs } from './handoff.js';
@@ -242,6 +243,49 @@ async function adoptHidden(remote) {
   }
   return changed;
 }
+// Manage-groups settings (js/groups.js, server gprefs): per playlist p.gprefs = { "<tab>\u0001<field>[\u0001<group>]": { v, at } }.
+// Fields: sort (provider|az|count|custom), order (names), newg (show|hide newly added groups), name (+ group: display name).
+const gpKey = (tab, field, g) => [tab, field, ...(g === undefined ? [] : [g])].join(HSEP);
+const gpGet = (p, tab, field, g) => p.gprefs?.[gpKey(tab, field, g)]?.v;
+function gpSet(p, tab, field, v, g) { p.gprefs = { ...(p.gprefs || {}), [gpKey(tab, field, g)]: { v, at: Date.now() } }; syncSoon(); }
+function localGprefs() {
+  const out = {};
+  for (const p of state.playlists) { const k = sourceKey(p); if (k) for (const [e, v] of Object.entries(p.gprefs || {})) out[`${k}${HSEP}${e}`] = v; }
+  return out;
+}
+async function adoptGprefs(remote) {
+  let changed = false;
+  for (const p of state.playlists) {
+    const k = sourceKey(p);
+    if (!k) continue;
+    let dirty = false;
+    for (const [key, v] of Object.entries(remote)) {
+      if (!key.startsWith(k + HSEP) || !v || (v.at || 0) <= (p.gprefs?.[key.slice(k.length + 1)]?.at || 0)) continue;
+      (p.gprefs ||= {})[key.slice(k.length + 1)] = { v: v.v, at: v.at }; dirty = true;
+    }
+    if (dirty) { await save(p); changed = true; }
+  }
+  return changed;
+}
+/** What a group is called on screen: your display name, else the cleaned-up provider name. */
+function groupTitle(p, tab, name) {
+  return gpGet(p, tab, 'name', name) || ((p.kind === 'xtream' && tab !== 'live') ? groupLabel(name) : (prettyGroup(name) || UNGROUPED));
+}
+/** Chip order for a tab: the playlist's own, or A-Z / biggest / your custom order (display-only; the channels never move). */
+function prefGroups(p, tab, groups) {
+  const sort = p.virtual ? 'provider' : gpGet(p, tab, 'sort') || 'provider';
+  return sort === 'provider' ? groups : orderGroups(groups, { sort, order: gpGet(p, tab, 'order') || [] }, g => groupTitle(p, tab, g.name));
+}
+/** "Show newly added groups" off: groups that appeared since the last look start hidden (synced like any other hide). */
+function applyNewGroups(p, tab, names) {
+  if (p.virtual || gpGet(p, tab, 'newg') !== 'hide' || !names.length) return;
+  const r = newGroupsToHide(p.knownGroups?.[tab], names, 'hide');
+  const grew = r.known.length !== (p.knownGroups?.[tab]?.length ?? -1);
+  if (!r.hide.length && !grew) return;
+  p.knownGroups = { ...(p.knownGroups || {}), [tab]: r.known };
+  if (r.hide.length) setGroupsHidden(p, new Set([...(p.hiddenGroups || []), ...r.hide]));
+  save(p).catch(() => {});
+}
 // Playlists added on another device: add them here too (once; a failure is retried at the next sync).
 const adoptingSources = new Set();
 async function adoptSources(remote) {
@@ -272,7 +316,7 @@ const CID = Math.random().toString(36).slice(2, 12);
 const syncApi = (path = 'sync') => { let u = serverApi(path); const id = deviceProfile().id; if (id !== MAIN) u += `${u.includes('?') ? '&' : '?'}profile=${encodeURIComponent(id)}`; return `${u}${u.includes('?') ? '&' : '?'}cid=${CID}`; };
 let syncing = null, syncAgain = false;
 const syncBody = () => JSON.stringify({
-  favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {}, hidden: localHidden(),
+  favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {}, hidden: localHidden(), gprefs: localGprefs(),
   ...(state.settings.hideScoresAt ? { prefs: { hideScores: { v: !!state.settings.hideScores, at: state.settings.hideScoresAt } } } : {}),
   ...(Object.keys(state.profiles || {}).length ? { profiles: state.profiles } : {}) });
 async function syncNow() {
@@ -296,7 +340,9 @@ async function syncNow() {
       if (Array.isArray(d.recents) && urls(d.recents) !== urls(state.recents)) { state.recents = d.recents; db.set('recents', d.recents); changed = true; }
       if (d.progress) { state.progress = d.progress; db.set('progress', d.progress).catch(() => {}); }
       if (d.sources) adoptSources(d.sources);
-      if (d.hidden && await adoptHidden(d.hidden)) changed = true;
+      let groupsChanged = false;
+      if (d.hidden && await adoptHidden(d.hidden)) { changed = true; groupsChanged = true; }
+      if (d.gprefs && await adoptGprefs(d.gprefs)) { changed = true; groupsChanged = true; }
       if (d.reminders) await adoptReminders(d.reminders);
       if (d.follows) await adoptFollows(d.follows);
       const hs = d.prefs?.hideScores;   // Hide scores, set on another device (newest edit wins)
@@ -312,7 +358,10 @@ async function syncNow() {
       Object.assign(syncMeta, { favAt: d.favAt || syncMeta.favAt, recReset: d.recReset || syncMeta.recReset });
       db.set('syncMeta', syncMeta).catch(() => {});
       // Never redraw Home under a playing channel or while you're typing; keep the scroll position.
-      if (changed && !state.current && !state.playing && !document.activeElement?.matches('input, textarea')) rerender();
+      const idle = !state.playing && !document.activeElement?.matches('input, textarea');
+      // Hides / order changed on another device: redraw the chips (also while you are inside a playlist) and an open Manage groups
+      if (groupsChanged && idle && mgReopen) mgReopen();
+      else if (changed && (!state.current || groupsChanged) && idle) rerender();
     } catch {} finally {
       syncing = null;
       if (syncAgain) { syncAgain = false; syncNow(); }
@@ -2125,7 +2174,23 @@ function showPlaylist(p) {
     if (go && go.dataset.go !== location.hash) location.hash = go.dataset.go;
   });
   $('#q').oninput = debounce(e => { state.query = e.target.value.trim().toLowerCase(); requestAnimationFrame(() => { applyFilter(); toListTop(); }); }, 120);
-  $('#chips').onclick = async e => {
+  // Long-press (or right-click) a group chip: its quick menu, like TiviMate's group options
+  const chips = $('#chips');
+  let held = null, heldFired = false;
+  chips.onpointerdown = e => {
+    const c = e.target.closest('.chip[data-group]');
+    heldFired = false;
+    if (!c || state.current?.virtual || e.button > 0) return;
+    const x = e.clientX, y = e.clientY;
+    clearTimeout(held);
+    held = setTimeout(() => { heldFired = true; navigator.vibrate?.(8); chipMenu(c.dataset.group); }, 480);
+    chips.onpointermove = m => { if (Math.hypot(m.clientX - x, m.clientY - y) > 8) clearTimeout(held); };
+  };
+  chips.onpointerup = chips.onpointercancel = chips.onpointerleave = () => clearTimeout(held);
+  chips.oncontextmenu = e => { const c = e.target.closest('.chip[data-group]'); if (c) { e.preventDefault(); if (!heldFired && !state.current?.virtual) chipMenu(c.dataset.group); } };
+  chips.onclick = async e => {
+    if (heldFired) { heldFired = false; return; }
+    if (e.target.closest('[data-manage]')) return groupsSheet(state.current, state.tab);
     if (e.target.closest('[data-more-groups]')) { state.allGroups = !state.allGroups; renderChips(); return; }
     const b = e.target.closest('.chip');
     if (!b) return;
@@ -2417,10 +2482,31 @@ async function loadVodNow(p, tab, { force = false } = {}) {
   }
 }
 
+// Quick menu for one group (long-press its chip): hide, rename, move to top, or open Manage groups.
+function chipMenu(name) {
+  const p = state.current, tab = state.tab;
+  if (!p || p.virtual) return;
+  const t = groupTitle(p, tab, name), order = () => (gpGet(p, tab, 'sort') === 'custom' && gpGet(p, tab, 'order')?.length ? gpGet(p, tab, 'order') : (groupsForTab(p, tab) || []).map(g => g.name));
+  menu(t, [
+    { label: 'Hide group', fn: async () => { setGroupsHidden(p, new Set([...(p.hiddenGroups || []), name])); await save(p); if (state.group === name) state.group = null; rerender(); toast(`Hid “${t}”`, { action: 'Undo', fn: async () => { setGroupsHidden(p, new Set((p.hiddenGroups || []).filter(g => g !== name))); await save(p); rerender(); } }); } },
+    { label: 'Rename…', fn: async () => {
+      const v = await formSheet({ title: 'Group name', fields: [{ name: 'name', label: 'Shown as', value: t }], submit: 'Save', intro: 'Only changes how it is shown. The provider name stays, so hiding and syncing keep working.' });
+      if (!v) return;
+      gpSet(p, tab, 'name', v.name.trim() === (tab === 'live' || p.kind !== 'xtream' ? prettyGroup(name) : groupLabel(name)) ? '' : v.name.trim(), name);
+      await save(p); rerender();
+    } },
+    gpGet(p, tab, 'name', name) && { label: 'Restore original name', fn: async () => { gpSet(p, tab, 'name', '', name); await save(p); rerender(); } },
+    { label: 'Move to top', fn: async () => { gpSet(p, tab, 'order', moveName(order(), name, 'top')); gpSet(p, tab, 'sort', 'custom'); await save(p); rerender(); toast('Moved to top'); } },
+    { label: 'Manage groups…', fn: () => groupsSheet(p, tab, { } ) },
+  ]);
+}
+
 function renderChips() {
   const p = state.current;
   const entry = p.kind === 'xtream' && state.tab !== 'live' ? vodCache.get(vodKey(p, state.tab)) : null;
-  const groups = (entry && !Array.isArray(entry) ? entry.groupList : cachedGroups(p, currentItems(), p.kind === 'xtream' ? 'x:' + state.tab : state.tab)).filter(g => !p.hiddenGroups?.includes(g.name));
+  const allGroups = entry && !Array.isArray(entry) ? entry.groupList : cachedGroups(p, currentItems(), p.kind === 'xtream' ? 'x:' + state.tab : state.tab);
+  applyNewGroups(p, state.tab, allGroups.map(g => g.name));
+  const groups = prefGroups(p, state.tab, allGroups.filter(g => !p.hiddenGroups?.includes(g.name)));   // your sort / custom order, hidden ones out
   if (state.group !== null && !groups.some(g => g.name === state.group) && !entry?.moreGroups?.some(g => g.name === state.group)) state.group = null;
   const locked = g => !p.virtual && p.lockedGroups?.includes(g) && !state.unlocked;
   const visibleCount = entry && !Array.isArray(entry) ? entry.total : groups.filter(g => !locked(g.name)).reduce((n, g) => n + g.count, 0);
@@ -2430,7 +2516,7 @@ function renderChips() {
   const pinned = new Set(p.homeGroups || []);
   if (pinned.size) groups.sort((a, b) => pinned.has(b.name) - pinned.has(a.name));   // stable: starred groups first, then your order
   $('#chips').hidden = !showGroups;
-  const groupChip = g => chip(g.name ? (entry ? groupLabel(g.name) : prettyGroup(g.name)) : UNGROUPED, g.count, state.group === g.name,
+  const groupChip = g => chip(g.name ? (gpGet(p, state.tab, 'name', g.name) || (entry ? groupLabel(g.name) : prettyGroup(g.name))) : UNGROUPED, g.count, state.group === g.name,
     `data-group="${esc(g.name)}" ${locked(g.name) ? 'data-locked="1"' : ''}`, locked(g.name));
   let body = '';
   if (showGroups && entry && !Array.isArray(entry) && !pinned.size) {
@@ -2445,7 +2531,8 @@ function renderChips() {
       if (state.allGroups || more.some(g => g.name === state.group)) body += more.map(groupChip).join('');
     }
   } else if (showGroups) body = groups.map(groupChip).join('');
-  $('#chips').innerHTML = chip(entry ? `All ${state.tab === 'series' ? 'series' : 'movies'}` : 'All', visibleCount, state.group === null, 'data-all') + body;
+  const manage = !p.virtual ? `<button class="chip chip-manage" data-manage aria-label="Manage groups">${icon('sliders')}Manage</button>` : '';
+  $('#chips').innerHTML = chip(entry ? `All ${state.tab === 'series' ? 'series' : 'movies'}` : 'All', visibleCount, state.group === null, 'data-all') + manage + body;
   const active = $('#chips .chip.active'), bar = $('#chips');
   if (active && bar) {   // bring the selected group into view inside the chip row / sidebar, never scroll the page
     if (bar.scrollWidth > bar.clientWidth) bar.scrollLeft = active.offsetLeft - bar.clientWidth / 2 + active.offsetWidth / 2;
@@ -5334,199 +5421,361 @@ function accountSheet(p) {
   });
 }
 
-function groupsSheet(p, tab, { scroll = 0, q = '' } = {}) {
-  const items = tab === 'live' ? p.channels : vodCache.get(vodKey(p, tab)) || [];
-  const groups = Array.isArray(items) ? groupsOf(items) : items.groupList;
-  const hidden = new Set(p.hiddenGroups || []);
-  const locked = new Set(p.lockedGroups || []);
+// ---------- Manage groups ----------
+// A full-height sheet per playlist and tab (Live / Movies / Series). One tap on a row toggles it in place (class flips only:
+// no re-render, no scroll jump); the playlist is saved after a short pause and the screen behind redraws when the sheet closes.
+// Display settings (sort, custom order, "show newly added groups", display names) are the synced `gprefs` (js/groups.js).
+function groupsForTab(p, tab) {
+  if (p.kind === 'xtream' && tab !== 'live') {
+    const e = vodCache.get(vodKey(p, tab));
+    if (!e) return null;                                   // not loaded yet
+    return Array.isArray(e) ? groupsOf(e) : [...e.groupList, ...(e.moreGroups || [])];
+  }
+  const k = m3uKinds(p);
+  return cachedGroups(p, k ? k[tab] : p.channels, p.kind === 'xtream' ? 'x:' + tab : tab);
+}
+let mgReopen = null;   // set while the sheet is open: rebuild it from the playlist (a sync brought changes)
+
+function groupsSheet(p, tab, memo = {}) {
+  const src = groupsForTab(p, tab);
   const what = tab === 'live' ? 'channel' : tab === 'movies' ? 'movie' : 'show';
-  const shown = groups.length - groups.filter(g => hidden.has(g.name)).length;
-  // Provider lists prefix groups with a country/region ("UK | SPORTS"). Offer those prefixes as
-  // one-tap filters: tap UK -> only UK groups stay visible; tap more to add; All restores.
+  const tabName = tab === 'live' ? 'Live TV' : tab === 'movies' ? 'Movies' : 'Series';
+  if (!src || !src.length) {
+    sheet(`<div class="mg-empty-page"><div class="sheet-title">Manage groups · ${tabName}</div>
+      <p class="muted center">${src ? 'This playlist has no groups here yet.' : `Open ${tabName} once so its groups load, then come back.`}</p>
+      <div class="form-actions"><button class="btn" data-done>OK</button></div></div>`, { onMount: el => { el.onclick = e => { if (e.target.closest('[data-done]')) closeSheet(); }; } });
+    return;
+  }
+  const locked = new Set(p.lockedGroups || []), home = new Set(p.homeGroups || []);
+  const titleOf = name => groupTitle(p, tab, name);
+  const prettyOf = n => (p.kind === 'xtream' && tab !== 'live') ? groupLabel(n) : (prettyGroup(n) || UNGROUPED);
+  let sort = gpGet(p, tab, 'sort') || 'provider';
+  let view = memo.view || 'all', q = memo.q || '', reorder = false, dirty = false, saveTimer = 0;
+  const hiddenSet = () => new Set(p.hiddenGroups || []);
+  const mk = g => ({ g, h: !!p.hiddenGroups?.includes(g.name), li: null, hay: `${foldName(titleOf(g.name))} ${foldName(g.name)}` });
+  let rows = orderGroups(src, { sort, order: gpGet(p, tab, 'order') || [] }, g => titleOf(g.name)).map(mk);
+  const allNames = () => src.map(g => g.name);
+
   const byPrefix = new Map();
-  for (const g of groups) { const k = regionOf(g.name) || 'OTHER'; if (!byPrefix.has(k)) byPrefix.set(k, []); byPrefix.get(k).push(g.name); }
+  for (const g of src) { const k = regionOf(g.name) || 'OTHER'; if (!byPrefix.has(k)) byPrefix.set(k, []); byPrefix.get(k).push(g.name); }
   const prefixes = [...byPrefix.entries()].sort((a, b) => (a[0] === 'OTHER') - (b[0] === 'OTHER') || b[1].length - a[1].length);
-  const prefixOn = k => byPrefix.get(k).some(n => !hidden.has(n));
-  const chipsHtml = prefixes.length > 1 ? `<div class="chips pchips">
-      <button class="chip ${hidden.size === 0 ? 'active' : ''}" data-prefix="*">All</button>
-      ${prefixes.map(([k, names]) => `<button class="chip ${prefixOn(k) && hidden.size ? 'active' : ''}" data-prefix="${esc(k)}">${k === 'OTHER' ? 'Other / US' : esc(k)}<span>${names.length}</span></button>`).join('')}
-    </div>` : '';
-  // Bulk visibility: type a word (e.g. "UK") to filter the list, then keep only those / hide those / show all.
-  sheet(`<div class="sheet-title">Groups${tab === 'live' ? '' : ` · ${tab}`}</div>
-    <p class="muted center">${shown} of ${groups.length} groups shown. Tick = shown everywhere. ★ = on your Home screen${(p.homeGroups || []).length ? ` (${p.homeGroups.length} pinned)` : ''}.</p>
-    ${chipsHtml}
-    <label class="search gsearch">${icon('search')}<input id="g-q" type="search" placeholder="Filter groups, e.g. UK" autocomplete="off" autocorrect="off" spellcheck="false"></label>
-    <div class="gbulk">
-      <button class="btn small primary" data-bulk="only">Show only these</button>
-      <button class="btn small" data-bulk="hide">Hide these</button>
-      <button class="btn small" data-bulk="show">Show these</button>
-      <button class="btn small" data-bulk="all">Show all</button>
+  const newgHide = gpGet(p, tab, 'newg') === 'hide';
+
+  const rowHtml = r => {
+    const { g } = r, t = titleOf(g.name), n = g.name;
+    return `<li class="mg-li${r.h ? ' is-hidden' : ''}" data-l="${esc(letterOf(t))}">
+      <button class="mg-row" role="switch" aria-checked="${!r.h}" data-act="tog" aria-label="${esc(t)}, ${plural(g.count, what)}">
+        <span class="mg-name"><span class="mg-t">${locked.has(n) ? icon('lock') : ''}${home.has(n) ? icon('star') : ''}${esc(t)}</span><span class="mg-sub">${plural(g.count, what)}</span></span>
+        <span class="mg-sw" aria-hidden="true"></span>
+      </button>
+      <span class="mg-reo"><button class="mg-mv" data-act="up" aria-label="Move ${esc(t)} up">▲</button><button class="mg-mv" data-act="down" aria-label="Move ${esc(t)} down">▼</button><span class="mg-grip" data-act="drag" aria-label="Drag ${esc(t)}">${icon('grip')}</span></span>
+      <button class="mg-more" data-act="more" aria-label="Options for ${esc(t)}">${icon('more')}</button>
+    </li>`;
+  };
+  sheet(`<div class="mg" role="dialog" aria-label="Manage groups, ${tabName}" tabindex="-1">
+    <header class="mg-head">
+      <button class="mg-link" data-act="reorder">Reorder</button>
+      <div class="mg-title"><b>Manage groups</b><span class="mg-subtitle" id="mg-sum"></span></div>
+      <button class="mg-link strong" data-act="done">Done</button>
+    </header>
+    <div class="mg-tools">
+      <label class="search mg-search">${icon('search')}<input id="g-q" type="search" enterkeyhint="search" placeholder="Search ${src.length.toLocaleString()} groups" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Search groups"></label>
+      <div class="mg-seg" role="group" aria-label="Show">
+        <button data-view="all">All <i id="mg-n-all"></i></button><button data-view="shown">Shown <i id="mg-n-shown"></i></button><button data-view="hidden">Hidden <i id="mg-n-hidden"></i></button>
+      </div>
     </div>
-    ${tab === 'live' ? `<div class="gbulk gsort"><span class="muted">Order:</span>
-      <button class="btn small" data-sort="shown">Shown first</button>
-      <button class="btn small" data-sort="az">A–Z</button>
-      <button class="btn small" data-sort="count">Biggest first</button>
-      <span class="muted gdrag-hint">${icon('grip')} drag to arrange</span></div>` : ''}
-    <ul class="glist">${groups.map((g, i) => `<li data-i="${i}" data-gname="${esc((g.name || UNGROUPED).toLowerCase())}" class="${hidden.has(g.name) ? 'is-hidden' : ''}">
-      <input type="checkbox" class="gcheck" data-act="eye" data-g="${i}" ${hidden.has(g.name) ? '' : 'checked'} aria-label="Show ${esc(g.name || UNGROUPED)}">
-      <span class="row-text"><span class="row-name">${locked.has(g.name) ? icon('lock') : ''}${esc(prettyGroup(g.name) || UNGROUPED)}</span><span class="muted">${plural(g.count, what)}${hidden.has(g.name) ? ' · hidden' : ''}</span></span>
-      ${tab === 'live' ? `<button class="icon-btn star${(p.homeGroups || []).includes(g.name) ? ' on' : ''}" data-act="pin" data-g="${i}" aria-label="Show on Home">${icon('star')}</button>` : ''}
-      <button class="btn small" data-act="more" data-g="${i}">Options</button>
-      ${tab === 'live' ? `<span class="ghandle" data-act="drag" aria-label="Drag to reorder">${icon('grip')}</span>` : ''}
-    </li>`).join('')}</ul>`, {
+    <div class="mg-body">
+      <div class="mg-opts">
+        <button class="mg-optrow mg-optbtn" data-act="opts" aria-expanded="false"><span>Sorting and options</span><span class="mg-sortlbl" id="mg-sortlbl"></span><span class="mg-chev" aria-hidden="true">›</span></button>
+        <div class="mg-optin" hidden>
+        <div class="mg-optrow"><span class="mg-optlabel">Sort</span><div class="mg-seg small" role="group" aria-label="Groups sorting">
+          <button data-sort="provider">Playlist</button><button data-sort="az">A–Z</button><button data-sort="count">Biggest</button><button data-sort="custom">Custom</button></div></div>
+        <button class="mg-optrow mg-switchrow" role="switch" aria-checked="${!newgHide}" data-act="newg"><span><b>Show newly added groups</b><small>Off: groups that appear after a refresh start hidden</small></span><span class="mg-sw" aria-hidden="true"></span></button>
+        ${prefixes.length > 1 ? `<div class="mg-quick" aria-label="Quick pick by country">${prefixes.map(([k, names]) => `<button class="chip" data-prefix="${esc(k)}">${k === 'OTHER' ? 'Other' : esc(k)}<span>${names.length}</span></button>`).join('')}</div>` : ''}
+        </div>
+      </div>
+      <ul class="mg-list" id="mg-list">${rows.map(rowHtml).join('')}</ul>
+      <div class="mg-none" hidden></div>
+    </div>
+    <nav class="mg-rail" aria-hidden="true" hidden></nav>
+    <footer class="mg-bar">
+      <button class="btn" data-bulk="show"></button><button class="btn" data-bulk="hide"></button><button class="btn primary" data-bulk="only">Only these</button>
+    </footer>
+    <div class="mg-layer" hidden></div>
+  </div>`, {
     onMount: el => {
-      const rows = [...el.querySelectorAll('.glist > li')];
-      const visibleRows = () => rows.filter(li => !li.hidden);
-      const qEl = el.querySelector('#g-q');
-      const filterRows = () => { const t = qEl.value.trim().toLowerCase(); rows.forEach(li => { li.hidden = !!t && !li.dataset.gname.includes(t); }); };
-      qEl.oninput = filterRows;
-      // After a change the sheet is rebuilt: keep the filter text and the scroll position, so nothing jumps.
-      if (q) { qEl.value = q; filterRows(); }
-      if (scroll) el.scrollTop = scroll;
-      let memo = { scroll, q };
-      const remember = () => { memo = { scroll: el.scrollTop, q: qEl.value }; };
-      const reopen = () => groupsSheet(p, tab, memo);
-      const setHidden = async (fn) => {
-        const set = new Set(p.hiddenGroups || []);
-        fn(set);
-        setGroupsHidden(p, set);
+      el.classList.add('mg-sheet');
+      const root = el.querySelector('.mg'), list = el.querySelector('#mg-list'), body = el.querySelector('.mg-body'), qEl = el.querySelector('#g-q');
+      const none = el.querySelector('.mg-none'), rail = el.querySelector('.mg-rail'), layer = el.querySelector('.mg-layer');
+      [...list.children].forEach((li, i) => { rows[i].li = li; li._r = rows[i]; });
+      // ---- persistence: the sheet never waits on IndexedDB; it saves after a pause and when it closes
+      const flush = async () => {
+        clearTimeout(saveTimer); saveTimer = 0;
+        if (!dirty) return;
+        dirty = false;
         await save(p);
-        rerender();
-        reopen();
       };
-      // Reorder groups: `order` is the full list of group names in the wanted order.
-      const applyOrder = async order => {
-        const rank = new Map(order.map((n, k) => [n, k]));
-        p.channels = [...p.channels].sort((a, c) => (rank.get(a.group || '') ?? 1e9) - (rank.get(c.group || '') ?? 1e9));
-        await save(p);
-        rerender();
-        reopen();
+      const persistSoon = () => { dirty = true; clearTimeout(saveTimer); saveTimer = setTimeout(flush, 400); };
+      const memoNow = () => ({ q: qEl.value, view, scroll: body.scrollTop });
+      mgReopen = () => { if (!document.activeElement?.matches('input')) groupsSheet(p, tab, memoNow()); };
+      let hiddenNow = hiddenSet();
+      // ---- counts / header
+      const sum = () => {
+        const shown = rows.reduce((n, r) => n + !r.h, 0), hid = rows.length - shown;
+        el.querySelector('#mg-sum').textContent = `${tabName} · ${shown.toLocaleString()} of ${rows.length.toLocaleString()} shown`;
+        el.querySelector('#mg-n-all').textContent = rows.length.toLocaleString();
+        el.querySelector('#mg-n-shown').textContent = shown.toLocaleString();
+        el.querySelector('#mg-n-hidden').textContent = hid.toLocaleString();
+        el.querySelectorAll('[data-prefix]').forEach(b => b.classList.toggle('active', hid > 0 && byPrefix.get(b.dataset.prefix).some(n => !hiddenNow.has(n))));
       };
-      // Drag a row by its handle to reorder (touch and mouse).
-      const list = el.querySelector('.glist');
+      // ---- filter (search text + All/Shown/Hidden); only runs when those change, never on a toggle
+      const visible = () => rows.filter(r => !r.li.hidden);
+      const filter = () => {
+        const f = foldName(q), words = f ? f.split(' ') : [];
+        let n = 0;
+        for (const r of rows) {
+          const ok = (view === 'all' || (view === 'hidden') === r.h) && words.every(w => r.hay.includes(w));
+          r.li.hidden = !ok; if (ok) n++;
+        }
+        el.querySelectorAll('[data-view]').forEach(b => { b.classList.toggle('active', b.dataset.view === view); b.setAttribute('aria-pressed', String(b.dataset.view === view)); });
+        const narrowed = !!f || view !== 'all';
+        const [bShow, bHide, bOnly] = el.querySelectorAll('[data-bulk]');
+        bShow.textContent = narrowed ? 'Show these' : 'Show all';
+        bHide.textContent = narrowed ? 'Hide these' : 'Hide all';
+        bOnly.disabled = !narrowed || !n || n === rows.length;
+        bShow.disabled = bHide.disabled = !n;
+        none.hidden = n > 0;
+        if (!n) none.innerHTML = `<p>${f ? `No group matches “${esc(q.trim())}”.` : view === 'hidden' ? 'No hidden groups.' : 'No shown groups.'}</p>${narrowed ? '<button class="btn small" data-act="clear">Clear search</button>' : ''}`;
+        buildRail();
+      };
+      qEl.oninput = () => { q = qEl.value; requestAnimationFrame(filter); };
+      qEl.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); qEl.blur(); } };   // "Search" closes the keyboard so the rows are visible
+      // ---- paint hidden state in place (class flips only)
+      const paint = () => {
+        hiddenNow = hiddenSet();
+        for (const r of rows) {
+          const h = hiddenNow.has(r.g.name);
+          if (r.h !== h) { r.h = h; r.li.classList.toggle('is-hidden', h); r.li.firstElementChild.setAttribute('aria-checked', String(!h)); }
+        }
+        sum();
+      };
+      const commit = next => { setGroupsHidden(p, next); paint(); persistSoon(); };
+      const bulk = (op, label) => {
+        const before = hiddenSet(), targets = visible().map(r => r.g.name), all = allNames();
+        const after = bulkHidden(before, all, targets, op);
+        const n = changedCount(before, after, all);
+        if (!n) return toast('Nothing to change');
+        commit(after);
+        toast(`${label} ${plural(n, 'group')}`, { action: 'Undo', fn: () => commit(before) });
+      };
+      // ---- sort / custom order (synced as gprefs, never touches the playlist's channels)
+      const saveOrder = () => { gpSet(p, tab, 'order', rows.map(r => r.g.name)); persistSoon(); };
+      const SORT_LABEL = { provider: 'Playlist order', az: 'A–Z', count: 'Biggest first', custom: 'Custom order' };
+      const markSort = () => { el.querySelectorAll('[data-sort]').forEach(b => b.classList.toggle('active', b.dataset.sort === sort)); el.querySelector('#mg-sortlbl').textContent = SORT_LABEL[sort]; };
+      const applySort = s => {
+        if (s === 'custom' && !gpGet(p, tab, 'order')?.length) gpSet(p, tab, 'order', rows.map(r => r.g.name));
+        sort = s; gpSet(p, tab, 'sort', s); persistSoon();
+        const by = new Map(rows.map(r => [r.g, r]));
+        rows = orderGroups(rows.map(r => r.g), { sort, order: gpGet(p, tab, 'order') || [] }, g => titleOf(g.name)).map(g => by.get(g));
+        list.replaceChildren(...rows.map(r => r.li));
+        markSort(); buildRail();
+      };
+      const toCustom = () => { if (sort !== 'custom') { sort = 'custom'; gpSet(p, tab, 'sort', 'custom'); markSort(); buildRail(); } };
+      const move = (r, where) => {
+        toCustom();
+        const li = r.li;
+        if (where === 'top') list.prepend(li); else if (where === 'bottom') list.append(li);
+        else if (where < 0 && li.previousElementSibling) li.previousElementSibling.before(li);
+        else if (where > 0 && li.nextElementSibling) li.nextElementSibling.after(li);
+        rows = [...list.children].map(x => x._r);
+        saveOrder();
+        li.scrollIntoView({ block: 'nearest' });
+        if (!reorder) toast(where === 'top' ? 'Moved to top' : 'Moved to bottom');
+      };
+      // ---- reorder mode (arrows + drag handles; every group is listed so nothing is skipped)
+      const setReorder = on => {
+        reorder = on;
+        if (on) { qEl.value = ''; q = ''; view = 'all'; filter(); toCustom(); if (!gpGet(p, tab, 'order')?.length) saveOrder(); }
+        root.classList.toggle('reordering', on);
+        el.querySelector('[data-act="reorder"]').textContent = on ? 'Finish' : 'Reorder';
+        qEl.disabled = on;
+        buildRail();
+      };
       let drag = null;
-      list.onpointerdown = e => {
+      list.addEventListener('pointerdown', e => {
         const h = e.target.closest('[data-act="drag"]');
-        if (!h) return;
+        if (!h || !reorder) return;
         drag = { li: h.closest('li'), x: e.clientX, y: e.clientY };
         drag.li.classList.add('dragging');
         h.setPointerCapture(e.pointerId);
         e.preventDefault();
-        setTimeout(autoScroll, 16);
-      };
+        autoScroll();
+      });
       const placeAt = (x, y) => {
-        const over = document.elementFromPoint(x, y)?.closest('.glist > li');
+        const over = document.elementFromPoint(x, y)?.closest('.mg-list > li');
         if (!over || over === drag.li) return;
         const r = over.getBoundingClientRect();
         list.insertBefore(drag.li, y < r.top + r.height / 2 ? over : over.nextSibling);
       };
-      // Holding a group near the top or bottom edge scrolls the list, faster the closer you get,
-      // so a group can be carried any distance in one drag.
-      const EDGE = 110;
-      const autoScroll = () => {
+      const autoScroll = () => {   // near the edges the list scrolls, faster the closer you get
         if (!drag) return;
-        const r = el.getBoundingClientRect(), lr = list.getBoundingClientRect();
-        const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
-        const v = drag.y < top + EDGE ? -(top + EDGE - drag.y) : drag.y > bottom - EDGE ? drag.y - (bottom - EDGE) : 0;
-        if (v) {
-          el.scrollTop += Math.max(-28, Math.min(28, v / 2.5));
-          // The finger may be over the sheet's header (or above the sheet): place against the nearest visible row.
-          placeAt(drag.x, Math.min(Math.max(drag.y, Math.max(top, lr.top) + 6), Math.min(bottom, lr.bottom) - 6));
-        }
+        const r = body.getBoundingClientRect(), EDGE = 90;
+        const v = drag.y < r.top + EDGE ? -(r.top + EDGE - drag.y) : drag.y > r.bottom - EDGE ? drag.y - (r.bottom - EDGE) : 0;
+        if (v) { body.scrollTop += Math.max(-26, Math.min(26, v / 2.5)); placeAt(drag.x, Math.min(Math.max(drag.y, r.top + 6), r.bottom - 6)); }
         setTimeout(autoScroll, 16);
       };
-      list.onpointermove = e => {
-        if (!drag) return;
-        drag.x = e.clientX; drag.y = e.clientY;
-        placeAt(e.clientX, e.clientY);
+      list.addEventListener('pointermove', e => { if (!drag) return; drag.x = e.clientX; drag.y = e.clientY; placeAt(e.clientX, e.clientY); });
+      const endDrag = () => { if (!drag) return; drag.li.classList.remove('dragging'); drag = null; toCustom(); rows = [...list.children].map(x => x._r); saveOrder(); };
+      list.addEventListener('pointerup', endDrag); list.addEventListener('pointercancel', endDrag);
+      // ---- jump rail (A-Z sorting, 40+ groups): touch or drag along the letters
+      function buildRail() {
+        const show = !reorder && sort === 'az' && rows.length >= 40;
+        rail.hidden = !show;
+        body.classList.toggle('has-rail', show);
+        if (!show) return;
+        rail.style.top = `${body.offsetTop + 6}px`; rail.style.bottom = `${root.clientHeight - body.offsetTop - body.offsetHeight + 6}px`;
+        rail.innerHTML = [...new Set(rows.filter(r => !r.li.hidden).map(r => r.li.dataset.l))].map(l => `<span data-l="${esc(l)}">${esc(l)}</span>`).join('');
+      }
+      const jump = y => {
+        const spans = [...rail.children]; if (!spans.length) return;
+        const rr = rail.getBoundingClientRect();
+        const s = spans[Math.max(0, Math.min(spans.length - 1, Math.floor((y - rr.top) / rr.height * spans.length)))];
+        const li = rows.find(r => !r.li.hidden && r.li.dataset.l === s.dataset.l)?.li;
+        if (li) body.scrollTop += li.getBoundingClientRect().top - body.getBoundingClientRect().top - 4;
+        rail.dataset.cur = s.dataset.l;
       };
-      list.onpointerup = list.onpointercancel = async () => {
-        if (!drag) return;
-        remember();
-        drag.li.classList.remove('dragging');
-        drag = null;
-        await applyOrder([...list.children].map(li => groups[+li.dataset.i].name));
+      let railDown = false;
+      rail.addEventListener('pointerdown', e => { railDown = true; rail.setPointerCapture(e.pointerId); jump(e.clientY); e.preventDefault(); });
+      rail.addEventListener('pointermove', e => { if (railDown) jump(e.clientY); });
+      const railUp = () => { railDown = false; delete rail.dataset.cur; };
+      rail.addEventListener('pointerup', railUp); rail.addEventListener('pointercancel', railUp);
+      // ---- per-group actions (an in-sheet layer: the list underneath keeps its scroll and search)
+      const closeLayer = () => { layer.hidden = true; layer.innerHTML = ''; };
+      const layerOpen = html => { layer.innerHTML = html; layer.hidden = false; };
+      const heavy = async fn => { const m = memoNow(); await flush(); await fn(); groupsSheet(p, tab, m); };   // dialogs replace the sheet: reopen where we were
+      const toggleKey = async (key, name) => {
+        const set = new Set(p[key] || []);
+        if (set.has(name)) set.delete(name); else set.add(name);
+        p[key] = [...set]; await save(p);
       };
-      el.onclick = async e => {
-        remember();   // menus close the sheet before their action runs, so note the place now
-        const srt = e.target.closest('[data-sort]');
-        if (srt) {
-          const names = groups.map(g => g.name);
-          const s = srt.dataset.sort;
-          if (s === 'az') return applyOrder([...names].sort((a, b) => collator.compare(prettyGroup(a), prettyGroup(b))));
-          if (s === 'count') return applyOrder([...groups].sort((a, b) => b.count - a.count).map(g => g.name));
-          if (s === 'shown') return applyOrder([...names.filter(n => !hidden.has(n)), ...names.filter(n => hidden.has(n))]);
-        }
-        const pc = e.target.closest('[data-prefix]');
-        if (pc) {
-          const k = pc.dataset.prefix;
-          if (k === '*') return setHidden(s => s.clear());
-          const names = byPrefix.get(k) || [];
-          // First tap from "everything visible" = only this country. After that, taps add or remove a country.
-          if (hidden.size === 0) return setHidden(s => { groups.forEach(g => s.add(g.name)); names.forEach(n => s.delete(n)); });
-          if (prefixOn(k)) return setHidden(s => names.forEach(n => s.add(n)));
-          return setHidden(s => names.forEach(n => s.delete(n)));
-        }
-        const bulk = e.target.closest('[data-bulk]');
-        if (bulk) {
-          const names = visibleRows().map(li => groups[rows.indexOf(li)].name);
-          const act = bulk.dataset.bulk;
-          if (act === 'all') return setHidden(s => s.clear());
-          if (act === 'only') return setHidden(s => { groups.forEach(g => s.add(g.name)); names.forEach(n => s.delete(n)); });
-          if (act === 'hide') return setHidden(s => names.forEach(n => s.add(n)));
-          if (act === 'show') return setHidden(s => names.forEach(n => s.delete(n)));
-        }
-        const b = e.target.closest('[data-act]');
-        if (!b) return;
-        const i = +b.dataset.g;
-        const g = groups[i];
-        if (b.dataset.act === 'eye') return setHidden(s => { if (s.has(g.name)) s.delete(g.name); else s.add(g.name); });
-        if (b.dataset.act === 'drag') return;
-        if (b.dataset.act === 'pin') {
-          const set = new Set(p.homeGroups || []);
-          if (set.has(g.name)) set.delete(g.name); else set.add(g.name);
-          p.homeGroups = groups.map(x => x.name).filter(n => set.has(n));   // keep the list's order
-          await save(p);
-          b.classList.toggle('on', set.has(g.name));   // in place: no re-render, so the list stays where you are
-          if (!state.current) showHome();             // Home's tiles sit under the sheet
-          return;
-        }
-        const toggle = async (key, name) => {
-          const set = new Set(p[key] || []);
-          if (set.has(name)) set.delete(name); else set.add(name);
-          if (key === 'hiddenGroups') setGroupsHidden(p, set); else p[key] = [...set];
-          await save(p);
-          rerender();
-          reopen();
-        };
-        const inGroup = p.channels.filter(c => (c.group || '') === g.name);
-        const others = groups.map(x => x.name).filter(n => n !== g.name);
-        menu(prettyGroup(g.name) || UNGROUPED, [
-          { label: hidden.has(g.name) ? 'Show group' : 'Hide group', fn: () => toggle('hiddenGroups', g.name) },
-          tab === 'live' && { label: 'Move to top', fn: () => applyOrder([g.name, ...others]) },
-          tab === 'live' && { label: 'Move to bottom', fn: () => applyOrder([...others, g.name]) },
-          { label: locked.has(g.name) ? 'Unlock group' : 'Lock with PIN', fn: async () => {
-            if (locked.has(g.name)) { if (await unlock()) toggle('lockedGroups', g.name); return; }
-            if (!state.settings.pinHash && !await setPin()) return;
-            toggle('lockedGroups', g.name);
-          } },
-          tab === 'live' && { label: 'Rename…', fn: async () => {
-            const v = await formSheet({ title: 'Rename group', fields: [{ name: 'name', label: 'Group name', value: g.name }], submit: 'Rename' });
-            if (!v) return;
-            inGroup.forEach(c => { c.group = v.name; });
+      const retitle = r => {
+        const n = r.g.name;
+        r.hay = `${foldName(titleOf(n))} ${foldName(n)}`;
+        r.li.querySelector('.mg-t').lastChild.textContent = titleOf(n);
+        r.li.dataset.l = letterOf(titleOf(n));
+      };
+      const rowMenu = r => {
+        const n = r.g.name, t = titleOf(n), renamed = !!gpGet(p, tab, 'name', n);
+        const items = [
+          [r.h ? 'Show group' : 'Hide group', () => { const s = hiddenSet(); if (r.h) s.delete(n); else s.add(n); commit(s); }],
+          ['Rename…', () => renameForm(r)],
+          renamed && ['Restore original name', () => { gpSet(p, tab, 'name', '', n); persistSoon(); retitle(r); }],
+          ['Move to top', () => move(r, 'top')],
+          ['Move to bottom', () => move(r, 'bottom')],
+          tab === 'live' && [home.has(n) ? 'Remove from Home' : 'Show on Home', () => heavy(async () => {
+            if (home.has(n)) home.delete(n); else home.add(n);
+            p.homeGroups = src.map(g => g.name).filter(x => home.has(x));
             await save(p);
-            if (state.group === g.name) state.group = v.name;
-            rerender();
-            toast('Group renamed');
-            reopen();
-          } },
-          tab === 'live' && { label: `Delete group and its ${plural(g.count, 'channel')}`, danger: true, fn: async () => {
-            if (!await confirmDialog(`Delete “${g.name || UNGROUPED}” and its ${plural(g.count, 'channel')}?`, 'Delete', true)) return;
-            await deleteChannels(p, new Set(inGroup.map(c => c.id)));
-            reopen();
-          } },
-        ]);
+            if (!state.current) showHome();
+          })],
+          [locked.has(n) ? 'Unlock group' : 'Lock with PIN', () => heavy(async () => {
+            if (locked.has(n)) { if (await unlock()) await toggleKey('lockedGroups', n); return; }
+            if (!state.settings.pinHash && !await setPin()) return;
+            await toggleKey('lockedGroups', n);
+          })],
+          tab === 'live' && ['Delete group and its channels', () => heavy(async () => {
+            if (!await confirmDialog(`Delete “${n || UNGROUPED}” and its ${plural(r.g.count, 'channel')}?`, 'Delete', true)) return;
+            await deleteChannels(p, new Set(p.channels.filter(c => (c.group || '') === n).map(c => c.id)));
+          }), true],
+        ].filter(Boolean);
+        layerOpen(`<div class="mg-actions" role="menu" aria-label="${esc(t)}"><div class="mg-actions-title">${esc(t)}</div>
+          ${items.map(([label, , danger], i) => `<button role="menuitem" class="${danger ? 'danger' : ''}" data-i="${i}">${esc(label)}</button>`).join('')}
+          <button class="cancel" data-i="x">Cancel</button></div>`);
+        layer.onclick = e => {
+          const b = e.target.closest('button');
+          if (!b) return e.target === layer ? closeLayer() : undefined;
+          closeLayer();
+          if (b.dataset.i !== 'x') items[+b.dataset.i][1]();
+        };
       };
+      const renameForm = r => {
+        const n = r.g.name;
+        layerOpen(`<form class="mg-actions mg-rename"><div class="mg-actions-title">Group name</div>
+          <input name="v" value="${esc(titleOf(n))}" maxlength="120" autocomplete="off" autocorrect="off" aria-label="Group name">
+          <p class="muted">Only changes how it is shown on your devices. The provider's name stays, so hiding and syncing keep working.</p>
+          <div class="mg-two"><button type="button" class="btn" data-i="x">Cancel</button><button class="btn primary">Save</button></div></form>`);
+        const input = layer.querySelector('input'); input.focus(); input.select();
+        layer.onclick = e => { if (e.target === layer || e.target.closest('[data-i="x"]')) closeLayer(); };
+        layer.querySelector('form').onsubmit = e => {
+          e.preventDefault();
+          const v = input.value.trim();
+          gpSet(p, tab, 'name', v === prettyOf(n) ? '' : v, n);
+          persistSoon(); closeLayer(); retitle(r);
+          toast('Group renamed');
+        };
+      };
+      // ---- clicks
+      el.onclick = e => {
+        const b = e.target.closest('[data-act], [data-view], [data-sort], [data-bulk], [data-prefix]');
+        if (!b || layer.contains(b)) return;
+        const r = b.closest('li')?._r;
+        if (b.dataset.view) { view = b.dataset.view; return filter(); }
+        if (b.dataset.sort) return applySort(b.dataset.sort);
+        if (b.dataset.bulk) {
+          const op = b.dataset.bulk, narrowed = !!foldName(q) || view !== 'all';
+          return bulk(op === 'only' ? 'only' : narrowed ? op : op === 'show' ? 'showAll' : 'hideAll', op === 'only' ? 'Showing only' : op === 'show' ? 'Showed' : 'Hid');
+        }
+        if (b.dataset.prefix) {
+          const k = b.dataset.prefix, names = byPrefix.get(k) || [], before = hiddenSet(), all = allNames();
+          const anyHidden = all.some(n => before.has(n)), on = names.some(n => !before.has(n));
+          commit(bulkHidden(before, all, names, !anyHidden ? 'only' : on ? 'hide' : 'show'));
+          return toast(`${!anyHidden ? 'Only' : on ? 'Hid' : 'Showed'} ${k === 'OTHER' ? 'other' : k} groups`, { action: 'Undo', fn: () => commit(before) });
+        }
+        switch (b.dataset.act) {
+          case 'done': return closeSheet();
+          case 'reorder': return setReorder(!reorder);
+          case 'opts': { const open = b.getAttribute('aria-expanded') !== 'true'; b.setAttribute('aria-expanded', String(open)); el.querySelector('.mg-optin').hidden = !open; return; }
+          case 'clear': qEl.value = ''; q = ''; view = 'all'; filter(); return;
+          case 'newg': {
+            const hide = gpGet(p, tab, 'newg') !== 'hide';
+            gpSet(p, tab, 'newg', hide ? 'hide' : 'show');
+            if (hide) p.knownGroups = { ...(p.knownGroups || {}), [tab]: allNames() };   // today's groups are the baseline: only later ones start hidden
+            b.setAttribute('aria-checked', String(!hide)); persistSoon();
+            return toast(hide ? 'New groups will start hidden' : 'New groups will be shown');
+          }
+          case 'tog': if (!reorder && r) { const s = hiddenSet(); if (r.h) s.delete(r.g.name); else s.add(r.g.name); commit(s); } return;
+          case 'more': return r && rowMenu(r);
+          case 'up': return r && move(r, -1);
+          case 'down': return r && move(r, 1);
+        }
+      };
+      // ---- swipe a row left (touch) for its actions
+      let sw = null;
+      list.addEventListener('touchstart', e => { const li = e.target.closest('.mg-li'); sw = li && !reorder && e.touches.length === 1 ? { li, x: e.touches[0].clientX, y: e.touches[0].clientY } : null; }, { passive: true });
+      list.addEventListener('touchend', e => {
+        if (!sw) return;
+        const t = e.changedTouches[0], dx = t.clientX - sw.x, dy = t.clientY - sw.y;
+        if (dx < -70 && Math.abs(dy) < 30) { e.preventDefault(); rowMenu(sw.li._r); }
+        sw = null;
+      });
+      // ---- keyboard: "/" search, "A" show all, Esc closes the actions, then clears the search, then the sheet
+      el.onkeydown = e => {
+        if (e.key === 'Escape') { if (!layer.hidden) { closeLayer(); e.stopPropagation(); } else if (qEl.value) { qEl.value = ''; q = ''; filter(); e.stopPropagation(); } return; }
+        if (e.target.matches?.('input, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.key === '/') { e.preventDefault(); qEl.focus(); }
+        else if (e.key.toLowerCase() === 'a') { e.preventDefault(); bulk(foldName(q) || view !== 'all' ? 'show' : 'showAll', 'Showed'); }
+      };
+      markSort(); qEl.value = q; filter(); sum();
+      if (memo.scroll) body.scrollTop = memo.scroll;
+      root.focus({ preventScroll: true });
+      el._mgFlush = flush;
+    },
+    onClose: () => {
+      const el = $('#sheet');
+      el.classList.remove('mg-sheet'); el.onkeydown = null;
+      mgReopen = null;
+      const f = el._mgFlush; el._mgFlush = null;
+      Promise.resolve(f?.()).then(() => rerender());
     },
   });
 }

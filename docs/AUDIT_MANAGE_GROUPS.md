@@ -17,8 +17,7 @@ Scope: `groupsSheet()` in `js/app.js`, the chip row (`renderChips`), `setGroupsH
 ## Findings (severity ranked)
 
 ### High
-1. **Every toggle rebuilds everything.** `setHidden` -> `setGroupsHidden` -> `save(p)` (writes the WHOLE playlist, 75k
-   channels, to IndexedDB) -> `rerender()` (whole list view) -> `reopen()` (rebuilds the sheet HTML for every group,
+1. **Every toggle rebuilds everything.** `setHidden` -> `setGroupsHidden` -> `save(p)` (`putPlaylist` rewrites only changed chunks but still JSON-stringifies every chunk) -> `rerender()` (whole list view) -> `reopen()` (rebuilds the sheet HTML for every group,
    resets keyboard/focus). With 500+ groups, each tick is a visible stall and the keyboard closes. Not virtualised.
 2. **"Show only these" with a filter that matches nothing hides EVERY group** (`names = []`, then all groups are added to
    the hidden set and none removed). Also no undo for any bulk action, so a mis-tap on "Hide these"/"Show only" loses a
@@ -30,6 +29,9 @@ Scope: `groupsSheet()` in `js/app.js`, the chip row (`renderChips`), `setGroupsH
    the redraw is gated by `!state.current`, so with the live SSE push the chips/list stay stale until you navigate away.
 5. **Touch targets.** Only the 22 px checkbox toggles a group; tapping the row/name does nothing. "Options" is a small
    text button, the star 34 px, the grip is a 20 px glyph. iOS minimum is 44 px.
+
+5b. **"Show all" clears every tab's hides.** The old bulk "Show all" emptied the playlist's whole hidden set, so pressing it in
+    Movies also un-hid Live groups (the set is shared). Fixed: bulk ops only touch the current tab's names (`bulkHidden`).
 
 ### Medium
 6. **One hidden set for three tabs.** A group named "Kids" in Live and in Movies share one switch; hiding one hides both.
@@ -64,5 +66,22 @@ Per-key timestamps with tombstones in `mergeHidden` are correct for offline/merg
 older hide cannot resurrect a newer show, 90-day show-marker expiry, profile isolation, old clients unaffected. Pinning to
 Home, PIN-locking groups, delete group and the prefix chips are kept.
 
-## Plan / what was changed
-See the "Status" section appended below after the fixes.
+## Measured (headless Chrome, fake 600-group playlist, desktop-class CPU)
+Before: one toggle = full sheet rebuild of 600 rows + view redraw (~50-60 ms to next frame, several times that on a phone).
+After: one toggle flips classes on changed rows only (~1 frame); the save is debounced (400 ms) and the screen behind
+redraws once, when the sheet closes. Screenshots: `~/m3u-shots/personal-groups/before-*` and `after-*` (phone 390x844, desktop 1280x800).
+
+## Status (what was fixed / added)
+Fixed: 1, 2, 3, 4, 5 (row is the 56 px target, switch + 44 px options button, 44 px arrows/grip), 5b, 7 (accent/case/separator
+folding, matches shown title or raw name), 8 (Movies/Series incl. provider groups; "open Movies once" empty state), 9 (new
+switch), 10 (display names, synced, provider name untouched), 11 (role=switch, aria-checked, dialog label, arrow buttons for
+reorder), 12 (sticky header/search/segmented filter/bottom bar), 16, 17 (/ search, A show all, Esc layers).
+Added: "Manage" chip (1 tap from the chip row), long-press / right-click on a group chip (Hide, Rename, Move to top, Manage groups),
+All/Shown/Hidden filter with counts, "N of M shown", undo toast after every bulk action, Only these / Show these / Hide these on the
+filtered set, sorting (Playlist / A-Z / Biggest / Custom, display-only), Reorder mode (arrows + drag), A-Z jump rail, swipe-left on a
+row for its actions, region quick-pick chips (kept from the old sheet), `content-visibility` rows (no JS virtualisation needed at 600).
+Sync: new `gprefs` map in `server/sync.js` (sort, order, newg, name per playlist key + tab), same newest-wins rule as `hidden`;
+hides/order/names pushed by another device now redraw the chips even while inside a playlist and refresh an open sheet.
+Changed: the old "Rename" (rewrote every channel's group) is now a display name; "Move to top/bottom" no longer re-sort `p.channels`.
+Not done: 6 (one hidden set for three tabs is the synced key format; documented), history Back-button closing the sheet (swipe-down,
+Done and Esc work), per-group channel sorting / external player / EPG offset from TiviMate's group menu.

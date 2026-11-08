@@ -1,18 +1,10 @@
 // Caches the app shell so the app opens offline. Streams, logos and
 // playlist downloads (other origins) always go straight to the network.
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-const CACHE = 'm3u-player-v245';
-=======
-const CACHE = 'm3u-player-v246';
->>>>>>> Live sync: server pushes a tiny SSE 'changed' signal; web pulls at once (sw v246)
-=======
-const CACHE = 'm3u-player-v248';
->>>>>>> Web: Auto refresh settings for playlists and TV guide; sw cache v247
+const CACHE = 'm3u-player-v249';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/polish.css', 'css/desktop.css',
-  'js/app.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/epg-worker.js', 'js/vod.js', 'js/native.js', 'js/sports.js', 'js/fixtures.js', 'js/follow.js', 'js/watchlater.js', 'js/profiles.js', 'vendor/hls.min.js',
+  'js/app.js', 'js/groups.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/epg-worker.js', 'js/vod.js', 'js/native.js', 'js/sports.js', 'js/fixtures.js', 'js/follow.js', 'js/watchlater.js', 'js/profiles.js', 'vendor/hls.min.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 

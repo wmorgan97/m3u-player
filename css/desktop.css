@@ -48,6 +48,9 @@
   /* Sheets open as a centred dialog, not a bottom drawer */
   .sheet { bottom: auto; top: 50%; transform: translateY(-50%); max-width: 640px; max-height: 84vh; border-radius: 20px; padding-bottom: 20px; }
   .sheet-grip { display: none; }
+  .sheet.mg-sheet { top: 50%; bottom: auto; height: min(86vh, 860px); max-height: none; border-radius: 20px; padding-bottom: 0; }
+  .mg-bar { padding-bottom: 12px; }
+  .mg-sheet .mg-link:hover, .mg-more:hover, .mg-row:hover { background: var(--surface-2); }
   .ovlist { max-height: 56vh; overflow-y: auto; }
 
   /* Guide: taller, more room */
