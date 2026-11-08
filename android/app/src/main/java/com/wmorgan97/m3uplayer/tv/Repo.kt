@@ -104,14 +104,39 @@ object Repo {
     /** Groups unlocked with the PIN until the app is closed. */
     val unlocked: MutableSet<String> = ConcurrentHashMap.newKeySet()
     fun isLocked(g: String) = pin.isNotEmpty() && g in lockedGroups && g !in unlocked
-    val hiddenGroups get() = strSet("hiddenGroups")
-    fun toggleHidden(g: String) = putSet("hiddenGroups", hiddenGroups.let { if (g in it) it - g else it + g })
+    // Hidden groups / channels are per viewer profile and shared through /sync (HiddenSync.kt); the default profile keeps the old keys.
+    val hiddenGroups get() = strSet(pk("hiddenGroups"))
+    fun toggleHidden(g: String) { val on = g !in hiddenGroups; putSet(pk("hiddenGroups"), hiddenGroups.let { if (on) it + g else it - g }); stampHidden(mapOf(HiddenSync.groupKey(g) to on)) }
+    private val hiddenAt: Map<String, Long> get() = runCatching { JSONObject(prefs.getString(pk("hiddenAt"), "{}") ?: "{}").let { o -> o.keys().asSequence().associateWith { o.optLong(it) } } }.getOrDefault(emptyMap())
+    private fun saveHiddenAt(m: Map<String, Long>) = prefs.edit().putString(pk("hiddenAt"), JSONObject(m).toString()).apply()
+    private fun stampHidden(changes: Map<String, Boolean>) {
+        val now = System.currentTimeMillis()
+        saveHiddenAt(hiddenAt + changes.keys.associateWith { now })
+        guideScope.launch {
+            try { val d = JSONObject(http(api("sync"), JSONObject().put("hidden", localHidden()).toString())); syncData = d; adoptHidden(d) }
+            catch (e: Exception) { warn("saving hidden failed", e) }   // sent again with the next sync
+        }
+    }
+    private fun localHidden() = JSONObject().also { o ->
+        HiddenSync.local(hiddenGroups, hiddenChannels, hiddenAt).forEach { (k, e) -> o.put(k, JSONObject().put("h", if (e.hidden) 1 else 0).put("at", e.at)) }
+    }
+    private fun adoptHidden(d: JSONObject) {
+        val r = d.optJSONObject("hidden") ?: return
+        val remote = r.keys().asSequence().mapNotNull { k -> r.optJSONObject(k)?.let { k to HEntry(it.optInt("h") != 0, it.optLong("at")) } }.toMap()
+        val res = HiddenSync.adopt(hiddenGroups, hiddenChannels, hiddenAt, remote)
+        if (!res.changed) return
+        prefs.edit().putStringSet(pk("hiddenGroups"), res.groups).putStringSet(pk("hiddenChannels"), res.chans).apply()
+        saveHiddenAt(res.at); version++
+    }
     /** Groups moved to the top of the list, in the order they were moved. */
     val pinnedGroups: List<String> get() = (prefs.getString("pinnedGroups", "") ?: "").split('\u0001').filter { it.isNotEmpty() }
     fun togglePinned(g: String) { val l = pinnedGroups.toMutableList(); if (!l.remove(g)) l += g; prefs.edit().putString("pinnedGroups", l.joinToString("\u0001")).apply(); version++ }
-    val hiddenChannels get() = strSet("hiddenChannels")
-    fun toggleHiddenChannel(url: String) = putSet("hiddenChannels", hiddenChannels.let { if (url in it) it - url else it + url })
-    fun showAllHidden() { prefs.edit().remove("hiddenGroups").remove("hiddenChannels").apply(); version++ }
+    val hiddenChannels get() = strSet(pk("hiddenChannels"))
+    fun toggleHiddenChannel(url: String) { val on = url !in hiddenChannels; putSet(pk("hiddenChannels"), hiddenChannels.let { if (on) it + url else it - url }); stampHidden(mapOf(HiddenSync.channelKey(url) to on)) }
+    fun showAllHidden() {
+        val all = hiddenGroups.associate { HiddenSync.groupKey(it) to false } + hiddenChannels.associate { HiddenSync.channelKey(it) to false }
+        prefs.edit().remove(pk("hiddenGroups")).remove(pk("hiddenChannels")).apply(); version++; stampHidden(all)
+    }
     /** The group list as arranged on this TV: moved-to-top first, hidden ones left out. */
     fun arrange(groups: List<String>): List<String> { val hid = hiddenGroups; val pins = pinnedGroups.filter { it in groups && it !in hid }; return pins + groups.filter { it !in pins && it !in hid } }
 
@@ -469,7 +494,7 @@ object Repo {
         (syncData.optJSONObject("profiles") ?: JSONObject().also { syncData.put("profiles", it) }).put(id, e)
         version++
         syncData = JSONObject(http(api("sync"), JSONObject().put("profiles", JSONObject().put(id, e)).toString()))
-        if (name == null) prefs.edit().apply { listOf("reminders", "remDel", "follows", "followDel", "watchlater", "chanPlays", "hideScores", "hideScoresAt").forEach { remove(pk(it, id)) } }.apply()
+        if (name == null) prefs.edit().apply { listOf("hiddenGroups", "hiddenChannels", "hiddenAt", "reminders", "remDel", "follows", "followDel", "watchlater", "chanPlays", "hideScores", "hideScoresAt").forEach { remove(pk(it, id)) } }.apply()
         if (name == null) syncFile(id).delete()
         version++
     }
@@ -477,7 +502,7 @@ object Repo {
         // tvs: this TV says it exists, so the phone offers "Play on TV" (Handoff.kt).
         val me = JSONObject().put(tvName, JSONObject().put("name", tvName).put("at", System.currentTimeMillis()))
         val pid = profileId
-        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).put("watchlater", localWatchLater()).put("tvs", me).put("prefs", localPrefs()).toString(), timeout = 15_000)) } catch (e: Exception) {
+        val d = try { JSONObject(http(api("sync"), JSONObject().put("reminders", localReminders()).put("follows", localFollows()).put("watchlater", localWatchLater()).put("tvs", me).put("prefs", localPrefs()).put("hidden", localHidden()).toString(), timeout = 15_000)) } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             warn("sync failed", e)
             lastSyncErrorState.value = if (e is org.json.JSONException) "Your server's reply couldn't be read." else describe(e, "your server")
@@ -491,6 +516,7 @@ object Repo {
         adoptFollows(d)
         adoptWatchLater(d)
         adoptPrefs(d)
+        adoptHidden(d)
         version++
         if (!avatarsWarmed) { avatarsWarmed = true; runCatching { avatarRows() } }   // once per start: the picker then opens at once
         syncFile().writeText(d.toString())
