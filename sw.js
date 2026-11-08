@@ -8,7 +8,7 @@ const CACHE = 'm3u-player-v245';
 const CACHE = 'm3u-player-v246';
 >>>>>>> Live sync: server pushes a tiny SSE 'changed' signal; web pulls at once (sw v246)
 =======
-const CACHE = 'm3u-player-v247';
+const CACHE = 'm3u-player-v248';
 >>>>>>> Web: Auto refresh settings for playlists and TV guide; sw cache v247
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/polish.css', 'css/desktop.css',
