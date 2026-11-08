@@ -3898,7 +3898,11 @@ function parseEpgLocally(urls, opts) {
 // ---- on-demand guide (VPS server) ----
 // The server keeps the whole provider guide indexed; the app asks for the channels it is showing
 // (the rows on screen, the guide grid) in small batches and merges them into one Guide per playlist.
-const GUIDE_FRESH = 3 * HOUR;
+// Auto refresh (Settings): hours between updates; playlists -1 = app start only, 0 = manual only (guide: 0 = manual only).
+const refreshPlHours = () => { const v = state.settings.refreshPl; return [-1, 0, 6, 12, 24, 48].includes(v) ? v : 24; };
+const refreshEpgHours = () => { const v = state.settings.refreshEpg; return [0, 6, 12, 24, 48].includes(v) ? v : 6; };
+const guideFresh = () => (refreshEpgHours() || 30 * 24) * HOUR;   // manual: only what is missing is asked
+let plStartDone = false;
 const guideAsked = new Map();   // playlist id -> Map of channel key -> when it was last requested
 const guideQueue = new Map();   // playlist id -> channels waiting for the next batch
 let guideFlush = null;
@@ -3911,11 +3915,11 @@ function ensureGuide(channels) {
     const p = playlistOf(c);
     if (!p || p.virtual || !epgUrls(p).length) continue;
     const g = guides.get(p.id);
-    if (g && Date.now() - g.at < GUIDE_FRESH && g.key(c)) continue;
+    if (g && Date.now() - g.at < guideFresh() && g.key(c)) continue;
     const k = chanKey(c);
     let asked = guideAsked.get(p.id);
     if (!asked) guideAsked.set(p.id, asked = new Map());
-    if (!k || asked.get(k) > Date.now() - GUIDE_FRESH) continue;   // re-asked once the data is a few hours old
+    if (!k || asked.get(k) > Date.now() - guideFresh()) continue;   // re-asked once the data is a few hours old
     asked.set(k, Date.now());
     let q = guideQueue.get(p.id);
     if (!q) guideQueue.set(p.id, q = []);
@@ -3939,7 +3943,7 @@ async function flushGuide() {
       } catch {
         // Try again in a couple of minutes, not at once: re-asking straight away made the Guide screen loop
         // (Loading… → fail → re-render → re-ask) and hammer the provider's XMLTV link several times a second.
-        const retry = Date.now() - GUIDE_FRESH + 2 * 60_000;
+        const retry = Date.now() - guideFresh() + 2 * 60_000;
         list.slice(i).forEach(c => guideAsked.get(pid)?.set(chanKey(c), retry));
         refreshAfterGuide(pid);   // never leave the guide screen on "Loading…"
         break;
@@ -4033,7 +4037,7 @@ function maybeUpdateGuide(p) {
   if (canSync()) return;   // on-demand: rows fetch their own guide data as they appear
   if ((p.channels?.length || 0) > AUTO_GUIDE_MAX) return;
   const g = guides.get(p.id);
-  const stale = !g || Date.now() - g.at > 12 * HOUR;
+  const stale = !g || (refreshEpgHours() !== 0 && Date.now() - g.at > refreshEpgHours() * HOUR);
   if (stale && epgUrls(p).length && !(Date.now() - (p.epgFailedAt || 0) < HOUR)) updateGuide(p, { silent: true });
 }
 
@@ -5772,9 +5776,12 @@ async function backgroundRefresh() {
   for (const p of state.playlists) {
     // Playlist links refresh daily unless you turned that off for one (Xtream logins always do).
     const auto = p.kind === 'xtream' || (p.autoRefresh !== false && p.sourceUrl);
-    if (auto && Date.now() - (p.refreshedAt || p.createdAt) > DAY) await refreshSource(p, { silent: true });
+    const h = refreshPlHours(), age = Date.now() - (p.refreshedAt || p.createdAt);
+    const due = h === 0 ? false : h === -1 ? !plStartDone && age > HOUR : age > h * HOUR;
+    if (auto && due) await refreshSource(p, { silent: true });
     maybeUpdateGuide(p);
   }
+  plStartDone = true;
 }
 
 // ---------- Widgets (iPhone) ----------
@@ -5886,6 +5893,12 @@ async function settingsSheet() {
       })()}
       ${canSync() ? `<label class="switch"><span><b>Film &amp; TV info (TMDB)</b><span class="muted">Trending this week, backdrops, plots, cast and trailers.</span></span><button type="button" class="btn small" id="tmdb-btn">${tmdbOn ? 'Connected' : 'Set up'}</button></label>
         <label class="switch"><span><b>Ratings (OMDb)</b><span class="muted">OMDb key — adds IMDb and Rotten Tomatoes ratings.</span></span><button type="button" class="btn small" id="omdb-btn">${omdbOn ? 'Connected' : 'Set up'}</button></label>` : ''}
+      <label>Update playlists<select name="refreshPl">
+        ${[[-1, 'App start only'], [6, 'Every 6 hours'], [12, 'Every 12 hours'], [24, 'Every 24 hours'], [48, 'Every 48 hours'], [0, 'Manual only']].map(([v, l]) => `<option value="${v}" ${refreshPlHours() === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select></label>
+      <label>Update TV guide<select name="refreshEpg">
+        ${[[6, 'Every 6 hours'], [12, 'Every 12 hours'], [24, 'Every 24 hours'], [48, 'Every 48 hours'], [0, 'Manual only']].map(([v, l]) => `<option value="${v}" ${refreshEpgHours() === v ? 'selected' : ''}>${l}</option>`).join('')}
+      </select></label>
       <label>Movies &amp; series languages<select name="vodLanguage">
         ${[['en', 'English only'], ['all', 'All languages']].map(([v, l]) => `<option value="${v}" ${(s.vodLanguage || 'en') === v ? 'selected' : ''}>${l}</option>`).join('')}
       </select></label>
@@ -5918,7 +5931,7 @@ async function settingsSheet() {
         Object.assign(state.settings, {
           ...(f.has('proxy') ? { proxy: String(f.get('proxy')).trim(), streamProxy: String(f.get('streamProxy')) } : {}),
           // The iPhone app plays everything in its own VLC player: buffering / controls / .ts→HLS are web-player settings.
-          ...(isNative ? {} : { tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto') }), vodLanguage: String(f.get('vodLanguage') || 'en'), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'), prefer4k: f.get('prefer4k') === 'on', livePlayer: String(f.get('livePlayer') || state.settings.livePlayer || 'app'),
+          ...(isNative ? {} : { tsToHls: f.get('tsToHls') === 'on', nativeControls: f.get('nativeControls') === 'on', buffer: String(f.get('buffer') || 'auto') }), vodLanguage: String(f.get('vodLanguage') || 'en'), refreshPl: Number(f.get('refreshPl') ?? 24), refreshEpg: Number(f.get('refreshEpg') ?? 6), vodPlayer: String(f.get('vodPlayer') || state.settings.vodPlayer || 'app'), prefer4k: f.get('prefer4k') === 'on', livePlayer: String(f.get('livePlayer') || state.settings.livePlayer || 'app'),
           density: String(f.get('density')), accent: String(f.get('accent')), logos: f.get('logos') === 'on', numbers: f.get('numbers') === 'on',
           showNext: f.get('showNext') === 'on', mergeDupes: f.get('mergeDupes') === 'on',
           ...((f.get('hideScores') === 'on') !== !!state.settings.hideScores ? { hideScores: f.get('hideScores') === 'on', hideScoresAt: Date.now() } : {}),
