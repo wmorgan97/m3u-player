@@ -33,4 +33,22 @@ class HiddenSyncTest {
         assertEquals(setOf("http://a/1"), r.chans)
         assertEquals(emptySet<String>(), HiddenSync.adopt(r.groups, r.chans, r.at, mapOf(k to HEntry(false, 6))).chans)
     }
+
+    // The live path (SSE "changed" -> Repo.sync -> Repo.adoptHidden) runs exactly HiddenSync.adopt on the server's map.
+    @Test fun unhideFromPhoneWhileTvIsOnLiveTv() {
+        val remote = mapOf(
+            "g$S*${S}NHL Center Ice" to HEntry(true, 1),                       // the TV's own entry
+            "g${S}x:operator2.barfik.org|9|vod${S}NHL Center Ice" to HEntry(true, 1),
+            "g${S}u:http://m3u.example/list.m3u|live${S}NHL Center Ice" to HEntry(false, 1_700_000_000_000)   // phone shows it again (M3U key)
+        )
+        val r = HiddenSync.adopt(setOf("NHL Center Ice", "Adult"), emptySet(), emptyMap(), remote)
+        assertTrue(r.changed)
+        assertEquals(setOf("Adult"), r.groups)
+        assertEquals(1_700_000_000_000, r.at[HiddenSync.groupKey("NHL Center Ice")])
+        // the next poll (30 s later) brings the same map: nothing changes again, so no redraw loop
+        assertFalse(HiddenSync.adopt(r.groups, r.chans, r.at, remote).changed)
+        // and the reverse: a newer hide from an Xtream key beats the phone's older show
+        val back = mapOf("g${S}u:x|live${S}News" to HEntry(false, 5), "g${S}x:h|1|both${S}News" to HEntry(true, 9))
+        assertEquals(setOf("News"), HiddenSync.adopt(emptySet(), emptySet(), emptyMap(), back).groups)
+    }
 }

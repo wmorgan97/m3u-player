@@ -148,7 +148,7 @@ class TvActivity : ComponentActivity() {
         Handoff.start(this)   // "Play on TV" from the phone: checks for a request every few seconds while open (Handoff.kt)
         lifecycleScope.launch { while (true) { checkReminders(); delay(15_000) } }
         // Every 10 min, pick up what the other devices changed (reminders set on the phone, favourites) while the app stays open.
-        lifecycleScope.launch { while (true) { delay(10 * 60_000L); if (Repo.hasKey()) runCatching { Repo.sync() } } }
+        lifecycleScope.launch { while (true) { delay(30_000L); if (inFront && Repo.hasKey()) runCatching { Repo.sync() } } }   // fallback for the live stream (SyncStream.kt); Repo.version redraws Live TV / Guide / Settings in place
         // (Following a team no longer sets reminders by itself: guide matches on names were mostly junk.)
         // Guide auto-refresh for the channels you use most (favourites, recents, the preview's group): every 30 min it asks
         // again, and each channel actually re-downloads at most every 3 h. The server re-reads the guide source every 6 h.
