@@ -70,7 +70,9 @@ class TvActivity : ComponentActivity() {
     var who by mutableStateOf(false)
     /** False while another screen (the player) covers this one: the clock must not show through its window as it opens. */
     var inFront by mutableStateOf(true)
-    override fun onPause() { inFront = false; super.onPause() }
+    // Live sync (SyncStream.kt): pulls the moment another device changes something, only while this screen is in front.
+    private val liveSync = SyncStream({ Repo.streamUrl() }, Repo.cid, { if (Repo.hasKey()) { Repo.sync(); refresh++ } })
+    override fun onPause() { inFront = false; liveSync.stop(); super.onPause() }
     var pictureFor by mutableStateOf<Profile?>(null)   // "Change picture" (Profiles.kt)
     private var whoAsked = false
     private fun askWhoIfNeeded() { if (!whoAsked && Repo.shouldAskProfile()) { whoAsked = true; who = true } }
@@ -168,6 +170,7 @@ class TvActivity : ComponentActivity() {
     override fun onResume() {
         inFront = true
         super.onResume()
+        liveSync.start()
         if (Repo.hasKey()) lifecycleScope.launch { try { Repo.sync(); refresh++ } catch (_: Exception) {} }
         // Back from full screen on a live channel: the preview takes back the player, playing whichever channel you ended
         // on (you may have changed channel in full screen), and the window shrinks into place.

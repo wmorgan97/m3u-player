@@ -354,7 +354,11 @@ object Repo {
     fun clearCache() { app.filesDir.listFiles()?.forEach { if (it.name.startsWith("vod-") || it.name.startsWith("live-") || it.name.startsWith("group-") || it.name.startsWith("eps-") || it.name.startsWith("tmdb-") || it.name == "guide.json") it.delete() }; epsMem.clear(); overviews.clear(); groupCache.clear(); live = null; version++ }
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
-    fun api(path: String) = "$server/$path?key=${enc(key)}" + if (path == "sync" && profileId != Profiles.MAIN) "&profile=${enc(profileId)}" else ""
+    fun api(path: String) = "$server/$path?key=${enc(key)}" + (if (path == "sync" && profileId != Profiles.MAIN) "&profile=${enc(profileId)}" else "") + (if (path == "sync") "&cid=$cid" else "")
+    /** Names this app run to the server, so the live "changed" signal for our own write is ignored (SyncStream.kt). */
+    val cid: String = "tv" + java.util.UUID.randomUUID().toString().replace("-", "").take(10)
+    /** GET /sync/stream for the current profile (holds the key: never log it); null without a key. */
+    fun streamUrl(): String? = if (!hasKey()) null else "$server/sync/stream?key=${enc(key)}&cid=$cid" + if (profileId != Profiles.MAIN) "&profile=${enc(profileId)}" else ""
     /** The original picture address behind one of our server's /img links (null if it isn't one). */
     fun imgOriginal(url: String?): String? = url?.takeIf { it.startsWith("$server/img?") || it.startsWith("$server/logo?") }?.substringAfter("&u=", "")?.substringBefore('&')?.ifEmpty { null }?.let { java.net.URLDecoder.decode(it, "UTF-8") }
     /** Background logo warm-up, once per channel list: favourites' and recents' groups first, then the first 60 channels of
