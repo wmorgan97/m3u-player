@@ -18,6 +18,9 @@
 //   hidden      hidden groups / channels, per item ({ h: 1|0, at }), newest edit per key wins; showing again is a h:0 marker
 //               (kept 90 days) so other devices un-hide it too. Keys: "g\u0001<playlist key>\u0001<group name>" (the web
 //               app's sourceKey(); "*" = every playlist, which is what the TV app writes) and "c\u0001<channel url>".
+//   gprefs      Manage-groups settings per playlist + tab: { "<playlist key>\u0001<live|movies|series>\u0001<field>[\u0001<group>]":
+//               { v, at } }, newest edit per key wins. Fields: "sort" (provider|az|count|custom), "order" (group names in
+//               the custom order), "newg" (show|hide newly added groups), "name" (+ group: your display name for it).
 //
 // Viewer profiles ("Who's watching?"): playlists, settings, TVs and Play on TV stay shared; the personal lists
 // (PERSONAL below) are per profile. The default profile ("main") is the top level of the file, exactly as before
@@ -111,6 +114,7 @@ export function merge(a, b) {
     out.follows = keys.length > 200 ? Object.fromEntries(keys.sort((x, y) => f[y].at - f[x].at).slice(0, 200).map(k => [k, f[k]])) : f;
   }
   if (b.hidden && typeof b.hidden === 'object' && !Array.isArray(b.hidden)) out.hidden = mergeHidden(a.hidden, b.hidden);
+  if (b.gprefs && typeof b.gprefs === 'object' && !Array.isArray(b.gprefs)) out.gprefs = mergeGprefs(a.gprefs, b.gprefs);
   if (b.watchlater && typeof b.watchlater === 'object' && !Array.isArray(b.watchlater)) out.watchlater = mergeWatchLater(a.watchlater, b.watchlater);
   if (b.prefs && typeof b.prefs === 'object' && !Array.isArray(b.prefs)) out.prefs = mergePrefs(a.prefs, b.prefs);
   if (b.handoff && typeof b.handoff === 'object') out.handoff = mergeHandoff(a.handoff, b.handoff);
@@ -141,6 +145,26 @@ export function mergeHidden(a0, b) {
   return keys.length > MAX_HIDDEN ? Object.fromEntries(keys.sort((x, y) => (h[y].at || 0) - (h[x].at || 0)).slice(0, MAX_HIDDEN).map(k => [k, h[k]])) : h;
 }
 
+// Manage-groups settings (see gprefs above). Unknown fields, wrong shapes and oversize values are dropped.
+const GP_TABS = new Set(['live', 'movies', 'series']), MAX_GPREFS = 4000, MAX_ORDER = 3000;
+const GP_FIELDS = {
+  sort: v => ['provider', 'az', 'count', 'custom'].includes(v),
+  newg: v => v === 'show' || v === 'hide',
+  order: v => Array.isArray(v) && v.length <= MAX_ORDER && v.every(n => typeof n === 'string' && n.length <= 200),
+  name: v => typeof v === 'string' && v.length <= 120,   // '' = restore the provider's name
+};
+export function mergeGprefs(a0, b) {
+  const out = { ...(a0 && typeof a0 === 'object' ? a0 : {}) };
+  for (const [k, e] of Object.entries(b || {})) {
+    const [pk, tab, field, ...g] = k.split('\u0001');
+    if (k.length > 800 || !pk || !GP_TABS.has(tab) || !GP_FIELDS[field] || (field === 'name') !== (g.length > 0) || !e || typeof e !== 'object' || !GP_FIELDS[field](e.v)) continue;
+    const at = +e.at || 0;
+    if (at > (out[k]?.at || 0)) out[k] = { v: e.v, at };
+  }
+  const keys = Object.keys(out);
+  return keys.length > MAX_GPREFS ? Object.fromEntries(keys.sort((x, y) => out[y].at - out[x].at).slice(0, MAX_GPREFS).map(k => [k, out[k]])) : out;
+}
+
 // Preferences that follow the viewer (per profile): { <name>: { v, at } }, newest edit per name wins. Only known names
 // with a plain value: "hideScores" (Sports shows "Live" / "Full time" instead of scores).
 const PREFS = { hideScores: v => typeof v === 'boolean' };
@@ -156,8 +180,8 @@ export function mergePrefs(a, b) {
 
 // ---------- viewer profiles ----------
 export const MAIN = 'main', MAX_PROFILES = 5;
-export const PERSONAL = ['favorites', 'favAt', 'recents', 'recReset', 'progress', 'reminders', 'follows', 'watchlater', 'prefs', 'hidden'];
-const EMPTY = () => ({ favorites: [], favAt: 0, recents: [], recReset: 0, progress: {}, reminders: {}, follows: {}, watchlater: {}, prefs: {}, hidden: {} });
+export const PERSONAL = ['favorites', 'favAt', 'recents', 'recReset', 'progress', 'reminders', 'follows', 'watchlater', 'prefs', 'hidden', 'gprefs'];
+const EMPTY = () => ({ favorites: [], favAt: 0, recents: [], recReset: 0, progress: {}, reminders: {}, follows: {}, watchlater: {}, prefs: {}, hidden: {}, gprefs: {} });
 const PROFILE_KEEP = 30 * 86400_000;
 export const profileId = v => { const s = String(v || '').trim(); return /^[A-Za-z0-9_-]{1,24}$/.test(s) ? s : MAIN; };
 const liveProfiles = l => Object.entries(l || {}).filter(([k, v]) => k !== MAIN && v && !v.deleted).length;

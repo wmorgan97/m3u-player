@@ -59,3 +59,38 @@ test('laptop + phone round trip through the POST path, per profile', () => {
   post(st, { hidden: { [G(K, 'Kids')]: { h: 1, at: now } } }, 'mz');
   assert.equal(post(st, {}).hidden[G(K, 'Kids')], undefined);
 });
+
+// ---- Manage-groups settings (gprefs): sort / order / new-group policy / display names ----
+import { mergeGprefs } from '../server/sync.js';
+const P = (tab, f, g) => ['x:prov.test|u|both', tab, f, ...(g === undefined ? [] : [g])].join('\u0001');
+test('gprefs: newest edit per key wins, tabs and profiles are separate', () => {
+  let s = mergeState({}, { gprefs: { [P('live', 'sort')]: { v: 'az', at: 10 }, [P('live', 'order')]: { v: ['B', 'A'], at: 10 } } });
+  s = mergeState(s, { gprefs: { [P('live', 'sort')]: { v: 'custom', at: 20 }, [P('movies', 'newg')]: { v: 'hide', at: 5 } } });
+  s = mergeState(s, { gprefs: { [P('live', 'sort')]: { v: 'count', at: 15 } } });   // an offline device with an older edit
+  assert.equal(s.gprefs[P('live', 'sort')].v, 'custom');
+  assert.deepEqual(s.gprefs[P('live', 'order')].v, ['B', 'A']);
+  assert.equal(s.gprefs[P('movies', 'newg')].v, 'hide');
+  const profiles = { mz: { name: 'Mazie', color: 1, at: 1 } };
+  s = mergeState(s, { profiles, gprefs: { [P('live', 'sort')]: { v: 'az', at: 99 } } }, 'mz');
+  assert.equal(viewFor(s).gprefs[P('live', 'sort')].v, 'custom');
+  assert.equal(viewFor(s, 'mz').gprefs[P('live', 'sort')].v, 'az');
+});
+test('gprefs: display names need a group, junk and oversize values are dropped', () => {
+  const g = mergeGprefs({}, {
+    [P('live', 'name', 'UK| Sky')]: { v: 'Sky', at: 1 },
+    [P('live', 'name', 'Restored')]: { v: '', at: 2 },
+    [P('live', 'name')]: { v: 'no group', at: 3 },          // name without a group
+    [P('live', 'sort', 'x')]: { v: 'az', at: 3 },            // sort with a group
+    [P('live', 'sort')]: { v: 'random', at: 3 },
+    [P('tv', 'sort')]: { v: 'az', at: 3 },
+    [P('live', 'order')]: { v: [1, 2], at: 3 },
+    [P('series', 'order')]: { v: Array(3001).fill('a'), at: 3 },
+    [P('live', 'newg')]: 'show',
+  });
+  assert.deepEqual(Object.keys(g).sort(), [P('live', 'name', 'Restored'), P('live', 'name', 'UK| Sky')].sort());
+});
+test('gprefs: old clients that never send it leave it alone', () => {
+  let s = mergeState({}, { gprefs: { [P('live', 'sort')]: { v: 'az', at: 5 } } });
+  s = mergeState(s, { favorites: [], favAt: 1 });
+  assert.equal(s.gprefs[P('live', 'sort')].v, 'az');
+});
