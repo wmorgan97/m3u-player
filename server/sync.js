@@ -15,6 +15,10 @@
 //               a TV that plays it adds { taken, takenAt } (same id). Dropped after 10 minutes; TVs act only on ones < 60 s old.
 //   tvs         TV apps that have synced, per name ({ name, at }): the phone shows "Play on TV" only once a TV exists
 //
+//   hidden      hidden groups / channels, per item ({ h: 1|0, at }), newest edit per key wins; showing again is a h:0 marker
+//               (kept 90 days) so other devices un-hide it too. Keys: "g\u0001<playlist key>\u0001<group name>" (the web
+//               app's sourceKey(); "*" = every playlist, which is what the TV app writes) and "c\u0001<channel url>".
+//
 // Viewer profiles ("Who's watching?"): playlists, settings, TVs and Play on TV stay shared; the personal lists
 // (PERSONAL below) are per profile. The default profile ("main") is the top level of the file, exactly as before
 // profiles existed, so an app that doesn't know about profiles keeps reading and writing it. Other profiles live in
@@ -106,6 +110,7 @@ export function merge(a, b) {
     const keys = Object.keys(f);
     out.follows = keys.length > 200 ? Object.fromEntries(keys.sort((x, y) => f[y].at - f[x].at).slice(0, 200).map(k => [k, f[k]])) : f;
   }
+  if (b.hidden && typeof b.hidden === 'object' && !Array.isArray(b.hidden)) out.hidden = mergeHidden(a.hidden, b.hidden);
   if (b.watchlater && typeof b.watchlater === 'object' && !Array.isArray(b.watchlater)) out.watchlater = mergeWatchLater(a.watchlater, b.watchlater);
   if (b.prefs && typeof b.prefs === 'object' && !Array.isArray(b.prefs)) out.prefs = mergePrefs(a.prefs, b.prefs);
   if (b.handoff && typeof b.handoff === 'object') out.handoff = mergeHandoff(a.handoff, b.handoff);
@@ -120,6 +125,20 @@ export function merge(a, b) {
     out.tvs = keys.length > 10 ? Object.fromEntries(keys.sort((x, y) => t[y].at - t[x].at).slice(0, 10).map(k => [k, t[k]])) : t;
   }
   return out;
+}
+
+// Hidden groups and channels: newest edit (at) per key wins; "show again" stays as { h: 0 } for 90 days.
+const MAX_HIDDEN = 5000;
+export function mergeHidden(a0, b) {
+  const h = { ...(a0 && typeof a0 === 'object' ? a0 : {}) }, old = Date.now() - 90 * 86400_000;
+  for (const [k, v] of Object.entries(b)) {
+    if (k.length > 800 || !/^[gc]\u0001./s.test(k) || !v || typeof v !== 'object') continue;
+    const e = { h: v.h ? 1 : 0, at: +v.at || 0 };
+    if (!h[k] || e.at > (h[k].at || 0)) h[k] = e;
+  }
+  for (const [k, v] of Object.entries(h)) if (!v?.h && !(v?.at > old)) delete h[k];
+  const keys = Object.keys(h);
+  return keys.length > MAX_HIDDEN ? Object.fromEntries(keys.sort((x, y) => (h[y].at || 0) - (h[x].at || 0)).slice(0, MAX_HIDDEN).map(k => [k, h[k]])) : h;
 }
 
 // Preferences that follow the viewer (per profile): { <name>: { v, at } }, newest edit per name wins. Only known names
@@ -137,8 +156,8 @@ export function mergePrefs(a, b) {
 
 // ---------- viewer profiles ----------
 export const MAIN = 'main', MAX_PROFILES = 5;
-export const PERSONAL = ['favorites', 'favAt', 'recents', 'recReset', 'progress', 'reminders', 'follows', 'watchlater', 'prefs'];
-const EMPTY = () => ({ favorites: [], favAt: 0, recents: [], recReset: 0, progress: {}, reminders: {}, follows: {}, watchlater: {}, prefs: {} });
+export const PERSONAL = ['favorites', 'favAt', 'recents', 'recReset', 'progress', 'reminders', 'follows', 'watchlater', 'prefs', 'hidden'];
+const EMPTY = () => ({ favorites: [], favAt: 0, recents: [], recReset: 0, progress: {}, reminders: {}, follows: {}, watchlater: {}, prefs: {}, hidden: {} });
 const PROFILE_KEEP = 30 * 86400_000;
 export const profileId = v => { const s = String(v || '').trim(); return /^[A-Za-z0-9_-]{1,24}$/.test(s) ? s : MAIN; };
 const liveProfiles = l => Object.entries(l || {}).filter(([k, v]) => k !== MAIN && v && !v.deleted).length;

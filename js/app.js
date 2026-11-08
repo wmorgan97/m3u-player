@@ -196,6 +196,51 @@ function localSources() {
   for (const [k, at] of Object.entries(syncMeta.srcDel || {})) if (!out[k]) out[k] = { deleted: true, at };
   return out;
 }
+// Hidden groups follow you across devices: per playlist (sourceKey) and group, { h: 1|0, at }, newest edit wins
+// (server/sync.js mergeHidden). p.hiddenAt[group] is when this device last hid/showed it; a hide from before sync
+// existed goes up with at 1, so the first sync is a union and any later edit on any device beats it. The TV app writes
+// "*" (every playlist) for its groups; the newest of the playlist's own entry and "*" decides.
+const HSEP = '\u0001', hiddenKey = (k, g) => `g${HSEP}${k}${HSEP}${g}`;
+function localHidden() {
+  const out = {};
+  for (const p of state.playlists) {
+    const k = sourceKey(p);
+    if (!k) continue;
+    const at = p.hiddenAt || {};
+    for (const g of new Set([...(p.hiddenGroups || []), ...Object.keys(at)])) out[hiddenKey(k, g)] = { h: p.hiddenGroups?.includes(g) ? 1 : 0, at: at[g] || 1 };
+  }
+  return out;
+}
+/** Hides / shows [names] in playlist [p] (stamping each change for sync). Returns whether anything changed. */
+function setGroupsHidden(p, next) {
+  const before = new Set(p.hiddenGroups || []), after = new Set(next), now = Date.now();
+  p.hiddenAt = { ...(p.hiddenAt || {}) };
+  let changed = false;
+  for (const g of new Set([...before, ...after])) if (before.has(g) !== after.has(g)) { p.hiddenAt[g] = now; changed = true; }
+  p.hiddenGroups = [...after];
+  if (changed) syncSoon();
+  return changed;
+}
+async function adoptHidden(remote) {
+  let changed = false;
+  for (const p of state.playlists) {
+    const k = sourceKey(p);
+    if (!k) continue;
+    const names = new Set();
+    for (const key of Object.keys(remote)) { const [t, pk, ...g] = key.split(HSEP); if (t === 'g' && (pk === k || pk === '*')) names.add(g.join(HSEP)); }
+    const cur = new Set(p.hiddenGroups || []), at = { ...(p.hiddenAt || {}) };
+    let dirty = false;
+    for (const g of names) {
+      const own = remote[hiddenKey(k, g)], all = remote[hiddenKey('*', g)];
+      const e = own && (!all || (own.at || 0) >= (all.at || 0)) ? own : all;
+      if (!e || (e.at || 0) <= (at[g] || (cur.has(g) ? 1 : 0))) continue;
+      if (e.h) cur.add(g); else cur.delete(g);
+      at[g] = e.at; dirty = true;
+    }
+    if (dirty) { p.hiddenGroups = [...cur]; p.hiddenAt = at; await save(p); changed = true; }
+  }
+  return changed;
+}
 // Playlists added on another device: add them here too (once; a failure is retried at the next sync).
 const adoptingSources = new Set();
 async function adoptSources(remote) {
@@ -224,7 +269,7 @@ const serverApi = path => serverProxy.base.replace(/proxy$/, path) + (state.sett
 const syncApi = () => { const u = serverApi('sync'), id = deviceProfile().id; return id === MAIN ? u : `${u}${u.includes('?') ? '&' : '?'}profile=${encodeURIComponent(id)}`; };
 let syncing = null, syncAgain = false;
 const syncBody = () => JSON.stringify({
-  favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {},
+  favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {}, hidden: localHidden(),
   ...(state.settings.hideScoresAt ? { prefs: { hideScores: { v: !!state.settings.hideScores, at: state.settings.hideScoresAt } } } : {}),
   ...(Object.keys(state.profiles || {}).length ? { profiles: state.profiles } : {}) });
 async function syncNow() {
@@ -248,6 +293,7 @@ async function syncNow() {
       if (Array.isArray(d.recents) && urls(d.recents) !== urls(state.recents)) { state.recents = d.recents; db.set('recents', d.recents); changed = true; }
       if (d.progress) { state.progress = d.progress; db.set('progress', d.progress).catch(() => {}); }
       if (d.sources) adoptSources(d.sources);
+      if (d.hidden && await adoptHidden(d.hidden)) changed = true;
       if (d.reminders) await adoptReminders(d.reminders);
       if (d.follows) await adoptFollows(d.follows);
       const hs = d.prefs?.hideScores;   // Hide scores, set on another device (newest edit wins)
@@ -5312,7 +5358,7 @@ function groupsSheet(p, tab, { scroll = 0, q = '' } = {}) {
       const setHidden = async (fn) => {
         const set = new Set(p.hiddenGroups || []);
         fn(set);
-        p.hiddenGroups = [...set];
+        setGroupsHidden(p, set);
         await save(p);
         rerender();
         reopen();
@@ -5417,7 +5463,7 @@ function groupsSheet(p, tab, { scroll = 0, q = '' } = {}) {
         const toggle = async (key, name) => {
           const set = new Set(p[key] || []);
           if (set.has(name)) set.delete(name); else set.add(name);
-          p[key] = [...set];
+          if (key === 'hiddenGroups') setGroupsHidden(p, set); else p[key] = [...set];
           await save(p);
           rerender();
           reopen();
