@@ -39,3 +39,23 @@ test('old clients that never send hidden leave it alone; unknown keys are preser
   assert.deepEqual(s.futureThing, { x: 1 });
   assert.equal(merge({ hidden: s.hidden }, {}).hidden, s.hidden);
 });
+
+test('laptop + phone round trip through the POST path, per profile', () => {
+  const profiles = { mz: { name: 'Mazie', color: 1, at: 1 } };
+  const post = (st, body, prof) => { const n = mergeState(st.s, body, prof); st.s = n; return viewFor(n, prof); };
+  const st = { s: {} };
+  post(st, { profiles });
+  // phone already had its own local hide (at 1: union on first sync); laptop hides Adult later
+  post(st, { hidden: { [G(K, 'Sport')]: { h: 1, at: 1 } } });
+  let v = post(st, { hidden: { [G(K, 'Adult')]: { h: 1, at: now } } });
+  assert.equal(v.hidden[G(K, 'Adult')].h, 1);
+  assert.equal(v.hidden[G(K, 'Sport')].h, 1, 'the phone sees both: union');
+  // phone shows Adult; laptop pulls it
+  post(st, { hidden: { [G(K, 'Adult')]: { h: 0, at: now + 5 } } });
+  v = post(st, {});
+  assert.equal(v.hidden[G(K, 'Adult')].h, 0);
+  // Mazie's profile is untouched by main's hides, and vice versa
+  assert.deepEqual(viewFor(st.s, 'mz').hidden, {});
+  post(st, { hidden: { [G(K, 'Kids')]: { h: 1, at: now } } }, 'mz');
+  assert.equal(post(st, {}).hidden[G(K, 'Kids')], undefined);
+});

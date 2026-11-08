@@ -141,6 +141,7 @@ async function init() {
   syncNow();
   widgetsReady();
   if (state.playlists.length) setTimeout(() => { if (!state.playing && $('#sheet').hidden) askAlerts(); }, 6000);
+  setInterval(() => { if (!document.hidden) syncNow(); }, 60_000);   // pick up hides / favourites made on other devices without a reload
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); checkFollows(); keepFresh(); widgetFixtures(); } });
   setInterval(() => { if (!document.hidden) keepFresh(); }, 30 * MINUTE);   // open for a while: the guide and lists stay current
   setTimeout(() => { checkNewEpisodes(); checkFollows(); }, 20_000);   // after start-up, quietly
