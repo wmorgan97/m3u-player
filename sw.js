@@ -1,7 +1,11 @@
 // Caches the app shell so the app opens offline. Streams, logos and
 // playlist downloads (other origins) always go straight to the network.
 
+<<<<<<< HEAD
 const CACHE = 'm3u-player-v245';
+=======
+const CACHE = 'm3u-player-v246';
+>>>>>>> Live sync: server pushes a tiny SSE 'changed' signal; web pulls at once (sw v246)
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'css/polish.css', 'css/desktop.css',
   'js/app.js', 'js/m3u.js', 'js/db.js', 'js/player.js', 'js/ui.js', 'js/net.js', 'js/xtream.js', 'js/epg.js', 'js/epg-worker.js', 'js/vod.js', 'js/native.js', 'js/sports.js', 'js/fixtures.js', 'js/follow.js', 'js/watchlater.js', 'js/profiles.js', 'vendor/hls.min.js',
@@ -41,7 +45,7 @@ self.addEventListener('fetch', e => {
   // Only the app's own files; never the proxy, transcode, sync or guide endpoints.
   if (req.method !== 'GET' || url.origin !== location.origin
       || url.pathname.endsWith('/proxy') || url.pathname === '/hls' || url.pathname.startsWith('/hls/')
-      || url.pathname === '/sync' || url.pathname === '/avatars' || url.pathname.startsWith('/tmdb/') || url.pathname === '/guide' || url.pathname === '/vod' || url.pathname === '/download') return;
+      || url.pathname === '/sync' || url.pathname === '/sync/stream' || url.pathname === '/avatars' || url.pathname.startsWith('/tmdb/') || url.pathname === '/guide' || url.pathname === '/vod' || url.pathname === '/download') return;
   e.respondWith(caches.open(CACHE).then(async cache => {
     const fresh = fetch(req, { cache: 'no-store' }).then(res => {
       if (res.ok) cache.put(req, res.clone());

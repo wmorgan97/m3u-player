@@ -141,7 +141,7 @@ async function init() {
   syncNow();
   widgetsReady();
   if (state.playlists.length) setTimeout(() => { if (!state.playing && $('#sheet').hidden) askAlerts(); }, 6000);
-  setInterval(() => { if (!document.hidden) syncNow(); }, 60_000);   // pick up hides / favourites made on other devices without a reload
+  setInterval(() => { if (!document.hidden) { syncNow(); openLive(); } }, 60_000);   // pick up hides / favourites made on other devices without a reload
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { syncNow(); scheduleReminders(); checkNewEpisodes(); checkFollows(); keepFresh(); widgetFixtures(); } });
   setInterval(() => { if (!document.hidden) keepFresh(); }, 30 * MINUTE);   // open for a while: the guide and lists stay current
   setTimeout(() => { checkNewEpisodes(); checkFollows(); }, 20_000);   // after start-up, quietly
@@ -267,7 +267,9 @@ async function adoptSources(remote) {
 const canSync = () => serverProxy.available && !serverProxy.needsKey;
 const serverApi = path => serverProxy.base.replace(/proxy$/, path) + (state.settings.serverKey ? `?key=${encodeURIComponent(state.settings.serverKey)}` : '');
 // /sync for this device's profile (none for the default one, so the request is exactly what it always was).
-const syncApi = () => { const u = serverApi('sync'), id = deviceProfile().id; return id === MAIN ? u : `${u}${u.includes('?') ? '&' : '?'}profile=${encodeURIComponent(id)}`; };
+// cid names this tab to the server, so the live "changed" signal for our own write can be ignored (see openLive).
+const CID = Math.random().toString(36).slice(2, 12);
+const syncApi = (path = 'sync') => { let u = serverApi(path); const id = deviceProfile().id; if (id !== MAIN) u += `${u.includes('?') ? '&' : '?'}profile=${encodeURIComponent(id)}`; return `${u}${u.includes('?') ? '&' : '?'}cid=${CID}`; };
 let syncing = null, syncAgain = false;
 const syncBody = () => JSON.stringify({
   favorites: state.favorites, favAt: syncMeta.favAt, recents: state.recents, recReset: syncMeta.recReset, progress: state.progress, sources: localSources(), reminders: localReminders(), follows: localFollows(), watchlater: state.watchlater || {}, hidden: localHidden(),
@@ -319,6 +321,30 @@ async function syncNow() {
   return syncing;
 }
 const syncSoon = debounce(syncNow, 1500);
+
+// Live updates: the server pushes a tiny "changed" event (no data) when another device writes synced state; we pull at
+// once. Open only while the page is visible (cheap on battery); the 60 s poll stays as a fallback.
+let live = null, liveTry = 0, liveTimer = 0, liveProfile = null;
+const liveSync = debounce(() => syncNow(), 300);
+function closeLive() { clearTimeout(liveTimer); liveTimer = 0; if (live) { live.onerror = live.onopen = null; live.close(); live = null; } }
+function openLive() {
+  if (live || document.hidden || !canSync() || typeof EventSource === 'undefined') return;
+  liveProfile = deviceProfile().id;
+  const es = live = new EventSource(syncApi('sync/stream'));
+  es.onopen = () => { liveTry = 0; };
+  es.addEventListener('changed', e => {
+    let d = {}; try { d = JSON.parse(e.data); } catch {}
+    if (d.from !== CID) liveSync();
+  });
+  es.onerror = () => {   // the browser retries by itself, but not after an HTTP error: reconnect with a growing delay
+    if (es.readyState !== 2) return;
+    closeLive();
+    liveTimer = setTimeout(openLive, Math.min(60_000, 3000 * 2 ** Math.min(liveTry++, 5)));
+  };
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden) closeLive(); else openLive(); });
+setInterval(() => { if (live && liveProfile !== deviceProfile().id) { closeLive(); openLive(); } }, 5000);   // profile switched
+setTimeout(openLive, 1500);
 
 // ---------- Play on TV ----------
 // The phone hands a title (and where you are in it) to the TV app through your server (js/handoff.js, server/sync.js).

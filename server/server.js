@@ -176,7 +176,7 @@ export function createAppServer() {
     try { url = new URL(req.url, 'http://local'); } catch { return send(res, 400, 'Bad request'); }   // e.g. '//' would crash the server
     if (req.method === 'OPTIONS') return send(res, 204, '');
     if (url.pathname === '/sync' && req.method === 'POST') console.log(`[sync] ${(req.headers['user-agent'] || '').replace(/^.*?\(([^;)]+).*$/, '$1')}`);
-    if (url.pathname === '/sync') return handleSync(req, res, url, send).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
+    if (url.pathname === '/sync' || url.pathname === '/sync/stream') return handleSync(req, res, url, send).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/avatars' || url.pathname.startsWith('/avatar/')) return handleAvatar(req, res, url, send).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, 'Server error'); });
     if (url.pathname === '/log' && req.method === 'POST') return handleClientLog(req, res, url);
     if (url.pathname.startsWith('/tmdb/')) return handleTmdb(req, res, url, send);

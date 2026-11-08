@@ -190,6 +190,7 @@ export async function setProfileAvatar(id, avatar, now = Date.now()) {
   if (avatar) e.avatar = avatar;
   stored = { ...s, profiles: mergeProfiles(s.profiles, { [id]: e }) };
   persist();
+  notifyChanged('*');
   return stored.profiles[id] || e;
 }
 function persist() {
@@ -281,6 +282,40 @@ export function mergeWatchLater(a0, b) {
   return keys.length > MAX_WATCHLATER ? Object.fromEntries(keys.sort((x, y) => (w[y].at || 0) - (w[x].at || 0)).slice(0, MAX_WATCHLATER).map(k => [k, w[k]])) : w;
 }
 
+// ---------- live change signal (Server-Sent Events) ----------
+//   GET /sync/stream?key=…&profile=<id>&cid=<client id>   text/event-stream, retry: 3000, a ": hb" comment every 20 s
+//   event: changed   data: {"v":<ms>,"p":"<profile id, or * for shared state>","from":"<cid of the writer, if sent>"}
+// No user data is in the event: a device that gets one just pulls /sync. Personal lists notify that profile's streams,
+// shared state (playlists, settings, profiles, TVs, Play on TV) notifies every stream. Only real changes are signalled.
+export const MAX_STREAMS = 20, HEARTBEAT_MS = +process.env.SYNC_HEARTBEAT_MS || 20_000;
+const streams = new Set();   // { res, profile, cid }
+let heartbeat = null;
+export const streamCount = () => streams.size;
+const cidOf = v => { const s = String(v || '').trim(); return /^[A-Za-z0-9_.-]{1,40}$/.test(s) ? s : ''; };
+function stopHeartbeat() { if (!streams.size && heartbeat) { clearInterval(heartbeat); heartbeat = null; } }
+function dropStream(st) { streams.delete(st); stopHeartbeat(); }
+export function notifyChanged(scope, from, now = Date.now()) {
+  if (!streams.size) return;
+  const msg = `event: changed\ndata: ${JSON.stringify({ v: now, p: scope === '*' ? '*' : profileId(scope), ...(from ? { from } : {}) })}\n\n`;
+  for (const st of [...streams]) {
+    if (scope !== '*' && st.profile !== profileId(scope)) continue;
+    try { st.res.write(msg); } catch { dropStream(st); }
+  }
+}
+function openStream(req, res, url, send) {
+  if (streams.size >= MAX_STREAMS) return send(res, 503, 'Too many streams', { 'retry-after': '30' });
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no', connection: 'keep-alive' });
+  res.write('retry: 3000\n\n');
+  const st = { res, profile: profileId(url.searchParams.get('profile')), cid: cidOf(url.searchParams.get('cid')) };
+  streams.add(st);
+  if (!heartbeat) { heartbeat = setInterval(() => { for (const x of [...streams]) { try { x.res.write(': hb\n\n'); } catch { dropStream(x); } } }, HEARTBEAT_MS); heartbeat.unref?.(); }
+  const done = () => dropStream(st);
+  req.on('close', done); res.on('close', done); res.on('error', done);
+}
+/** The part of a stored state that other devices can see changing (TV "last seen" stamps change on every sync, so they don't count). */
+const fingerprint = s => { const { tvs, ...rest } = s || {}; return JSON.stringify(rest); };
+const SHARED_KEYS = k => !PERSONAL.includes(k) && k !== 'profile' && k !== 'p';
+
 export async function handleSync(req, res, url, send) {
   if (PROXY_KEY && url.searchParams.get('key') !== PROXY_KEY) return send(res, 403, 'Wrong or missing key');
   if (req.method !== 'POST' && url.searchParams.has('handoff')) {
@@ -289,12 +324,18 @@ export async function handleSync(req, res, url, send) {
     return send(res, 200, JSON.stringify(handoffView(await load())), { 'content-type': 'application/json', 'cache-control': 'no-store' });
   }
   const profile = url.searchParams.get('profile');
+  if (req.method !== 'POST' && url.pathname === '/sync/stream') return openStream(req, res, url, send);
   if (req.method !== 'POST') return send(res, 200, JSON.stringify(viewFor(await load(), profile)), { 'content-type': 'application/json' });
   let incoming;
   try { incoming = JSON.parse(await readBody(req)); } catch { return send(res, 400, 'Bad body'); }
   // The server's own clock dates a new handoff, so phone/TV clocks that disagree can't make it look stale or fresh.
   if (incoming?.handoff && typeof incoming.handoff === 'object' && !incoming.handoff.taken) incoming.handoff.sent = Date.now();
-  stored = mergeState(await load(), incoming || {}, profile);
+  const before = await load(), beforeFp = streams.size ? fingerprint(before) : '';
+  stored = mergeState(before, incoming || {}, profile);
   persist();
+  if (streams.size && fingerprint(stored) !== beforeFp) {
+    const shared = Object.keys(incoming && typeof incoming === 'object' ? incoming : {}).some(SHARED_KEYS);
+    notifyChanged(shared ? '*' : profile, cidOf(url.searchParams.get('cid') || req.headers['x-client-id']));
+  }
   send(res, 200, JSON.stringify(viewFor(stored, profile)), { 'content-type': 'application/json', 'cache-control': 'no-store' });
 }
